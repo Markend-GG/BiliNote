@@ -12,8 +12,13 @@ RUN pnpm run build
 # 在现有 GPU 镜像上叠加：新前端构建产物 + 修补后的后端
 # （chat 贴图问答 / 公式渲染 / 笔记编辑保存）
 FROM bilinote-gpu:local
+# 禁用 HF 的 xet 传输协议（国内镜像/代理链路下经典 HTTP 下载更稳）
+ENV HF_HUB_DISABLE_XET=1
+# hub 0.30 实际只看 hf_xet 包是否存在（不读环境变量），必须卸载才能真正禁用
+RUN /usr/local/bin/pip uninstall -y hf-xet || true
 RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
 COPY --from=ui /app/dist/ /usr/share/nginx/html/
 COPY backend/app/routers/chat.py /app/backend/app/routers/chat.py
 COPY backend/app/services/chat_service.py /app/backend/app/services/chat_service.py
 COPY backend/app/routers/note.py /app/backend/app/routers/note.py
+COPY backend/app/routers/config.py /app/backend/app/routers/config.py

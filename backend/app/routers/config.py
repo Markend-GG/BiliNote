@@ -312,9 +312,13 @@ def _do_download_whisper(model_size: str):
         logger.info(f"开始下载 whisper 模型: {model_size} ← {target}")
         # 跟 faster-whisper utils.py 用同样的 allow_patterns，避免多下无关文件；
         # 不传 local_dir 让它走 HF 默认 cache 布局（与加载逻辑对齐）
+        # 有代理时显式走官方端点：hf-mirror 对部分文件仅做 308 跳转且不带
+        # X-Repo-Commit 头，新版 huggingface_hub 会判定 "Distant resource does not
+        # seem to be on huggingface.co" 而拒绝；官方端点响应头完整（配合代理可用）。
         snapshot_download(
             target,
             cache_dir=model_dir,
+            endpoint="https://huggingface.co" if proxy else None,
             allow_patterns=[
                 "config.json",
                 "preprocessor_config.json",
