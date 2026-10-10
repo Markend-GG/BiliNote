@@ -26,7 +26,8 @@ SYSTEM_PROMPT = """你是一个视频笔记问答助手。你拥有以下能力�
 - 如果初始检索内容不足以回答问题，请主动调用工具获取更多信息
 - 回答关于视频具体原话、细节时，用 lookup_transcript 查询原文
 - 回答关于作者、标题等基本信息时，用 get_video_info 查询
-- 请用中文回答，保持简洁准确"""
+- 请用中文回答，保持简洁准确
+- 如果用户消息中附带了图片（题目截图、图表等），请优先结合图片内容回答"""
 
 
 def _build_context(chunks: list[dict]) -> str:
@@ -72,6 +73,7 @@ def chat(
     history: list[dict],
     provider_id: str,
     model_name: str,
+    images: Optional[list[str]] = None,
 ) -> dict:
     """
     RAG + Tool Calling 问答。
@@ -83,7 +85,8 @@ def chat(
     vector_store = VectorStoreManager()
 
     # 1. 检索初始上下文
-    chunks = vector_store.query(task_id, question, n_results=6)
+    query_text = question.strip() or "请结合图片内容回答问题"
+    chunks = vector_store.query(task_id, query_text, n_results=6)
     context = _build_context(chunks) if chunks else "（未检索到相关内容，请使用工具查询）"
     sources = _build_sources(chunks) if chunks else []
 
@@ -94,7 +97,16 @@ def chat(
     for msg in history[-20:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
 
-    messages.append({"role": "user", "content": question})
+    if images:
+        content = [{"type": "text", "text": query_text}]
+        for img in images[:4]:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": img, "detail": "auto"},
+            })
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": question})
 
     # 3. 获取 LLM client
     provider = ProviderService.get_provider_by_id(provider_id)

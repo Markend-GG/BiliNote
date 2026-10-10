@@ -174,6 +174,47 @@ def delete_task(data: RecordRequest):
         return R.error(msg=e)
 
 
+class UpdateNoteRequest(BaseModel):
+    task_id: str
+    markdown: str
+
+
+def _reindex_note(task_id: str):
+    try:
+        from app.services.vector_store import VectorStoreManager
+        VectorStoreManager().index_task(task_id)
+        logger.info(f"编辑后重新索引完成: {task_id}")
+    except Exception as e:
+        logger.warning(f"编辑后重新索引失败（不影响笔记）: {e}")
+
+
+@router.post('/update_note')
+def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
+    """保存用户手动编辑后的笔记内容（同步更新索引，供 AI 问答使用）。"""
+    if not data.markdown.strip():
+        return R.error(msg='笔记内容不能为空')
+    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
+    if not os.path.exists(note_path):
+        return R.error(msg='笔记文件不存在，无法保存')
+    try:
+        with open(note_path, 'r', encoding='utf-8') as f:
+            note_data = json.load(f)
+        note_data['markdown'] = data.markdown
+        with open(note_path, 'w', encoding='utf-8') as f:
+            json.dump(note_data, f, ensure_ascii=False, indent=2)
+
+        md_cache = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
+        with open(md_cache, 'w', encoding='utf-8') as f:
+            f.write(data.markdown)
+
+        background_tasks.add_task(_reindex_note, data.task_id)
+        logger.info(f"笔记已手动编辑保存: {data.task_id}")
+        return R.success(msg='保存成功')
+    except Exception as e:
+        logger.error(f"保存笔记失败: {e}")
+        return R.error(msg=f'保存失败: {e}')
+
+
 @router.post("/upload")
 async def upload(file: UploadFile = File(...)):
     os.makedirs(UPLOAD_DIR, exist_ok=True)

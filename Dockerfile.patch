@@ -1,0 +1,19 @@
+# 构建前端（与官方 Dockerfile.complete 一致的 node:20 + pnpm 9.15 环境，走国内镜像）
+FROM docker.m.daocloud.io/library/node:20-alpine AS ui
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+COPY BillNote_frontend/package.json BillNote_frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY BillNote_frontend/ ./
+ENV DOCKER_BUILD=1
+RUN pnpm run build
+
+# 在现有 GPU 镜像上叠加：新前端构建产物 + 修补后的后端
+# （chat 贴图问答 / 公式渲染 / 笔记编辑保存）
+FROM bilinote-gpu:local
+RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
+COPY --from=ui /app/dist/ /usr/share/nginx/html/
+COPY backend/app/routers/chat.py /app/backend/app/routers/chat.py
+COPY backend/app/services/chat_service.py /app/backend/app/services/chat_service.py
+COPY backend/app/routers/note.py /app/backend/app/routers/note.py

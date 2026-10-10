@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
+import { Copy, Download, BrainCircuit, MessageSquare, Pencil } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -30,6 +30,8 @@ interface NoteHeaderProps {
   setShowTranscribe: (show: boolean) => void
   showChat?: false | 'half' | 'full'
   setShowChat?: (mode: false | 'half' | 'full') => void
+  onEdit?: () => void
+  editing?: boolean
 }
 
 export function MarkdownHeader({
@@ -49,6 +51,8 @@ export function MarkdownHeader({
   setShowChat,
   viewMode,
   setViewMode,
+  onEdit,
+  editing,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
 
@@ -169,6 +173,25 @@ export function MarkdownHeader({
             <TooltipContent>下载为 Markdown 文件</TooltipContent>
           </Tooltip>
         </TooltipProvider>
+        {onEdit && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={onEdit}
+                  variant={editing ? 'default' : 'ghost'}
+                  size="sm"
+                  className="h-8 px-2"
+                  disabled={editing}
+                >
+                  <Pencil className="mr-1.5 h-4 w-4" />
+                  <span className="text-sm">{editing ? '编辑中' : '编辑'}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>编辑笔记内容（可删除重复的图片行）</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>

@@ -70,6 +70,11 @@ export const get_task_status = async (task_id: string) => {
     // 错误提示
     toast.error('笔记生成失败，请稍后重试')
 
-    throw e // 抛出错误以便调用方处理
+    throw e
   }
+}
+
+/** 保存手动编辑后的笔记（同步更新后端文件与 AI 问答索引） */
+export const update_note = async (task_id: string, markdown: string) => {
+  return await request.post('/update_note', { task_id, markdown })
 }

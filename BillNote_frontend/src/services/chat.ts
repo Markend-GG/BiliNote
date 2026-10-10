@@ -35,8 +35,10 @@ export const askQuestion = async (data: {
   history: ChatMessage[]
   provider_id: string
   model_name: string
+  /** 可选：data:image/...;base64,... 形式的多模态图片（最多 4 张） */
+  images?: string[]
 }): Promise<AskResponse> => {
-  return await request.post('/chat/ask', data, { timeout: 60000 })
+  return await request.post('/chat/ask', data, { timeout: 180000 })
 }
 
 export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {

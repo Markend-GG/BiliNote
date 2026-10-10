@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Markmap } from 'markmap-view'
 import { transformer } from '@/lib/markmap.ts'
+import { normalizeMathDelimiters } from '@/utils/math'
 import { Toolbar } from 'markmap-toolbar'
 import 'markmap-toolbar/dist/style.css'
 import JSZip from 'jszip'
@@ -93,7 +94,7 @@ function stripMindmapImages(markdown: string) {
 }
 
 function transformMindmap(markdown: string) {
-  return transformer.transform(stripMindmapImages(markdown))
+  return transformer.transform(normalizeMathDelimiters(stripMindmapImages(markdown)))
 }
 
 function createExportSvg(svgEl: SVGSVGElement) {

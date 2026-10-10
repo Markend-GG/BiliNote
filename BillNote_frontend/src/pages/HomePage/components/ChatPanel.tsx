@@ -1,16 +1,21 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, type ClipboardEvent } from 'react'
 import { Bubble, Sender } from '@ant-design/x'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2 } from 'lucide-react'
+import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2, X } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
 import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatus } from '@/services/chat'
+import { normalizeMathDelimiters } from '@/utils/math'
 
 type ChatMode = 'half' | 'full'
+
+const MAX_IMAGES = 4
 
 interface ChatPanelProps {
   taskId: string
@@ -48,8 +53,30 @@ function SourceBadges({ sources }: { sources: ChatSource[] }) {
   )
 }
 
+function UserContent({ content, images }: { content: string; images?: string[] }) {
+  if (!images || images.length === 0) {
+    return <div className="whitespace-pre-wrap">{content}</div>
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap justify-end gap-1.5">
+        {images.map((src, i) => (
+          <img
+            key={i}
+            src={src}
+            alt={`图片${i + 1}`}
+            className="max-h-40 max-w-[160px] rounded border border-white/20 object-cover"
+          />
+        ))}
+      </div>
+      {content ? <div className="whitespace-pre-wrap">{content}</div> : null}
+    </div>
+  )
+}
+
 export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
   const [input, setInput] = useState('')
+  const [images, setImages] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
 
@@ -98,10 +125,39 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     }
   }, [taskId])
 
+  // 支持把剪贴板里的图片直接粘贴进来（Ctrl+V）
+  const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const files: File[] = []
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const f = item.getAsFile()
+        if (f) files.push(f)
+      }
+    }
+    if (files.length === 0) return
+    e.preventDefault()
+    files.forEach(file => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        setImages(prev => {
+          const next = [...prev, reader.result as string]
+          if (next.length > MAX_IMAGES) {
+            toast(`最多支持 ${MAX_IMAGES} 张图片`)
+            return next.slice(0, MAX_IMAGES)
+          }
+          return next
+        })
+      }
+      reader.readAsDataURL(file)
+    })
+  }, [])
+
   const handleSend = useCallback(
     async (value: string) => {
       const question = value.trim()
-      if (!question || loading) return
+      if ((!question && images.length === 0) || loading) return
 
       const providerId = currentTask?.formData?.provider_id
       const modelName = currentTask?.formData?.model_name
@@ -110,8 +166,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         return
       }
 
-      addMessage(taskId, { role: 'user', content: question })
+      const sentImages = [...images]
+      addMessage(taskId, {
+        role: 'user',
+        content: question,
+        images: sentImages.length > 0 ? sentImages : undefined,
+      })
       setInput('')
+      setImages([])
       setLoading(true)
 
       try {
@@ -122,6 +184,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           history,
           provider_id: providerId,
           model_name: modelName,
+          images: sentImages.length > 0 ? sentImages : undefined,
         })
         addMessage(taskId, {
           role: 'assistant',
@@ -134,7 +197,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         setLoading(false)
       }
     },
-    [loading, taskId, currentTask, messages, addMessage],
+    [loading, taskId, currentTask, messages, addMessage, images],
   )
 
   // 转换为 Bubble.List 的数据格式
@@ -142,7 +205,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     const items = messages.map((msg, i) => ({
       key: `msg-${i}`,
       role: msg.role === 'user' ? ('user' as const) : ('ai' as const),
-      content: msg.content,
+      content:
+        msg.role === 'user' ? (
+          <UserContent content={msg.content} images={msg.images} />
+        ) : (
+          msg.content
+        ),
       footer:
         msg.role === 'assistant' && msg.sources ? (
           <SourceBadges sources={msg.sources} />
@@ -184,8 +252,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         variant: 'outlined' as const,
         contentRender: (content: any) => (
           <div className="markdown-body prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:my-2">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {typeof content === 'string' ? content : String(content)}
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+              {typeof content === 'string' ? normalizeMathDelimiters(content) : String(content)}
             </ReactMarkdown>
           </div>
         ),
@@ -268,6 +336,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
             <div>
               <p>针对笔记内容提问</p>
               <p className="mt-1 text-xs">例如：这个视频的核心观点是什么？</p>
+              <p className="mt-1 text-xs">也可以直接粘贴题目截图（Ctrl+V）让 AI 读图回答</p>
             </div>
           </div>
         ) : (
@@ -280,13 +349,29 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       </div>
 
       {/* 输入区域 */}
-      <div className="border-t px-3 py-2">
+      <div className="border-t px-3 py-2" onPaste={handlePaste}>
+        {images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {images.map((src, i) => (
+              <div key={i} className="relative">
+                <img src={src} alt={`预览${i + 1}`} className="h-16 w-16 rounded border object-cover" />
+                <button
+                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-600 text-white hover:bg-red-500"
+                  onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}
+                  title="移除"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <Sender
           value={input}
           onChange={setInput}
           onSubmit={handleSend}
           loading={loading}
-          placeholder="输入你的问题..."
+          placeholder="输入你的问题...（可直接 Ctrl+V 粘贴图片）"
         />
       </div>
     </div>

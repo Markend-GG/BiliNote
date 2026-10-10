@@ -29,6 +29,7 @@ class AskRequest(BaseModel):
     history: list[ChatMessage] = []
     provider_id: str
     model_name: str
+    images: list[str] = []  # data:image/...;base64,...（最多取前 4 张）
 
 
 def _do_index(task_id: str):
@@ -92,6 +93,7 @@ def ask_question(data: AskRequest):
             history=history,
             provider_id=data.provider_id,
             model_name=data.model_name,
+            images=data.images,
         )
         return R.success(data=result)
     except ValueError as e:
