@@ -31,6 +31,350 @@ index b729ae8..26236ff 100644
    { value: 'academic', label: '学术' },
    { value: 'xiaohongshu', label: '小红书' },
    { value: 'life_journal', label: '生活向' },
+diff --git a/BillNote_frontend/src/App.tsx b/BillNote_frontend/src/App.tsx
+index a8a2481..64895bd 100644
+--- a/BillNote_frontend/src/App.tsx
++++ b/BillNote_frontend/src/App.tsx
+@@ -8,10 +8,12 @@ import BackendInitDialog from '@/components/BackendInitDialog'
+ import StartupBanner from '@/components/SystemDiagnostic/StartupBanner'
+ import BackendHealthIndicator from '@/components/BackendHealth/BackendHealthIndicator'
+ import Index from '@/pages/Index.tsx'
+-import { HomePage } from './pages/HomePage/Home.tsx'
++import LibraryPage from '@/pages/LibraryPage'
+ 
+-// 非首屏页面使用 React.lazy 按需加载
++// 非首屏页面使用 React.lazy 按需加载。
++// 详情页拖着 markdown / katex / markmap 一大串依赖，按需加载能让书架页首屏快不少。
+ const Onboarding = lazy(() => import('@/pages/Onboarding'))
++const NotePage = lazy(() => import('@/pages/NotePage'))
+ const SettingPage = lazy(() => import('./pages/SettingPage/index.tsx'))
+ 
+ // 桌面端首启引导守卫：未完成 onboarding 时强制跳到 /onboarding
+@@ -71,7 +73,10 @@ function App() {
+           <Routes>
+             <Route path="/onboarding" element={<Onboarding />} />
+             <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
+-              <Route index element={<HomePage />} />
++              {/* 两级导航：书架（整理与挑选）→ 详情（阅读）。走真路由之后
++                  浏览器后退键、刷新、收藏夹才都能用 */}
++              <Route index element={<LibraryPage />} />
++              <Route path="note/:taskId" element={<NotePage />} />
+               <Route path="settings" element={<SettingPage />}>
+                 <Route index element={<Navigate to="model" replace />} />
+                 <Route path="model" element={<Model />}>
+diff --git a/BillNote_frontend/src/components/NoteFormDialog.tsx b/BillNote_frontend/src/components/NoteFormDialog.tsx
+new file mode 100644
+index 0000000..aa28257
+--- /dev/null
++++ b/BillNote_frontend/src/components/NoteFormDialog.tsx
+@@ -0,0 +1,53 @@
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import NoteForm from '@/pages/NotePage/components/NoteForm'
++
++interface NoteFormDialogProps {
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  /** null = 新建；传 task_id = 用那篇的参数重新生成 */
++  taskId?: string | null
++  onSubmitted?: (taskId: string) => void
++}
++
++/**
++ * 新建 / 重新生成共用的对话框。
++ *
++ * 表单以前是常驻左侧栏的一块（占掉 23% 宽度），但一天用不了几次；改成按需弹出的模态框，
++ * 正文才拿得到宽度。表单本身（校验、防重复提交、阶段提示）一点没动。
++ */
++export function NoteFormDialog({ open, onOpenChange, taskId = null, onSubmitted }: NoteFormDialogProps) {
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className="grid max-h-[88vh] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-[560px]">
++        <DialogHeader className="border-b px-6 py-4 pr-12">
++          <DialogTitle>{taskId ? '重新生成笔记' : '新建笔记'}</DialogTitle>
++          <DialogDescription>
++            {taskId
++              ? '沿用原来的视频链接，可以改模型、风格和笔记格式。生成结果会作为新版本追加，旧版本仍然可以在版本下拉里查看。'
++              : '粘贴视频链接，选择模型和笔记风格。长视频要抽帧并分批送给模型，可能需要几分钟。'}
++          </DialogDescription>
++        </DialogHeader>
++        <div className="min-h-0 overflow-y-auto px-6 py-4">
++          {/* 关掉就卸载：表单里有上传状态等本地 state，每次打开都该是干净的 */}
++          {open && (
++            <NoteForm
++              taskId={taskId}
++              onSubmitted={id => {
++                onOpenChange(false)
++                onSubmitted?.(id)
++              }}
++            />
++          )}
++        </div>
++      </DialogContent>
++    </Dialog>
++  )
++}
++
++export default NoteFormDialog
+diff --git a/BillNote_frontend/src/components/PromptDialog.tsx b/BillNote_frontend/src/components/PromptDialog.tsx
+new file mode 100644
+index 0000000..9df4775
+--- /dev/null
++++ b/BillNote_frontend/src/components/PromptDialog.tsx
+@@ -0,0 +1,101 @@
++import { useEffect, useState } from 'react'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++
++interface PromptDialogProps {
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  title: string
++  description?: string
++  label: string
++  initialValue?: string
++  placeholder?: string
++  confirmLabel?: string
++  /** 允许提交空值（重命名笔记时清空 = 恢复用视频标题） */
++  allowEmpty?: boolean
++  /** 返回 false 表示失败，对话框不关闭（错误 toast 由请求拦截器负责） */
++  onConfirm: (value: string) => Promise<boolean> | boolean
++}
++
++/** 新建文件夹 / 重命名文件夹 / 重命名笔记共用的单行输入对话框 */
++export function PromptDialog({
++  open,
++  onOpenChange,
++  title,
++  description,
++  label,
++  initialValue = '',
++  placeholder,
++  confirmLabel = '确定',
++  allowEmpty = false,
++  onConfirm,
++}: PromptDialogProps) {
++  const [value, setValue] = useState(initialValue)
++  const [busy, setBusy] = useState(false)
++
++  // 每次打开都重置成传入的初始值，否则会留着上一次编辑的内容
++  useEffect(() => {
++    if (open) {
++      setValue(initialValue)
++      setBusy(false)
++    }
++  }, [open, initialValue])
++
++  const submit = async () => {
++    const trimmed = value.trim()
++    if (busy || (!trimmed && !allowEmpty)) return
++    setBusy(true)
++    try {
++      const ok = await onConfirm(trimmed)
++      if (ok) onOpenChange(false)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className="sm:max-w-[420px]">
++        <DialogHeader>
++          <DialogTitle>{title}</DialogTitle>
++          {description && <DialogDescription>{description}</DialogDescription>}
++        </DialogHeader>
++        <div className="grid gap-2">
++          <Label htmlFor="prompt-input">{label}</Label>
++          <Input
++            id="prompt-input"
++            autoFocus
++            value={value}
++            placeholder={placeholder}
++            onChange={e => setValue(e.target.value)}
++            onKeyDown={e => {
++              if (e.key === 'Enter') {
++                e.preventDefault()
++                submit()
++              }
++            }}
++          />
++        </div>
++        <DialogFooter>
++          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={busy}>
++            取消
++          </Button>
++          <Button size="sm" onClick={submit} disabled={(!value.trim() && !allowEmpty) || busy}>
++            {busy ? '处理中…' : confirmLabel}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
++
++export default PromptDialog
+diff --git a/BillNote_frontend/src/components/ui/menu.tsx b/BillNote_frontend/src/components/ui/menu.tsx
+new file mode 100644
+index 0000000..86d43bd
+--- /dev/null
++++ b/BillNote_frontend/src/components/ui/menu.tsx
+@@ -0,0 +1,141 @@
++import * as React from 'react'
++import { cn } from '@/lib/utils'
++
++export interface MenuEntry {
++  key: string
++  label: React.ReactNode
++  icon?: React.ReactNode
++  danger?: boolean
++  disabled?: boolean
++  onSelect: () => void
++}
++
++export type MenuEntryOrSeparator = MenuEntry | '---'
++
++interface MenuProps {
++  entries: MenuEntryOrSeparator[]
++  /** 触发按钮里的内容，通常就是一个图标 */
++  trigger: React.ReactNode
++  /** 菜单顶部的只读信息块。模型名、风格、创建时间这些从工具栏挪进来，不再常驻占宽度 */
++  info?: React.ReactNode
++  align?: 'start' | 'end'
++  className?: string
++  triggerClassName?: string
++  ariaLabel?: string
++}
++
++/**
++ * 轻量下拉菜单。
++
++ * 项目里没有 @radix-ui/react-dropdown-menu，而 Dockerfile.patch 用 pnpm install --frozen-lockfile，
++ * 加依赖要连带改 lockfile、有构建风险，所以这里手写：外点关闭 + Esc + 上下键移动焦点。
++ */
++export function Menu({
++  entries,
++  trigger,
++  info,
++  align = 'end',
++  className,
++  triggerClassName,
++  ariaLabel = '更多操作',
++}: MenuProps) {
++  const [open, setOpen] = React.useState(false)
++  const rootRef = React.useRef<HTMLDivElement>(null)
++  const listRef = React.useRef<HTMLDivElement>(null)
++
++  React.useEffect(() => {
++    if (!open) return
++
++    const onPointerDown = (e: MouseEvent) => {
++      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
++    }
++    const onKeyDown = (e: KeyboardEvent) => {
++      if (e.key === 'Escape') {
++        setOpen(false)
++        return
++      }
++      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
++      const items = [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
++      if (!items.length) return
++      e.preventDefault()
++      const index = items.indexOf(document.activeElement as HTMLButtonElement)
++      const next =
++        e.key === 'ArrowDown'
++          ? items[(index + 1) % items.length]
++          : items[(index - 1 + items.length) % items.length]
++      next?.focus()
++    }
++
++    document.addEventListener('mousedown', onPointerDown)
++    document.addEventListener('keydown', onKeyDown)
++    // 打开后把焦点移进菜单，键盘用户才不会丢失位置
++    listRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
++    return () => {
++      document.removeEventListener('mousedown', onPointerDown)
++      document.removeEventListener('keydown', onKeyDown)
++    }
++  }, [open])
++
++  // 不在这里写死 shrink-0：顶栏里这个菜单要能占满剩余宽度并截断标题，由调用方决定
++  return (
++    <div ref={rootRef} className={cn('relative', className)}>
++      <button
++        type="button"
++        aria-label={ariaLabel}
++        aria-expanded={open}
++        onClick={e => {
++          // 菜单常挂在卡片上，卡片本身也能点开笔记，这里必须拦住冒泡
++          e.stopPropagation()
++          setOpen(v => !v)
++        }}
++        className={cn(
++          'text-muted-foreground hover:bg-accent cursor-pointer rounded p-1',
++          open && 'bg-accent',
++          triggerClassName,
++        )}
++      >
++        {trigger}
++      </button>
++
++      {open && (
++        <div
++          ref={listRef}
++          role="menu"
++          className={cn(
++            'bg-popover text-popover-foreground absolute top-full z-50 mt-1 min-w-[184px] overflow-hidden rounded-md border py-1 shadow-lg',
++            align === 'end' ? 'right-0' : 'left-0',
++          )}
++        >
++          {info && (
++            <div className="text-muted-foreground border-b px-3 py-2 text-xs leading-5">{info}</div>
++          )}
++          {entries.map((entry, i) =>
++            entry === '---' ? (
++              <div key={`sep-${i}`} className="bg-border my-1 h-px" />
++            ) : (
++              <button
++                key={entry.key}
++                type="button"
++                role="menuitem"
++                disabled={entry.disabled}
++                onClick={e => {
++                  e.stopPropagation()
++                  setOpen(false)
++                  entry.onSelect()
++                }}
++                className={cn(
++                  'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-sm outline-none',
++                  'focus-visible:bg-accent hover:bg-accent disabled:pointer-events-none disabled:opacity-50',
++                  entry.danger ? 'text-destructive' : 'text-foreground',
++                )}
++              >
++                {entry.icon}
++                <span className="flex-1">{entry.label}</span>
++              </button>
++            ),
++          )}
++        </div>
++      )}
++    </div>
++  )
++}
 diff --git a/BillNote_frontend/src/constant/note.ts b/BillNote_frontend/src/constant/note.ts
 index d27ba62..cb8a455 100644
 --- a/BillNote_frontend/src/constant/note.ts
@@ -67,6 +411,239 @@ index d27ba62..cb8a455 100644
 +/** 除终态以外都算「正在生成」，用来禁用提交按钮、拦截重复点击 */
 +export const isTaskRunning = (status?: string) =>
 +  !!status && status !== 'SUCCESS' && status !== 'FAILED'
+diff --git a/BillNote_frontend/src/hooks/useNoteActions.tsx b/BillNote_frontend/src/hooks/useNoteActions.tsx
+new file mode 100644
+index 0000000..0620ada
+--- /dev/null
++++ b/BillNote_frontend/src/hooks/useNoteActions.tsx
+@@ -0,0 +1,141 @@
++import { useState } from 'react'
++import { useNavigate } from 'react-router-dom'
++import { FolderInput, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
++import toast from 'react-hot-toast'
++import { Button } from '@/components/ui/button'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import type { MenuEntryOrSeparator } from '@/components/ui/menu'
++import { PromptDialog } from '@/components/PromptDialog'
++import { useLibraryStore } from '@/store/libraryStore'
++import { useTaskStore } from '@/store/taskStore'
++
++const UNCATEGORIZED = '未分类'
++
++/**
++ * 详情页顶栏「⋯」菜单里那批笔记级操作：重命名、移动到文件夹、删除、去设置。
++ *
++ * 抽成 hook 是因为这些操作各自还要带一个对话框，全塞进 MarkdownHeader 会让它更长；
++ * 这里返回菜单项 + 需要一并渲染的 dialogs，调用方两行就能接上。
++ */
++export function useNoteActions(taskId: string | undefined, fallbackTitle: string) {
++  const navigate = useNavigate()
++  const folders = useLibraryStore(state => state.folders)
++  const notes = useLibraryStore(state => state.notes)
++  const { renameNote, moveNote, fetchLibrary } = useLibraryStore()
++  const removeTask = useTaskStore(state => state.removeTask)
++
++  const indexed = taskId ? notes.find(note => note.task_id === taskId) : undefined
++  const folderId = indexed?.folder_id ?? null
++  const folderName = folderId
++    ? (folders.find(folder => folder.id === folderId)?.name ?? UNCATEGORIZED)
++    : UNCATEGORIZED
++  const title = indexed?.title || indexed?.video_title || fallbackTitle
++
++  const [renameOpen, setRenameOpen] = useState(false)
++  const [deleteOpen, setDeleteOpen] = useState(false)
++  const [busy, setBusy] = useState(false)
++
++  const handleDelete = async () => {
++    if (!taskId) return
++    setBusy(true)
++    try {
++      await removeTask(taskId)
++      setDeleteOpen(false)
++      await fetchLibrary()
++      navigate('/')
++    } catch {
++      // 请求拦截器已经弹过提示
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  const entries: MenuEntryOrSeparator[] = [
++    {
++      key: 'rename',
++      label: '重命名笔记',
++      icon: <Pencil className="h-4 w-4" />,
++      onSelect: () => setRenameOpen(true),
++    },
++    {
++      key: 'move-none',
++      label: `移到${UNCATEGORIZED}`,
++      icon: <FolderInput className="h-4 w-4" />,
++      disabled: !folderId,
++      onSelect: async () => {
++        if (await moveNote(taskId!, null)) toast.success(`已移到${UNCATEGORIZED}`)
++      },
++    },
++    ...folders
++      .filter(folder => folder.id !== folderId)
++      .map(folder => ({
++        key: `move-${folder.id}`,
++        label: `移到「${folder.name}」`,
++        icon: <FolderInput className="h-4 w-4" />,
++        onSelect: async () => {
++          if (await moveNote(taskId!, folder.id)) toast.success(`已移到「${folder.name}」`)
++        },
++      })),
++    '---',
++    {
++      key: 'delete',
++      label: '删除笔记',
++      danger: true,
++      icon: <Trash2 className="h-4 w-4" />,
++      onSelect: () => setDeleteOpen(true),
++    },
++    '---',
++    {
++      key: 'settings',
++      label: '全局配置',
++      icon: <SlidersHorizontal className="h-4 w-4" />,
++      onSelect: () => navigate('/settings'),
++    },
++  ]
++
++  const dialogs = (
++    <>
++      <PromptDialog
++        open={renameOpen}
++        onOpenChange={setRenameOpen}
++        title="重命名笔记"
++        description="只有你自己看得到这个别名，视频原标题会保留。清空则恢复用视频标题。"
++        label="别名"
++        initialValue={indexed?.title ?? ''}
++        placeholder={indexed?.video_title || '例如：数量关系专项'}
++        confirmLabel="保存"
++        allowEmpty
++        onConfirm={value => (taskId ? renameNote(taskId, value) : false)}
++      />
++
++      <Dialog open={deleteOpen} onOpenChange={open => !busy && setDeleteOpen(open)}>
++        <DialogContent className="sm:max-w-[420px]">
++          <DialogHeader>
++            <DialogTitle>删除这篇笔记？</DialogTitle>
++            <DialogDescription>
++              「{title}」将被永久删除：后端保存的笔记文件、这篇引用的截图、AI 问答索引，
++              以及浏览器里的版本历史都会一起清掉，无法恢复。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter>
++            <Button variant="outline" size="sm" onClick={() => setDeleteOpen(false)} disabled={busy}>
++              取消
++            </Button>
++            <Button variant="destructive" size="sm" onClick={handleDelete} disabled={busy}>
++              {busy ? '删除中…' : '删除'}
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++    </>
++  )
++
++  return { title, folderId, folderName, entries, dialogs }
++}
+diff --git a/BillNote_frontend/src/hooks/useShelfItems.ts b/BillNote_frontend/src/hooks/useShelfItems.ts
+new file mode 100644
+index 0000000..2a871ba
+--- /dev/null
++++ b/BillNote_frontend/src/hooks/useShelfItems.ts
+@@ -0,0 +1,67 @@
++import { useMemo } from 'react'
++import { useLibraryStore } from '@/store/libraryStore'
++import { useTaskStore } from '@/store/taskStore'
++
++export interface ShelfItem {
++  taskId: string
++  title: string
++  folderId: string | null
++  status: string
++  platform: string | null
++  coverUrl: string | null
++  duration: number | null
++  createdAt: number | null
++  lastOpenedAt: number | null
++  /** 本地 IndexedDB 里有没有这篇的完整内容；没有的话进详情页要从后端 hydrate */
++  hasLocal: boolean
++}
++
++/**
++ * 书架上的一行/一张卡片。
++ *
++ * 后端 notes 表是权威来源（标题、文件夹、封面），但生成中的实时状态只有本地 taskStore 知道
++ * ——轮询在更新它，后端索引只在提交/成功/失败三个节点写。所以两边按 task_id 合并，
++ * 状态优先取本地，其余优先取后端。刚提交、后端还没落库的任务也要补进来，否则卡片会闪一下才出现。
++ */
++export function useShelfItems(): ShelfItem[] {
++  const notes = useLibraryStore(state => state.notes)
++  const tasks = useTaskStore(state => state.tasks)
++
++  return useMemo(() => {
++    const localById = new Map(tasks.map(task => [task.id, task]))
++
++    const fromIndex = notes.map(note => {
++      const local = localById.get(note.task_id)
++      return {
++        taskId: note.task_id,
++        title: note.title || note.video_title || local?.audioMeta?.title || '未命名笔记',
++        folderId: note.folder_id,
++        status: local?.status || note.status || 'PENDING',
++        platform: note.platform || local?.platform || null,
++        coverUrl: note.cover_url || local?.audioMeta?.cover_url || null,
++        duration: note.duration ?? local?.audioMeta?.duration ?? null,
++        createdAt: note.created_at ?? (local?.createdAt ? new Date(local.createdAt).getTime() : null),
++        lastOpenedAt: note.last_opened_at,
++        hasLocal: !!local,
++      }
++    })
++
++    const indexed = new Set(notes.map(note => note.task_id))
++    const localOnly = tasks
++      .filter(task => !indexed.has(task.id))
++      .map(task => ({
++        taskId: task.id,
++        title: task.audioMeta?.title || '未命名笔记',
++        folderId: task.folderId ?? null,
++        status: task.status,
++        platform: task.platform || task.audioMeta?.platform || null,
++        coverUrl: task.audioMeta?.cover_url || null,
++        duration: task.audioMeta?.duration || null,
++        createdAt: task.createdAt ? new Date(task.createdAt).getTime() : null,
++        lastOpenedAt: null,
++        hasLocal: true,
++      }))
++
++    return [...fromIndex, ...localOnly]
++  }, [notes, tasks])
++}
+diff --git a/BillNote_frontend/src/hooks/useTaskPolling.ts b/BillNote_frontend/src/hooks/useTaskPolling.ts
+index 58e406f..baeff3a 100644
+--- a/BillNote_frontend/src/hooks/useTaskPolling.ts
++++ b/BillNote_frontend/src/hooks/useTaskPolling.ts
+@@ -6,8 +6,6 @@ import toast from 'react-hot-toast'
+ export const useTaskPolling = (interval = 3000) => {
+   const tasks = useTaskStore(state => state.tasks)
+   const updateTaskContent = useTaskStore(state => state.updateTaskContent)
+-  const updateTaskStatus = useTaskStore(state => state.updateTaskStatus)
+-  const removeTask = useTaskStore(state => state.removeTask)
+ 
+   const tasksRef = useRef(tasks)
+ 
 diff --git a/BillNote_frontend/src/index.css b/BillNote_frontend/src/index.css
 index 0fc8f14..800556b 100644
 --- a/BillNote_frontend/src/index.css
@@ -172,6 +749,186 @@ index 0fc8f14..800556b 100644
 +.md-section[data-level='2'] > .md-section-head > .md-fold-toggle::before {
 +  font-size: 18px;
 +}
+diff --git a/BillNote_frontend/src/layouts/HomeLayout.tsx b/BillNote_frontend/src/layouts/HomeLayout.tsx
+deleted file mode 100644
+index ecba5aa..0000000
+--- a/BillNote_frontend/src/layouts/HomeLayout.tsx
++++ /dev/null
+@@ -1,174 +0,0 @@
+-import React, { FC, useRef, useState } from 'react'
+-import { SlidersHorizontal, PanelLeftClose, PanelLeftOpen, History as HistoryIcon } from 'lucide-react'
+-import {
+-  Tooltip,
+-  TooltipContent,
+-  TooltipProvider,
+-  TooltipTrigger,
+-} from '@/components/ui/tooltip.tsx'
+-
+-import { Link } from 'react-router-dom'
+-import { ResizablePanel, ResizablePanelGroup, ResizableHandle } from '@/components/ui/resizable'
+-import { ScrollArea } from "@/components/ui/scroll-area.tsx"
+-import type { ImperativePanelHandle } from 'react-resizable-panels'
+-import logo from '@/assets/icon.svg'
+-
+-interface IProps {
+-  NoteForm: React.ReactNode
+-  Preview: React.ReactNode
+-  History: React.ReactNode
+-}
+-
+-const HomeLayout: FC<IProps> = ({ NoteForm, Preview, History }) => {
+-  const [, setShowSettings] = useState(false)
+-  const [isLeftCollapsed, setIsLeftCollapsed] = useState(false)
+-  const [isMiddleCollapsed, setIsMiddleCollapsed] = useState(false)
+-  const leftPanelRef = useRef<ImperativePanelHandle>(null)
+-  const middlePanelRef = useRef<ImperativePanelHandle>(null)
+-
+-  return (
+-    <div className="flex h-screen flex-col overflow-hidden">
+-      <ResizablePanelGroup direction="horizontal" className="h-full w-full">
+-        {/* 左边表单 */}
+-        <ResizablePanel
+-          ref={leftPanelRef}
+-          defaultSize={23}
+-          minSize={10}
+-          maxSize={35}
+-          collapsible
+-          collapsedSize={0}
+-          onCollapse={() => setIsLeftCollapsed(true)}
+-          onExpand={() => setIsLeftCollapsed(false)}
+-        >
+-          <aside className="flex h-full flex-col overflow-hidden border-r border-neutral-200 bg-white">
+-            <header className="flex h-16 items-center justify-between px-6">
+-              <div className="flex items-center gap-2">
+-                <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-2xl">
+-                  <img src={logo} alt="logo" className="h-full w-full object-contain" />
+-                </div>
+-                <div className="text-2xl font-bold text-gray-800">BiliNote</div>
+-              </div>
+-              <div className="flex items-center gap-1">
+-                <TooltipProvider>
+-                  <Tooltip>
+-                    <TooltipTrigger asChild>
+-                      <button
+-                        onClick={() => leftPanelRef.current?.collapse()}
+-                        className="text-muted-foreground hover:text-primary cursor-pointer rounded p-1 hover:bg-neutral-100"
+-                      >
+-                        <PanelLeftClose className="h-5 w-5" />
+-                      </button>
+-                    </TooltipTrigger>
+-                    <TooltipContent>
+-                      <span>收起工作区</span>
+-                    </TooltipContent>
+-                  </Tooltip>
+-                </TooltipProvider>
+-                <TooltipProvider>
+-                  <Tooltip>
+-                    <TooltipTrigger onClick={() => setShowSettings(true)}>
+-                      <Link to={'/settings'}>
+-                        <SlidersHorizontal className="text-muted-foreground hover:text-primary cursor-pointer" />
+-                      </Link>
+-                    </TooltipTrigger>
+-                    <TooltipContent>
+-                      <span>全局配置</span>
+-                    </TooltipContent>
+-                  </Tooltip>
+-                </TooltipProvider>
+-              </div>
+-            </header>
+-            <ScrollArea className="flex-1 overflow-auto">
+-              <div className="p-4">{NoteForm}</div>
+-            </ScrollArea>
+-          </aside>
+-        </ResizablePanel>
+-
+-        <ResizableHandle />
+-
+-        {/* 左面板折叠时的展开按钮 */}
+-        {isLeftCollapsed && (
+-          <TooltipProvider>
+-            <Tooltip>
+-              <TooltipTrigger asChild>
+-                <button
+-                  onClick={() => leftPanelRef.current?.expand()}
+-                  className="flex h-full w-8 shrink-0 items-center justify-center border-r border-neutral-200 bg-white hover:bg-neutral-50"
+-                >
+-                  <PanelLeftOpen className="h-4 w-4 text-muted-foreground" />
+-                </button>
+-              </TooltipTrigger>
+-              <TooltipContent side="right">
+-                <span>展开工作区</span>
+-              </TooltipContent>
+-            </Tooltip>
+-          </TooltipProvider>
+-        )}
+-
+-        {/* 中间历史 */}
+-        <ResizablePanel
+-          ref={middlePanelRef}
+-          defaultSize={16}
+-          minSize={10}
+-          maxSize={30}
+-          collapsible
+-          collapsedSize={0}
+-          onCollapse={() => setIsMiddleCollapsed(true)}
+-          onExpand={() => setIsMiddleCollapsed(false)}
+-        >
+-          <aside className="flex h-full flex-col overflow-hidden border-r border-neutral-200 bg-white">
+-            <header className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-100 px-3">
+-              <span className="text-sm font-medium text-gray-600">生成历史</span>
+-              <TooltipProvider>
+-                <Tooltip>
+-                  <TooltipTrigger asChild>
+-                    <button
+-                      onClick={() => middlePanelRef.current?.collapse()}
+-                      className="text-muted-foreground hover:text-primary cursor-pointer rounded p-1 hover:bg-neutral-100"
+-                    >
+-                      <PanelLeftClose className="h-4 w-4" />
+-                    </button>
+-                  </TooltipTrigger>
+-                  <TooltipContent>
+-                    <span>收起历史</span>
+-                  </TooltipContent>
+-                </Tooltip>
+-              </TooltipProvider>
+-            </header>
+-            <ScrollArea className="flex-1 overflow-auto">
+-              <div>{History}</div>
+-            </ScrollArea>
+-          </aside>
+-        </ResizablePanel>
+-
+-        <ResizableHandle />
+-
+-        {/* 中间面板折叠时的展开按钮 */}
+-        {isMiddleCollapsed && (
+-          <TooltipProvider>
+-            <Tooltip>
+-              <TooltipTrigger asChild>
+-                <button
+-                  onClick={() => middlePanelRef.current?.expand()}
+-                  className="flex h-full w-8 shrink-0 items-center justify-center border-r border-neutral-200 bg-white hover:bg-neutral-50"
+-                >
+-                  <HistoryIcon className="h-4 w-4 text-muted-foreground" />
+-                </button>
+-              </TooltipTrigger>
+-              <TooltipContent side="right">
+-                <span>展开历史</span>
+-              </TooltipContent>
+-            </Tooltip>
+-          </TooltipProvider>
+-        )}
+-
+-        {/* 右边预览 */}
+-        <ResizablePanel defaultSize={61} minSize={30}>
+-          <main className="flex h-full flex-col overflow-hidden bg-white p-6">{Preview}</main>
+-        </ResizablePanel>
+-      </ResizablePanelGroup>
+-    </div>
+-  )
+-}
+-
+-export default HomeLayout
 diff --git a/BillNote_frontend/src/lib/markmap.ts b/BillNote_frontend/src/lib/markmap.ts
 index 54a4b3b..3cb101a 100644
 --- a/BillNote_frontend/src/lib/markmap.ts
@@ -305,10 +1062,1503 @@ index 0000000..9bfd0e6
 +    tree.children = out
 +  }
 +}
-diff --git a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
+diff --git a/BillNote_frontend/src/pages/HomePage/Home.tsx b/BillNote_frontend/src/pages/HomePage/Home.tsx
+deleted file mode 100644
+index d190239..0000000
+--- a/BillNote_frontend/src/pages/HomePage/Home.tsx
++++ /dev/null
+@@ -1,44 +0,0 @@
+-import { FC, useEffect, useState } from 'react'
+-import HomeLayout from '@/layouts/HomeLayout.tsx'
+-import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
+-import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
+-import { useTaskStore } from '@/store/taskStore'
+-import History from '@/pages/HomePage/components/History.tsx'
+-type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
+-export const HomePage: FC = () => {
+-  const tasks = useTaskStore(state => state.tasks)
+-  const currentTaskId = useTaskStore(state => state.currentTaskId)
+-
+-  const currentTask = tasks.find(t => t.id === currentTaskId)
+-
+-  const [status, setStatus] = useState<ViewStatus>('idle')
+-
+-  const content = currentTask?.markdown || ''
+-
+-  useEffect(() => {
+-    if (!currentTask) {
+-      setStatus('idle')
+-    } else if (currentTask.status === 'SUCCESS') {
+-      setStatus('success')
+-    } else if (currentTask.status === 'FAILED') {
+-      setStatus('failed')
+-    } else {
+-      // PENDING、PARSING、DOWNLOADING、TRANSCRIBING、SUMMARIZING 等所有进行中状态
+-      setStatus('loading')
+-    }
+-  }, [currentTask, currentTask?.status])
+-
+-  // useEffect( () => {
+-  //     get_task_status('d4e87938-c066-48a0-bbd5-9bec40d53354').then(res=>{
+-  //         console.log('res1',res)
+-  //         setContent(res.data.result.markdown)
+-  //     })
+-  // }, [tasks]);
+-  return (
+-    <HomeLayout
+-      NoteForm={<NoteForm />}
+-      Preview={<MarkdownViewer status={status} />}
+-      History={<History />}
+-    />
+-  )
+-}
+diff --git a/BillNote_frontend/src/pages/HomePage/components/History.tsx b/BillNote_frontend/src/pages/HomePage/components/History.tsx
+deleted file mode 100644
+index 3f34ae8..0000000
+--- a/BillNote_frontend/src/pages/HomePage/components/History.tsx
++++ /dev/null
+@@ -1,26 +0,0 @@
+-import NoteHistory from '@/pages/HomePage/components/NoteHistory.tsx'
+-import { useTaskStore } from '@/store/taskStore'
+-import { Info, Clock, Loader2 } from 'lucide-react'
+-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+-const History = () => {
+-  const currentTaskId = useTaskStore(state => state.currentTaskId)
+-  const setCurrentTask = useTaskStore(state => state.setCurrentTask)
+-  return (
+-    <>
+-      <div className={'flex h-full w-full flex-col gap-4 px-2.5 py-1.5'}>
+-        {/*生成历史    */}
+-        <div className="my-4 flex h-[40px] items-center gap-2">
+-          <Clock className="h-4 w-4 text-neutral-500" />
+-          <h2 className="text-base font-medium text-neutral-900">生成历史</h2>
+-        </div>
+-        <ScrollArea className="w-full sm:h-[480px] md:h-[720px] lg:h-[92%]">
+-          {/*<div className="w-full flex-1 overflow-y-auto">*/}
+-          <NoteHistory onSelect={setCurrentTask} selectedId={currentTaskId} />
+-          {/*</div>*/}
+-        </ScrollArea>
+-      </div>
+-    </>
+-  )
+-}
+-
+-export default History
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
+deleted file mode 100644
+index 89934b5..0000000
+--- a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
++++ /dev/null
+@@ -1,211 +0,0 @@
+-'use client'
+-
+-import { useEffect, useState } from 'react'
+-import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
+-import { Button } from '@/components/ui/button'
+-import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
+-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+-import { Badge } from '@/components/ui/badge'
+-
+-interface VersionNote {
+-  ver_id: string
+-  model_name?: string
+-  style?: string
+-  created_at?: string
+-}
+-
+-interface NoteHeaderProps {
+-  currentTask?: {
+-    markdown: VersionNote[] | string
+-  }
+-  isMultiVersion: boolean
+-  currentVerId: string
+-  setCurrentVerId: (id: string) => void
+-  modelName: string
+-  style: string
+-  noteStyles: { value: string; label: string }[]
+-  onCopy: () => void
+-  onDownload: () => void
+-  createAt?: string | Date
+-  setShowTranscribe: (show: boolean) => void
+-  showChat?: false | 'half' | 'full'
+-  setShowChat?: (mode: false | 'half' | 'full') => void
+-}
+-
+-export function MarkdownHeader({
+-  currentTask,
+-  isMultiVersion,
+-  currentVerId,
+-  setCurrentVerId,
+-  modelName,
+-  style,
+-  noteStyles,
+-  onCopy,
+-  onDownload,
+-  createAt,
+-  showTranscribe,
+-  setShowTranscribe,
+-  showChat,
+-  setShowChat,
+-  viewMode,
+-  setViewMode,
+-}: NoteHeaderProps) {
+-  const [copied, setCopied] = useState(false)
+-
+-  useEffect(() => {
+-    let timer: NodeJS.Timeout
+-    if (copied) {
+-      timer = setTimeout(() => setCopied(false), 2000)
+-    }
+-    return () => clearTimeout(timer)
+-  }, [copied])
+-
+-  const handleCopy = () => {
+-    onCopy()
+-    setCopied(true)
+-  }
+-
+-  const styleName = noteStyles.find(v => v.value === style)?.label || style
+-
+-  const reversedMarkdown: VersionNote[] = Array.isArray(currentTask?.markdown)
+-    ? [...currentTask!.markdown].reverse()
+-    : []
+-
+-  const formatDate = (date: string | Date | undefined) => {
+-    if (!date) return ''
+-    const d = typeof date === 'string' ? new Date(date) : date
+-    if (isNaN(d.getTime())) return ''
+-    return d
+-      .toLocaleString('zh-CN', {
+-        year: 'numeric',
+-        month: '2-digit',
+-        day: '2-digit',
+-        hour: '2-digit',
+-        minute: '2-digit',
+-      })
+-      .replace(/\//g, '-')
+-  }
+-
+-  return (
+-    <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-white/95 px-4 py-2 backdrop-blur-sm">
+-      {/* 左侧区域：版本 + 标签 + 创建时间 */}
+-      <div className="flex flex-wrap items-center gap-3">
+-        {isMultiVersion && (
+-          <Select value={currentVerId} onValueChange={setCurrentVerId}>
+-            <SelectTrigger className="h-8 w-[160px] text-sm">
+-              <div className="flex items-center">
+-                {(() => {
+-                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
+-                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
+-                })()}
+-              </div>
+-            </SelectTrigger>
+-
+-            <SelectContent>
+-              {(currentTask?.markdown || []).map((v, idx) => {
+-                const shortId = v.ver_id.slice(-6)
+-                return (
+-                  <SelectItem key={v.ver_id} value={v.ver_id}>
+-                    {`版本（${shortId}）`}
+-                  </SelectItem>
+-                )
+-              })}
+-            </SelectContent>
+-          </Select>
+-        )}
+-
+-        <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200">
+-          {modelName}
+-        </Badge>
+-        <Badge variant="secondary" className="bg-cyan-100 text-cyan-700 hover:bg-cyan-200">
+-          {styleName}
+-        </Badge>
+-
+-        {createAt && (
+-          <div className="text-muted-foreground text-sm">创建时间: {formatDate(createAt)}</div>
+-        )}
+-      </div>
+-
+-      {/* 右侧操作按钮 */}
+-      <div className="flex items-center gap-1">
+-        <TooltipProvider>
+-          <Tooltip>
+-            <TooltipTrigger asChild>
+-              <Button
+-                onClick={() => {
+-                  setViewMode(viewMode == 'preview' ? 'map' : 'preview')
+-                }}
+-                variant="ghost"
+-                size="sm"
+-                className="h-8 px-2"
+-              >
+-                <BrainCircuit className="mr-1.5 h-4 w-4" />
+-                <span className="text-sm">{viewMode == 'preview' ? '思维导图' : 'markdown'}</span>
+-              </Button>
+-            </TooltipTrigger>
+-            <TooltipContent>思维导图</TooltipContent>
+-          </Tooltip>
+-        </TooltipProvider>
+-        <TooltipProvider>
+-          <Tooltip>
+-            <TooltipTrigger asChild>
+-              <Button onClick={handleCopy} variant="ghost" size="sm" className="h-8 px-2">
+-                <Copy className="mr-1.5 h-4 w-4" />
+-                <span className="text-sm">{copied ? '已复制' : '复制'}</span>
+-              </Button>
+-            </TooltipTrigger>
+-            <TooltipContent>复制内容</TooltipContent>
+-          </Tooltip>
+-        </TooltipProvider>
+-
+-        <TooltipProvider>
+-          <Tooltip>
+-            <TooltipTrigger asChild>
+-              <Button onClick={onDownload} variant="ghost" size="sm" className="h-8 px-2">
+-                <Download className="mr-1.5 h-4 w-4" />
+-                <span className="text-sm">导出 Markdown</span>
+-              </Button>
+-            </TooltipTrigger>
+-            <TooltipContent>下载为 Markdown 文件</TooltipContent>
+-          </Tooltip>
+-        </TooltipProvider>
+-        <TooltipProvider>
+-          <Tooltip>
+-            <TooltipTrigger asChild>
+-              <Button
+-                onClick={() => {
+-                  setShowTranscribe(!showTranscribe)
+-                }}
+-                variant="ghost"
+-                size="sm"
+-                className="h-8 px-2"
+-              >
+-                {/*<Download className="mr-1.5 h-4 w-4" />*/}
+-                <span className="text-sm">原文参照</span>
+-              </Button>
+-            </TooltipTrigger>
+-            <TooltipContent>原文参照</TooltipContent>
+-          </Tooltip>
+-        </TooltipProvider>
+-        {setShowChat && (
+-          <TooltipProvider>
+-            <Tooltip>
+-              <TooltipTrigger asChild>
+-                <Button
+-                  onClick={() => setShowChat(showChat ? false : 'half')}
+-                  variant={showChat ? 'default' : 'ghost'}
+-                  size="sm"
+-                  className="h-8 px-2"
+-                >
+-                  <MessageSquare className="mr-1.5 h-4 w-4" />
+-                  <span className="text-sm">AI 问答</span>
+-                </Button>
+-              </TooltipTrigger>
+-              <TooltipContent>基于笔记内容的 AI 问答</TooltipContent>
+-            </Tooltip>
+-          </TooltipProvider>
+-        )}
+-      </div>
+-    </div>
+-  )
+-}
+diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteFormWrapper.tsx b/BillNote_frontend/src/pages/HomePage/components/NoteFormWrapper.tsx
+deleted file mode 100644
+index b47eafe..0000000
+--- a/BillNote_frontend/src/pages/HomePage/components/NoteFormWrapper.tsx
++++ /dev/null
+@@ -1,15 +0,0 @@
+-import { useForm } from 'react-hook-form'
+-import { Form } from '@/components/ui/form.tsx'
+-import NoteForm from './NoteForm.tsx'
+-
+-const NoteFormWrapper = () => {
+-  const form = useForm()
+-
+-  return (
+-    <Form {...form}>
+-      <NoteForm />
+-    </Form>
+-  )
+-}
+-
+-export default NoteFormWrapper
+diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteHistory.tsx b/BillNote_frontend/src/pages/HomePage/components/NoteHistory.tsx
+deleted file mode 100644
+index d11e852..0000000
+--- a/BillNote_frontend/src/pages/HomePage/components/NoteHistory.tsx
++++ /dev/null
+@@ -1,186 +0,0 @@
+-import { useTaskStore } from '@/store/taskStore'
+-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+-import { Badge } from '@/components/ui/badge.tsx'
+-import { cn } from '@/lib/utils.ts'
+-import { Trash } from 'lucide-react'
+-import { Button } from '@/components/ui/button.tsx'
+-import PinyinMatch from 'pinyin-match'
+-import Fuse from 'fuse.js'
+-
+-import {
+-  Tooltip,
+-  TooltipContent,
+-  TooltipProvider,
+-  TooltipTrigger,
+-} from '@/components/ui/tooltip.tsx'
+-import LazyImage from "@/components/LazyImage.tsx";
+-import {FC, useState, useEffect, useMemo} from 'react'
+-
+-interface NoteHistoryProps {
+-  onSelect: (taskId: string) => void
+-  selectedId: string | null
+-}
+-
+-const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
+-  const tasks = useTaskStore(state => state.tasks)
+-  const removeTask = useTaskStore(state => state.removeTask)
+-  // 确保baseURL没有尾部斜杠
+-  const baseURL = (String(import.meta.env.VITE_API_BASE_URL || 'api')).replace(/\/$/, '')
+-  const [rawSearch, setRawSearch] = useState('')
+-  const [search, setSearch] = useState('')
+-  const fuse = useMemo(() => new Fuse(tasks, {
+-    keys: ['audioMeta.title'],
+-    threshold: 0.4 // 匹配精度（越低越严格）
+-  }), [tasks])
+-  useEffect(() => {
+-    const timer = setTimeout(() => {
+-      if (rawSearch === '') return
+-      setSearch(rawSearch)
+-    }, 300) // 300ms 防抖
+-
+-    return () => clearTimeout(timer)
+-  }, [rawSearch])
+-  const filteredTasks = search.trim()
+-      ? fuse.search(search).map(result => result.item)
+-      : tasks
+-  if (filteredTasks.length === 0) {
+-    return (
+-        <>
+-          <div className="mb-2">
+-            <input
+-                type="text"
+-                placeholder="搜索笔记标题..."
+-                className="w-full rounded border border-neutral-300 px-3 py-1 text-sm outline-none focus:border-primary"
+-                value={search}
+-                onChange={e => setSearch(e.target.value)}
+-            />
+-          </div>
+-          <div className="rounded-md border border-neutral-200 bg-neutral-50 py-6 text-center">
+-            <p className="text-sm text-neutral-500">暂无记录</p>
+-          </div>
+-        </>
+-
+-    )
+-  }
+-
+-
+-  return (
+-    <>
+-      <div className="mb-2">
+-        <input
+-            type="text"
+-            placeholder="搜索笔记标题..."
+-            className="w-full rounded border border-neutral-300 px-3 py-1 text-sm outline-none focus:border-primary"
+-            value={search}
+-            onChange={e => setSearch(e.target.value)}
+-        />
+-      </div>
+-      <div className="flex flex-col gap-2 overflow-hidden">
+-        {filteredTasks.map(task => (
+-          <div
+-            key={task.id}
+-            onClick={() => onSelect(task.id)}
+-            className={cn(
+-              'flex cursor-pointer flex-col rounded-md border border-neutral-200 p-3',
+-              selectedId === task.id && 'border-primary bg-primary-light'
+-            )}
+-          >
+-            <div
+-              className={cn('flex items-center gap-4')}
+-            >
+-              {/* 封面图 */}
+-              {task.platform === 'local' ? (
+-                <img
+-                  src={
+-                    task.audioMeta.cover_url ? `${task.audioMeta.cover_url}` : '/placeholder.png'
+-                  }
+-                  alt="封面"
+-                  className="h-10 w-12 rounded-md object-cover"
+-                />
+-              ) : (
+-                  <LazyImage
+-
+-                      src={
+-                        task.audioMeta.cover_url
+-                            ? `${baseURL}/image_proxy?url=${encodeURIComponent(task.audioMeta.cover_url)}`
+-                            : '/placeholder.png'
+-                      }
+-                      alt="封面"
+-                  />
+-              )}
+-
+-              {/* 标题 + 状态 */}
+-
+-              <div className="flex w-full items-center justify-between gap-2">
+-                <TooltipProvider>
+-                  <Tooltip>
+-                    <TooltipTrigger asChild>
+-                      <div className="line-clamp-2 max-w-[180px] flex-1 overflow-hidden text-sm text-ellipsis">
+-                        {task.audioMeta.title || '未命名笔记'}
+-                      </div>
+-                    </TooltipTrigger>
+-                    <TooltipContent>
+-                      <p>{task.audioMeta.title || '未命名笔记'}</p>
+-                    </TooltipContent>
+-                  </Tooltip>
+-                </TooltipProvider>
+-              </div>
+-            </div>
+-            <div className={'mt-2 flex items-center justify-between text-[10px]'}>
+-              <div className="shrink-0">
+-                {task.status === 'SUCCESS' && (
+-                  <div className={'bg-primary w-10 rounded p-0.5 text-center text-white'}>
+-                    已完成
+-                  </div>
+-                )}
+-                {task.status !== 'SUCCESS' && task.status !== 'FAILED' ? (
+-                  <div className={'w-10 rounded bg-green-500 p-0.5 text-center text-white'}>
+-                    等待中
+-                  </div>
+-                ) : (
+-                  <></>
+-                )}
+-                {task.status === 'FAILED' && (
+-                  <div className={'w-10 rounded bg-red-500 p-0.5 text-center text-white'}>失败</div>
+-                )}
+-              </div>
+-
+-              <div>
+-                <TooltipProvider>
+-                  <Tooltip>
+-                    <TooltipTrigger asChild>
+-                      <Button
+-                        type="button"
+-                        size="small"
+-                        variant="ghost"
+-                        onClick={e => {
+-                          e.stopPropagation()
+-                          removeTask(task.id)
+-                        }}
+-                        className="shrink-0"
+-                      >
+-                        <Trash className="text-muted-foreground h-4 w-4" />
+-                      </Button>
+-                    </TooltipTrigger>
+-                    <TooltipContent>
+-                      <p>删除</p>
+-                    </TooltipContent>
+-                  </Tooltip>
+-                </TooltipProvider>
+-              </div>
+-              {/*<div className="shrink-0">*/}
+-              {/*  {task.status === 'SUCCESS' && <Badge variant="default">已完成</Badge>}*/}
+-              {/*  {task.status !== 'SUCCESS' && task.status === 'FAILED' && (*/}
+-              {/*    <Badge variant="outline">等待中</Badge>*/}
+-              {/*  )}*/}
+-              {/*  {task.status === 'FAILED' && <Badge variant="destructive">失败</Badge>}*/}
+-              {/*</div>*/}
+-            </div>
+-          </div>
+-        ))}
+-      </div>
+-    </>
+-  )
+-}
+-
+-export default NoteHistory
+diff --git a/BillNote_frontend/src/pages/LibraryPage/components/FolderCard.tsx b/BillNote_frontend/src/pages/LibraryPage/components/FolderCard.tsx
+new file mode 100644
+index 0000000..ce951d7
+--- /dev/null
++++ b/BillNote_frontend/src/pages/LibraryPage/components/FolderCard.tsx
+@@ -0,0 +1,80 @@
++import { memo, useState } from 'react'
++import { Folder as FolderIcon, MoreHorizontal } from 'lucide-react'
++import { cn } from '@/lib/utils'
++import { Menu, type MenuEntryOrSeparator } from '@/components/ui/menu'
++import { NOTE_DRAG_MIME } from '../utils'
++
++interface FolderCardProps {
++  name: string
++  count: number
++  /** 「未分类」是虚拟文件夹，不能重命名也不能删 */
++  virtual?: boolean
++  active?: boolean
++  onOpen: () => void
++  onDropNote: (taskId: string) => void
++  menuEntries: MenuEntryOrSeparator[]
++}
++
++/** 文件夹卡片，同时是拖拽归档的落点 */
++export const FolderCard = memo(function FolderCard({
++  name,
++  count,
++  virtual = false,
++  active = false,
++  onOpen,
++  onDropNote,
++  menuEntries,
++}: FolderCardProps) {
++  const [dragOver, setDragOver] = useState(false)
++
++  return (
++    <div
++      onClick={onOpen}
++      onDragOver={e => {
++        // 只有拖着笔记过来时才接管，否则让页面正常滚动/选择
++        if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
++        e.preventDefault()
++        e.dataTransfer.dropEffect = 'move'
++        setDragOver(true)
++      }}
++      onDragLeave={() => setDragOver(false)}
++      onDrop={e => {
++        const taskId = e.dataTransfer.getData(NOTE_DRAG_MIME)
++        if (!taskId) return
++        e.preventDefault()
++        setDragOver(false)
++        onDropNote(taskId)
++      }}
++      className={cn(
++        'group flex cursor-pointer flex-col justify-between gap-6 rounded-lg border bg-neutral-50 p-3 shadow-sm transition',
++        active && 'border-primary bg-primary-light',
++        dragOver && 'border-primary ring-primary/40 scale-[1.02] ring-2',
++      )}
++    >
++      <div className="flex items-start justify-between gap-1">
++        <FolderIcon
++          className={cn('h-9 w-9', dragOver ? 'text-primary' : 'text-amber-500')}
++          fill="currentColor"
++          fillOpacity={0.25}
++        />
++        {/* 「未分类」是虚拟文件夹，没有可做的操作，不渲染空菜单按钮 */}
++        {menuEntries.length > 0 && (
++          <Menu
++            trigger={<MoreHorizontal className="h-4 w-4" />}
++            entries={menuEntries}
++            ariaLabel={`${name} 的操作`}
++            className="shrink-0 opacity-60 transition group-hover:opacity-100"
++          />
++        )}
++      </div>
++      <div className="min-w-0">
++        <div className="truncate text-sm font-medium" title={name}>
++          {name}
++        </div>
++        <div className="text-muted-foreground text-xs">
++          {count} 篇{dragOver && ' · 松手归档到这里'}
++        </div>
++      </div>
++    </div>
++  )
++})
+diff --git a/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx b/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx
+new file mode 100644
+index 0000000..825306a
+--- /dev/null
++++ b/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx
+@@ -0,0 +1,177 @@
++import { memo } from 'react'
++import { Folder as FolderIcon, MoreHorizontal } from 'lucide-react'
++import { cn } from '@/lib/utils'
++import { Menu, type MenuEntryOrSeparator } from '@/components/ui/menu'
++import type { ShelfItem } from '@/hooks/useShelfItems'
++import {
++  NOTE_DRAG_MIME,
++  coverSrc,
++  formatDate,
++  formatDuration,
++  platformLabel,
++  platformLogo,
++  statusMeta,
++} from '../utils'
++
++interface NoteItemProps {
++  item: ShelfItem
++  folderName: string
++  onOpen: () => void
++  menuEntries: MenuEntryOrSeparator[]
++  /** 搜索时跨文件夹展示，需要在卡片上标出所属文件夹；在文件夹里浏览时这行是冗余的 */
++  showFolder?: boolean
++}
++
++// 平台图标是内联 svg，自带 width/height=200，必须用 [&_svg] 强制收到容器尺寸
++const PlatformIcon = ({ platform }: { platform?: string | null }) => {
++  const Logo = platformLogo(platform)
++  if (!Logo) return null
++  return (
++    <span className="flex h-3.5 w-3.5 items-center [&_svg]:h-full [&_svg]:w-full">
++      <Logo />
++    </span>
++  )
++}
++
++const CoverFallback = (e: React.SyntheticEvent<HTMLImageElement>) => {
++  const img = e.currentTarget
++  if (!img.src.endsWith('/placeholder.png')) img.src = '/placeholder.png'
++}
++
++const startDrag = (e: React.DragEvent, taskId: string) => {
++  e.dataTransfer.setData(NOTE_DRAG_MIME, taskId)
++  e.dataTransfer.effectAllowed = 'move'
++}
++
++/** 卡片视图：封面 16:9 + 标题 + 归属信息 */
++export const NoteCard = memo(function NoteCard({
++  item,
++  folderName,
++  onOpen,
++  menuEntries,
++  showFolder = true,
++}: NoteItemProps) {
++  const status = statusMeta(item.status)
++  const duration = formatDuration(item.duration)
++
++  return (
++    <div
++      draggable
++      onDragStart={e => startDrag(e, item.taskId)}
++      onClick={onOpen}
++      className="group bg-card flex cursor-pointer flex-col overflow-hidden rounded-lg border shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
++    >
++      <div className="relative aspect-video w-full overflow-hidden bg-neutral-100">
++        <img
++          src={coverSrc(item)}
++          alt=""
++          loading="lazy"
++          onError={CoverFallback}
++          className={cn('h-full w-full object-cover', status.running && 'opacity-50')}
++        />
++        {status.running && (
++          <div className="absolute inset-0 flex items-center justify-center">
++            <span className="h-6 w-6 animate-spin rounded-full border-2 border-white border-t-transparent" />
++          </div>
++        )}
++        <span
++          className={cn(
++            'absolute left-1.5 top-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium',
++            status.className,
++          )}
++        >
++          {status.label}
++        </span>
++        {duration && (
++          <span className="absolute bottom-1.5 right-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[11px] text-white">
++            {duration}
++          </span>
++        )}
++      </div>
++
++      <div className="flex flex-1 flex-col gap-1 p-3">
++        <div className="flex items-start gap-1">
++          <h3 className="line-clamp-2 flex-1 text-sm leading-5 font-medium" title={item.title}>
++            {item.title}
++          </h3>
++          <Menu
++            trigger={<MoreHorizontal className="h-4 w-4" />}
++            entries={menuEntries}
++            ariaLabel={`${item.title} 的操作`}
++            className="shrink-0 opacity-60 transition group-hover:opacity-100"
++          />
++        </div>
++        <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
++          {showFolder && (
++            <>
++              <FolderIcon className="h-3 w-3 shrink-0" />
++              <span className="truncate">{folderName}</span>
++            </>
++          )}
++          <span className="ml-auto flex shrink-0 items-center gap-1">
++            <PlatformIcon platform={item.platform} />
++            {platformLabel(item.platform)}
++          </span>
++        </div>
++        <div className="text-muted-foreground text-xs">{formatDate(item.createdAt)}</div>
++      </div>
++    </div>
++  )
++})
++
++/** 列表视图：同样字段一行一条，笔记多了以后找起来快 */
++export const NoteRow = memo(function NoteRow({
++  item,
++  folderName,
++  onOpen,
++  menuEntries,
++  showFolder = true,
++}: NoteItemProps) {
++  const status = statusMeta(item.status)
++  const duration = formatDuration(item.duration)
++
++  return (
++    <div
++      draggable
++      onDragStart={e => startDrag(e, item.taskId)}
++      onClick={onOpen}
++      className="group bg-card hover:bg-accent/50 flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2"
++    >
++      <img
++        src={coverSrc(item)}
++        alt=""
++        loading="lazy"
++        onError={CoverFallback}
++        className={cn('h-12 w-20 shrink-0 rounded object-cover', status.running && 'opacity-50')}
++      />
++      <div className="min-w-0 flex-1">
++        <div className="truncate text-sm font-medium" title={item.title}>
++          {item.title}
++        </div>
++        <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
++          <span className={cn('rounded px-1.5 py-0.5 text-[11px]', status.className)}>
++            {status.label}
++          </span>
++          {showFolder && (
++            <span className="flex min-w-0 items-center gap-1">
++              <FolderIcon className="h-3 w-3 shrink-0" />
++              <span className="truncate">{folderName}</span>
++            </span>
++          )}
++          <span className="flex shrink-0 items-center gap-1">
++            <PlatformIcon platform={item.platform} />
++            {platformLabel(item.platform)}
++          </span>
++          {duration && <span className="shrink-0">{duration}</span>}
++          <span className="shrink-0">{formatDate(item.createdAt)}</span>
++        </div>
++      </div>
++      <Menu
++        trigger={<MoreHorizontal className="h-4 w-4" />}
++        entries={menuEntries}
++        ariaLabel={`${item.title} 的操作`}
++        className="shrink-0 opacity-60 transition group-hover:opacity-100"
++      />
++    </div>
++  )
++})
+diff --git a/BillNote_frontend/src/pages/LibraryPage/index.tsx b/BillNote_frontend/src/pages/LibraryPage/index.tsx
+new file mode 100644
+index 0000000..5577edf
+--- /dev/null
++++ b/BillNote_frontend/src/pages/LibraryPage/index.tsx
+@@ -0,0 +1,632 @@
++import { useEffect, useMemo, useState } from 'react'
++import { Link, useLocation, useNavigate } from 'react-router-dom'
++import {
++  Clock,
++  Eye,
++  FolderInput,
++  FolderPlus,
++  LayoutGrid,
++  Pencil,
++  List,
++  Plus,
++  Search,
++  SlidersHorizontal,
++  Trash2,
++} from 'lucide-react'
++import Fuse from 'fuse.js'
++import toast from 'react-hot-toast'
++import logo from '@/assets/icon.svg'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
++import type { MenuEntryOrSeparator } from '@/components/ui/menu'
++import { NoteFormDialog } from '@/components/NoteFormDialog'
++import { useLibraryStore, type LibraryFolder } from '@/store/libraryStore'
++import { useTaskStore } from '@/store/taskStore'
++import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
++import { NoteCard, NoteRow } from './components/NoteCard'
++import { FolderCard } from './components/FolderCard'
++import { PromptDialog } from '@/components/PromptDialog'
++
++/** activeFolder: null = 全部，'none' = 未分类，其余是文件夹 id */
++type FolderFilter = string | 'none' | null
++
++type PromptState =
++  | { kind: 'newFolder' }
++  | { kind: 'renameFolder'; id: string; name: string }
++  | { kind: 'renameNote'; id: string; name: string }
++
++const UNCATEGORIZED = '未分类'
++
++/**
++ * 书架页（第一级）。
++ *
++ * 负责"整理和挑选"：文件夹 + 笔记卡片混排、拖拽归档、搜索、新建。
++ * 阅读是第二级 /note/:taskId 的事——分成两级之后正文才拿得到接近满宽的空间，
++ * 也顺带把原来常驻左侧、一天用不了几次的「新建表单」挪进了模态框。
++ */
++const LibraryPage = () => {
++  const navigate = useNavigate()
++  const location = useLocation()
++  const folders = useLibraryStore(state => state.folders)
++  const viewMode = useLibraryStore(state => state.viewMode)
++  const loaded = useLibraryStore(state => state.loaded)
++  const loading = useLibraryStore(state => state.loading)
++  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
++    useLibraryStore()
++  const removeTask = useTaskStore(state => state.removeTask)
++  const items = useShelfItems()
++
++  const [search, setSearch] = useState('')
++  // 从详情页点面包屑回来时，直接落在那篇笔记所在的文件夹里
++  const [activeFolder, setActiveFolder] = useState<FolderFilter>(
++    () => (location.state as { folder?: string | null } | null)?.folder ?? null,
++  )
++  const [newNoteOpen, setNewNoteOpen] = useState(false)
++  const [prompt, setPrompt] = useState<PromptState | null>(null)
++  const [folderToDelete, setFolderToDelete] = useState<LibraryFolder | null>(null)
++  const [noteToDelete, setNoteToDelete] = useState<ShelfItem | null>(null)
++  const [deleting, setDeleting] = useState(false)
++
++  useEffect(() => {
++    fetchLibrary()
++  }, [fetchLibrary])
++
++  const fuse = useMemo(() => new Fuse(items, { keys: ['title'], threshold: 0.4 }), [items])
++
++  const keyword = search.trim()
++  const searching = !!keyword
++
++  const visibleItems = useMemo(() => {
++    // 搜索是全局的：跨文件夹找笔记时不该被当前选中的文件夹限制住
++    const base = searching ? fuse.search(keyword).map(r => r.item) : items
++    const filtered =
++      searching || activeFolder === null
++        ? base
++        : activeFolder === 'none'
++          ? base.filter(item => !item.folderId)
++          : base.filter(item => item.folderId === activeFolder)
++    return [...filtered].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
++  }, [items, fuse, keyword, searching, activeFolder])
++
++  // 最近打开只占一行，够跳回去就行，不做成卡片区
++  const recent = useMemo(
++    () =>
++      items
++        .filter(item => item.lastOpenedAt)
++        .sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))
++        .slice(0, 5),
++    [items],
++  )
++
++  const folderName = (id: string | null) =>
++    id ? (folders.find(f => f.id === id)?.name ?? UNCATEGORIZED) : UNCATEGORIZED
++
++  // 计数一律从合并后的 items 算：后端 note_count 只统计落过盘的笔记，
++  // 刚提交还没写进索引的、以及只在本地的那条会漏掉，chip 上的数字就和「全部」对不上
++  const counts = useMemo(() => {
++    const byFolder = new Map<string, number>()
++    let none = 0
++    for (const item of items) {
++      if (item.folderId) byFolder.set(item.folderId, (byFolder.get(item.folderId) ?? 0) + 1)
++      else none += 1
++    }
++    return { byFolder, none }
++  }, [items])
++
++  const openNote = (taskId: string) => navigate(`/note/${taskId}`)
++
++  const dropInto = async (taskId: string, folderId: string | null) => {
++    const ok = await moveNote(taskId, folderId)
++    if (ok) toast.success(`已移到「${folderName(folderId)}」`)
++  }
++
++  const handleDeleteFolder = async (mode: 'move' | 'delete') => {
++    if (!folderToDelete) return
++    setDeleting(true)
++    try {
++      const ok = await removeFolder(folderToDelete.id, mode)
++      if (ok) {
++        toast.success(mode === 'delete' ? '已删除文件夹和里面的笔记' : '已删除文件夹，笔记移到未分类')
++        if (activeFolder === folderToDelete.id) setActiveFolder(null)
++        setFolderToDelete(null)
++      }
++    } finally {
++      setDeleting(false)
++    }
++  }
++
++  const handleDeleteNote = async () => {
++    if (!noteToDelete) return
++    setDeleting(true)
++    try {
++      // removeTask 会同时清本地记录和后端文件/截图/向量索引
++      await removeTask(noteToDelete.taskId)
++      setNoteToDelete(null)
++      await fetchLibrary()
++    } catch {
++      // 请求拦截器已经弹过提示
++    } finally {
++      setDeleting(false)
++    }
++  }
++
++  const noteEntries = (item: ShelfItem): MenuEntryOrSeparator[] => [
++    { key: 'open', label: '打开', icon: <Eye className="h-4 w-4" />, onSelect: () => openNote(item.taskId) },
++    {
++      key: 'rename',
++      label: '重命名',
++      icon: <Pencil className="h-4 w-4" />,
++      onSelect: () => setPrompt({ kind: 'renameNote', id: item.taskId, name: item.title }),
++    },
++    '---',
++    {
++      key: 'move-none',
++      label: `移到${UNCATEGORIZED}`,
++      icon: <FolderInput className="h-4 w-4" />,
++      disabled: !item.folderId,
++      onSelect: () => dropInto(item.taskId, null),
++    },
++    ...folders
++      .filter(folder => folder.id !== item.folderId)
++      .map(folder => ({
++        key: `move-${folder.id}`,
++        label: `移到「${folder.name}」`,
++        icon: <FolderInput className="h-4 w-4" />,
++        onSelect: () => dropInto(item.taskId, folder.id),
++      })),
++    '---',
++    {
++      key: 'delete',
++      label: '删除笔记',
++      danger: true,
++      icon: <Trash2 className="h-4 w-4" />,
++      onSelect: () => setNoteToDelete(item),
++    },
++  ]
++
++  const folderEntries = (folder: LibraryFolder): MenuEntryOrSeparator[] => [
++    {
++      key: 'open',
++      label: '打开',
++      icon: <Eye className="h-4 w-4" />,
++      onSelect: () => setActiveFolder(folder.id),
++    },
++    {
++      key: 'rename',
++      label: '重命名',
++      icon: <Pencil className="h-4 w-4" />,
++      onSelect: () => setPrompt({ kind: 'renameFolder', id: folder.id, name: folder.name }),
++    },
++    '---',
++    {
++      key: 'delete',
++      label: '删除文件夹',
++      danger: true,
++      icon: <Trash2 className="h-4 w-4" />,
++      onSelect: () => {
++        // 空文件夹没有"笔记怎么办"这个问题，直接删，不弹二次确认
++        if (!counts.byFolder.get(folder.id)) {
++          removeFolder(folder.id, 'move').then(ok => ok && toast.success('已删除文件夹'))
++          if (activeFolder === folder.id) setActiveFolder(null)
++          return
++        }
++        setFolderToDelete(folder)
++      },
++    },
++  ]
++
++  const showFolders = !searching && activeFolder === null
++  const totalNotes = items.length
++  const deletingCount = folderToDelete ? (counts.byFolder.get(folderToDelete.id) ?? 0) : 0
++
++  return (
++    <div className="flex h-screen flex-col overflow-hidden bg-neutral-100">
++      {/* ── 顶栏 ─────────────────────────────────────────── */}
++      <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-white px-4">
++        <div className="flex shrink-0 items-center gap-2">
++          <img src={logo} alt="logo" className="h-7 w-7 object-contain" />
++          <span className="text-lg font-bold text-neutral-800">BiliNote</span>
++        </div>
++
++        <div className="relative mx-auto w-full max-w-md">
++          <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2" />
++          <Input
++            value={search}
++            onChange={e => setSearch(e.target.value)}
++            placeholder="搜索全部笔记…"
++            className="h-9 pl-8"
++          />
++        </div>
++
++        <div className="flex shrink-0 items-center gap-1">
++          <div className="mr-1 flex items-center rounded-md border p-0.5">
++            <TooltipProvider>
++              <Tooltip>
++                <TooltipTrigger asChild>
++                  <button
++                    type="button"
++                    aria-label="卡片视图"
++                    onClick={() => setViewMode('card')}
++                    className={`cursor-pointer rounded p-1 ${
++                      viewMode === 'card' ? 'bg-primary text-white' : 'text-muted-foreground hover:bg-neutral-100'
++                    }`}
++                  >
++                    <LayoutGrid className="h-4 w-4" />
++                  </button>
++                </TooltipTrigger>
++                <TooltipContent>卡片视图</TooltipContent>
++              </Tooltip>
++              <Tooltip>
++                <TooltipTrigger asChild>
++                  <button
++                    type="button"
++                    aria-label="列表视图"
++                    onClick={() => setViewMode('list')}
++                    className={`cursor-pointer rounded p-1 ${
++                      viewMode === 'list' ? 'bg-primary text-white' : 'text-muted-foreground hover:bg-neutral-100'
++                    }`}
++                  >
++                    <List className="h-4 w-4" />
++                  </button>
++                </TooltipTrigger>
++                <TooltipContent>列表视图（信息密度更高）</TooltipContent>
++              </Tooltip>
++            </TooltipProvider>
++          </div>
++
++          <Button size="sm" onClick={() => setNewNoteOpen(true)}>
++            <Plus className="h-4 w-4" />
++            新建笔记
++          </Button>
++
++          <TooltipProvider>
++            <Tooltip>
++              <TooltipTrigger asChild>
++                <Button variant="ghost" size="icon" className="h-9 w-9" asChild>
++                  <Link to="/settings" aria-label="全局配置">
++                    <SlidersHorizontal className="h-4 w-4" />
++                  </Link>
++                </Button>
++              </TooltipTrigger>
++              <TooltipContent>全局配置</TooltipContent>
++            </Tooltip>
++          </TooltipProvider>
++        </div>
++      </header>
++
++      {/* ── 文件夹筛选条 ─────────────────────────────────── */}
++      <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b bg-white px-4 py-2">
++        <FilterChip
++          label="全部"
++          count={totalNotes}
++          active={activeFolder === null && !searching}
++          onClick={() => setActiveFolder(null)}
++        />
++        {folders.map(folder => (
++          <FilterChip
++            key={folder.id}
++            label={folder.name}
++            count={counts.byFolder.get(folder.id) ?? 0}
++            active={activeFolder === folder.id}
++            onClick={() => setActiveFolder(folder.id)}
++          />
++        ))}
++        <FilterChip
++          label={UNCATEGORIZED}
++          count={counts.none}
++          active={activeFolder === 'none'}
++          onClick={() => setActiveFolder('none')}
++        />
++        <Button
++          variant="ghost"
++          size="sm"
++          className="ml-1 shrink-0 text-neutral-500"
++          onClick={() => setPrompt({ kind: 'newFolder' })}
++        >
++          <FolderPlus className="h-4 w-4" />
++          新建文件夹
++        </Button>
++        {searching && (
++          <span className="text-muted-foreground ml-auto shrink-0 text-xs">
++            搜索「{keyword}」· {visibleItems.length} 条结果（跨全部文件夹）
++          </span>
++        )}
++      </div>
++
++      {/* ── 内容区 ───────────────────────────────────────── */}
++      <main className="flex-1 overflow-y-auto px-4 py-4">
++        {showFolders && recent.length > 0 && (
++          <div className="mb-4 flex items-center gap-2 text-sm">
++            <Clock className="text-muted-foreground h-4 w-4 shrink-0" />
++            <span className="text-muted-foreground shrink-0">最近打开</span>
++            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
++              {recent.map(item => (
++                <button
++                  key={item.taskId}
++                  type="button"
++                  onClick={() => openNote(item.taskId)}
++                  className="text-primary max-w-[220px] cursor-pointer truncate hover:underline"
++                  title={item.title}
++                >
++                  {item.title}
++                </button>
++              ))}
++            </div>
++          </div>
++        )}
++
++        {!searching && activeFolder !== null && (
++          <h2 className="text-muted-foreground mb-3 text-sm">
++            {folderName(activeFolder === 'none' ? null : activeFolder)} · {visibleItems.length} 篇
++          </h2>
++        )}
++
++        {visibleItems.length === 0 ? (
++          <EmptyState
++            loading={loading && !loaded}
++            searching={searching}
++            keyword={keyword}
++            hasAnyNote={totalNotes > 0}
++            onCreate={() => setNewNoteOpen(true)}
++            onCreateFolder={() => setPrompt({ kind: 'newFolder' })}
++          />
++        ) : viewMode === 'card' ? (
++          // 文件夹卡和笔记卡混排在同一个 auto-fill 栅格里（确认过的方案），
++          // 共用列宽才能对齐；超宽屏下固定列数会把卡片拉得过大
++          <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
++            {showFolders &&
++              folders.map(folder => (
++                <FolderCard
++                  key={folder.id}
++                  name={folder.name}
++                  count={counts.byFolder.get(folder.id) ?? 0}
++                  active={activeFolder === folder.id}
++                  onOpen={() => setActiveFolder(folder.id)}
++                  onDropNote={taskId => dropInto(taskId, folder.id)}
++                  menuEntries={folderEntries(folder)}
++                />
++              ))}
++            {showFolders && (
++              <FolderCard
++                name={UNCATEGORIZED}
++                count={counts.none}
++                virtual
++                active={activeFolder === 'none'}
++                onOpen={() => setActiveFolder('none')}
++                onDropNote={taskId => dropInto(taskId, null)}
++                menuEntries={[]}
++              />
++            )}
++            {visibleItems.map(item => (
++              <NoteCard
++                key={item.taskId}
++                item={item}
++                folderName={folderName(item.folderId)}
++                showFolder={searching || activeFolder === null}
++                onOpen={() => openNote(item.taskId)}
++                menuEntries={noteEntries(item)}
++              />
++            ))}
++          </div>
++        ) : (
++          <>
++            {showFolders && (
++              <div className="mb-4 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
++                {folders.map(folder => (
++                  <FolderCard
++                    key={folder.id}
++                    name={folder.name}
++                    count={counts.byFolder.get(folder.id) ?? 0}
++                    active={activeFolder === folder.id}
++                    onOpen={() => setActiveFolder(folder.id)}
++                    onDropNote={taskId => dropInto(taskId, folder.id)}
++                    menuEntries={folderEntries(folder)}
++                  />
++                ))}
++                <FolderCard
++                  name={UNCATEGORIZED}
++                  count={counts.none}
++                  virtual
++                  active={activeFolder === 'none'}
++                  onOpen={() => setActiveFolder('none')}
++                  onDropNote={taskId => dropInto(taskId, null)}
++                  menuEntries={[]}
++                />
++              </div>
++            )}
++            <div className="mx-auto flex max-w-5xl flex-col gap-2">
++              {visibleItems.map(item => (
++                <NoteRow
++                  key={item.taskId}
++                  item={item}
++                  folderName={folderName(item.folderId)}
++                  showFolder={searching || activeFolder === null}
++                  onOpen={() => openNote(item.taskId)}
++                  menuEntries={noteEntries(item)}
++                />
++              ))}
++            </div>
++          </>
++        )}
++      </main>
++
++      {/* ── 弹层 ─────────────────────────────────────────── */}
++      <NoteFormDialog
++        open={newNoteOpen}
++        onOpenChange={setNewNoteOpen}
++        taskId={null}
++        onSubmitted={taskId => {
++          fetchLibrary()
++          openNote(taskId)
++        }}
++      />
++
++      <PromptDialog
++        open={prompt !== null}
++        onOpenChange={open => !open && setPrompt(null)}
++        title={
++          prompt?.kind === 'newFolder'
++            ? '新建文件夹'
++            : prompt?.kind === 'renameFolder'
++              ? '重命名文件夹'
++              : '重命名笔记'
++        }
++        description={
++          prompt?.kind === 'renameNote'
++            ? '只有你自己看得到这个别名，视频原标题会保留。清空则恢复用视频标题。'
++            : prompt?.kind === 'renameFolder'
++              ? '改名不影响里面的笔记。'
++              : '文件夹用来收纳笔记，之后可以随时重命名或删除。'
++        }
++        label={prompt?.kind === 'renameNote' ? '别名' : '名称'}
++        initialValue={prompt && prompt.kind !== 'newFolder' ? prompt.name : ''}
++        placeholder={prompt?.kind === 'renameNote' ? '例如：数量关系专项' : '例如：行测'}
++        confirmLabel={prompt?.kind === 'newFolder' ? '创建' : '保存'}
++        onConfirm={async value => {
++          if (!prompt) return false
++          if (prompt.kind === 'newFolder') return addFolder(value)
++          if (prompt.kind === 'renameFolder') return renameFolder(prompt.id, value)
++          return renameNote(prompt.id, value)
++        }}
++      />
++
++      <Dialog open={!!folderToDelete} onOpenChange={open => !open && setFolderToDelete(null)}>
++        <DialogContent className="sm:max-w-[440px]">
++          <DialogHeader>
++            <DialogTitle>删除「{folderToDelete?.name}」？</DialogTitle>
++            <DialogDescription>
++              里面有 {deletingCount} 篇笔记。你可以只删掉文件夹（笔记回到未分类），
++              或者连笔记一起删——后者会同时清掉后端保存的笔记文件和截图，无法恢复。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter className="gap-2 sm:flex-col sm:items-stretch">
++            <Button variant="outline" onClick={() => handleDeleteFolder('move')} disabled={deleting}>
++              只删文件夹，笔记移到{UNCATEGORIZED}
++            </Button>
++            <Button variant="destructive" onClick={() => handleDeleteFolder('delete')} disabled={deleting}>
++              连 {deletingCount} 篇笔记一起删除
++            </Button>
++            <Button variant="ghost" onClick={() => setFolderToDelete(null)} disabled={deleting}>
++              取消
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++
++      <Dialog open={!!noteToDelete} onOpenChange={open => !open && setNoteToDelete(null)}>
++        <DialogContent className="sm:max-w-[420px]">
++          <DialogHeader>
++            <DialogTitle>删除这篇笔记？</DialogTitle>
++            <DialogDescription>
++              「{noteToDelete?.title}」将被永久删除：后端保存的笔记文件、这篇引用的截图、
++              AI 问答索引，以及浏览器里的版本历史都会一起清掉，无法恢复。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter>
++            <Button variant="outline" size="sm" onClick={() => setNoteToDelete(null)} disabled={deleting}>
++              取消
++            </Button>
++            <Button variant="destructive" size="sm" onClick={handleDeleteNote} disabled={deleting}>
++              {deleting ? '删除中…' : '删除'}
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++    </div>
++  )
++}
++
++function FilterChip({
++  label,
++  count,
++  active,
++  onClick,
++}: {
++  label: string
++  count: number
++  active: boolean
++  onClick: () => void
++}) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition ${
++        active
++          ? 'border-primary bg-primary text-white'
++          : 'bg-white text-neutral-700 hover:border-neutral-400'
++      }`}
++    >
++      {label}
++      <span className={active ? 'text-white/80' : 'text-neutral-400'}>{count}</span>
++    </button>
++  )
++}
++
++function EmptyState({
++  loading,
++  searching,
++  keyword,
++  hasAnyNote,
++  onCreate,
++  onCreateFolder,
++}: {
++  loading: boolean
++  searching: boolean
++  keyword: string
++  hasAnyNote: boolean
++  onCreate: () => void
++  onCreateFolder: () => void
++}) {
++  if (loading) {
++    return <p className="text-muted-foreground py-20 text-center text-sm">正在读取笔记库…</p>
++  }
++  if (searching) {
++    return (
++      <p className="text-muted-foreground py-20 text-center text-sm">
++        没有匹配「{keyword}」的笔记
++      </p>
++    )
++  }
++  if (hasAnyNote) {
++    return (
++      <div className="text-muted-foreground py-16 text-center text-sm">
++        这里还没有笔记。把卡片拖进来归档，或者
++        <button type="button" onClick={onCreate} className="text-primary mx-1 cursor-pointer underline">
++          新建一篇
++        </button>
++        。
++      </div>
++    )
++  }
++  return (
++    <div className="flex flex-col items-center gap-4 py-20 text-center">
++      <p className="text-lg font-medium text-neutral-700">还没有笔记</p>
++      <p className="text-muted-foreground max-w-md text-sm">
++        粘贴 B 站 / YouTube / 抖音等视频链接，选一个笔记风格，AI 会把它整理成带目录、
++        可跳转原片、带板书截图的学习笔记。
++      </p>
++      <div className="flex gap-2">
++        <Button onClick={onCreate}>
++          <Plus className="h-4 w-4" />
++          新建笔记
++        </Button>
++        <Button variant="outline" onClick={onCreateFolder}>
++          <FolderPlus className="h-4 w-4" />
++          新建文件夹
++        </Button>
++      </div>
++    </div>
++  )
++}
++
++export default LibraryPage
+diff --git a/BillNote_frontend/src/pages/LibraryPage/utils.ts b/BillNote_frontend/src/pages/LibraryPage/utils.ts
+new file mode 100644
+index 0000000..d4d6210
+--- /dev/null
++++ b/BillNote_frontend/src/pages/LibraryPage/utils.ts
+@@ -0,0 +1,65 @@
++import type { ShelfItem } from '@/hooks/useShelfItems'
++import { taskStatusLabels, videoPlatforms } from '@/constant/note'
++
++/** 拖拽归档用的自定义 MIME。用 text/plain 会和"拖文字"混淆 */
++export const NOTE_DRAG_MIME = 'text/bilinote-note'
++
++// 纯 web 构建下 VITE_API_BASE_URL 是空的（只有 .env.tauri 里有）。兜底必须是【绝对】的 /api：
++// 详情页在 /note/:taskId 这一层，写成相对的 'api' 会被解析成 /note/api/...
++const baseURL = String(import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
++
++/**
++ * 封面要走后端代理：B 站等站点的图片有防盗链，浏览器直接拉会 403。
++ * 本地视频存的是文件路径，直连即可。
++ */
++export const coverSrc = (item: ShelfItem) => {
++  const url = item.coverUrl
++  if (!url) return '/placeholder.png'
++  if (item.platform === 'local') return url
++  return `${baseURL}/image_proxy?url=${encodeURIComponent(url)}`
++}
++
++export const platformLogo = (platform?: string | null) =>
++  videoPlatforms.find(p => p.value === platform)?.logo ?? null
++
++export const platformLabel = (platform?: string | null) =>
++  videoPlatforms.find(p => p.value === platform)?.label ?? ''
++
++export const formatDuration = (seconds?: number | null) => {
++  if (!seconds || seconds <= 0) return ''
++  const total = Math.round(seconds)
++  const h = Math.floor(total / 3600)
++  const m = Math.floor((total % 3600) / 60)
++  const s = total % 60
++  const pad = (n: number) => String(n).padStart(2, '0')
++  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`
++}
++
++/** 一律按浏览器本地时区显示。容器里是 UTC，直接把后端时间戳当本地时间会差 8 小时 */
++export const formatDate = (ms?: number | null) => {
++  if (!ms) return ''
++  const d = new Date(ms)
++  if (isNaN(d.getTime())) return ''
++  const pad = (n: number) => String(n).padStart(2, '0')
++  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
++}
++
++export interface StatusMeta {
++  label: string
++  className: string
++  running: boolean
++}
++
++export const statusMeta = (status: string): StatusMeta => {
++  if (status === 'SUCCESS') {
++    return { label: '已完成', className: 'bg-emerald-50 text-emerald-700', running: false }
++  }
++  if (status === 'FAILED') {
++    return { label: '生成失败', className: 'bg-red-50 text-red-700', running: false }
++  }
++  return {
++    label: taskStatusLabels[status] || '生成中',
++    className: 'bg-blue-50 text-blue-700',
++    running: true,
++  }
++}
+diff --git a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx b/BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
+similarity index 70%
+rename from BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
 index c81c06f..ce13f87 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
-+++ b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
++++ b/BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
 @@ -1,17 +1,22 @@
 -import { useState, useEffect, useCallback, useMemo } from 'react'
 +import { useState, useEffect, useCallback, useMemo, type ClipboardEvent } from 'react'
@@ -508,18 +2758,34 @@ index c81c06f..ce13f87 100644
 -}
 +}
 \ No newline at end of file
-diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
-index 89934b5..13fb3cf 100644
---- a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
-+++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
-@@ -1,9 +1,17 @@
- 'use client'
- 
- import { useEffect, useState } from 'react'
--import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
-+import { Copy, Download, BrainCircuit, MessageSquare, Pencil, ChevronsDownUp, ChevronsUpDown, Trash2 } from 'lucide-react'
- import { Button } from '@/components/ui/button'
- import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
+diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
+new file mode 100644
+index 0000000..e9dde48
+--- /dev/null
++++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
+@@ -0,0 +1,427 @@
++'use client'
++
++import { useEffect, useState } from 'react'
++import {
++  ArrowLeft,
++  BrainCircuit,
++  Check,
++  ChevronDown,
++  ChevronsDownUp,
++  ChevronsUpDown,
++  Copy,
++  Download,
++  FileText,
++  Folder,
++  MessageSquare,
++  MoreHorizontal,
++  Pencil,
++  RefreshCw,
++  Trash2,
++} from 'lucide-react'
++import { Button } from '@/components/ui/button'
++import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 +import {
 +  Dialog,
 +  DialogContent,
@@ -528,55 +2794,138 @@ index 89934b5..13fb3cf 100644
 +  DialogHeader,
 +  DialogTitle,
 +} from '@/components/ui/dialog'
- import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
- import { Badge } from '@/components/ui/badge'
- 
-@@ -30,6 +38,14 @@ interface NoteHeaderProps {
-   setShowTranscribe: (show: boolean) => void
-   showChat?: false | 'half' | 'full'
-   setShowChat?: (mode: false | 'half' | 'full') => void
++import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
++import { Menu, type MenuEntryOrSeparator } from '@/components/ui/menu'
++
++interface VersionNote {
++  ver_id: string
++  model_name?: string
++  style?: string
++  created_at?: string
++}
++
++export interface NoteSibling {
++  taskId: string
++  title: string
++  active: boolean
++}
++
++interface NoteHeaderProps {
++  currentTask?: {
++    markdown: VersionNote[] | string
++  }
++  isMultiVersion: boolean
++  currentVerId: string
++  setCurrentVerId: (id: string) => void
++  modelName: string
++  style: string
++  noteStyles: { value: string; label: string }[]
++  createAt?: string | Date
++
++  /** 视图与右侧面板 */
++  viewMode: 'map' | 'preview'
++  setViewMode: (mode: 'map' | 'preview') => void
++  showTranscribe: boolean
++  setShowTranscribe: (show: boolean) => void
++  showChat?: false | 'half' | 'full'
++  setShowChat?: (mode: false | 'half' | 'full') => void
++
++  /** 动作 */
++  onCopy: () => void
++  onDownload: () => void
 +  onEdit?: () => void
 +  editing?: boolean
-+  /** 一键收起/展开全部章节（折叠状态在 MarkdownViewer 里用 DOM class 维护） */
 +  foldAll?: boolean
 +  onFoldAll?: () => void
-+  /** 删除当前选中的版本（版本历史只存在浏览器本地） */
 +  onDeleteVersion?: () => void
 +  canDeleteVersion?: boolean
- }
- 
- export function MarkdownHeader({
-@@ -49,8 +65,15 @@ export function MarkdownHeader({
-   setShowChat,
-   viewMode,
-   setViewMode,
++  onRegenerate?: () => void
++
++  /** 两级导航：返回书架、所在文件夹、同文件夹的其他笔记 */
++  title: string
++  onBack: () => void
++  folderName?: string
++  onOpenFolder?: () => void
++  siblings?: NoteSibling[]
++  onSwitchNote?: (taskId: string) => void
++  onBackToShelf?: () => void
++  /** 「⋯」菜单尾部的笔记级操作（重命名 / 移动 / 删除 / 设置），由 useNoteActions 提供 */
++  noteEntries?: MenuEntryOrSeparator[]
++}
++
++/**
++ * 详情页顶栏。
++ *
++ * 改造前这里平铺了 10 个按钮 + 3 个徽章 + 创建时间，挤成两行。现在一级只留高频动作
++ * （返回、切换笔记、版本、重新生成、原文参照、AI 问答），其余收进「⋯」；
++ * 模型名 / 风格 / 创建时间改成「⋯」菜单顶部的只读信息，不再常驻占宽度。
++ */
++export function MarkdownHeader({
++  currentTask,
++  isMultiVersion,
++  currentVerId,
++  setCurrentVerId,
++  modelName,
++  style,
++  noteStyles,
++  createAt,
++  viewMode,
++  setViewMode,
++  showTranscribe,
++  setShowTranscribe,
++  showChat,
++  setShowChat,
++  onCopy,
++  onDownload,
 +  onEdit,
 +  editing,
 +  foldAll,
 +  onFoldAll,
 +  onDeleteVersion,
 +  canDeleteVersion,
- }: NoteHeaderProps) {
-   const [copied, setCopied] = useState(false)
++  onRegenerate,
++  title,
++  onBack,
++  folderName,
++  onOpenFolder,
++  siblings,
++  onSwitchNote,
++  onBackToShelf,
++  noteEntries,
++}: NoteHeaderProps) {
++  const [copied, setCopied] = useState(false)
 +  const [confirmDelete, setConfirmDelete] = useState(false)
- 
-   useEffect(() => {
-     let timer: NodeJS.Timeout
-@@ -67,10 +90,6 @@ export function MarkdownHeader({
- 
-   const styleName = noteStyles.find(v => v.value === style)?.label || style
- 
--  const reversedMarkdown: VersionNote[] = Array.isArray(currentTask?.markdown)
--    ? [...currentTask!.markdown].reverse()
--    : []
--
-   const formatDate = (date: string | Date | undefined) => {
-     if (!date) return ''
-     const d = typeof date === 'string' ? new Date(date) : date
-@@ -86,34 +105,95 @@ export function MarkdownHeader({
-       .replace(/\//g, '-')
-   }
- 
++
++  useEffect(() => {
++    let timer: NodeJS.Timeout
++    if (copied) {
++      timer = setTimeout(() => setCopied(false), 2000)
++    }
++    return () => clearTimeout(timer)
++  }, [copied])
++
++  const handleCopy = () => {
++    onCopy()
++    setCopied(true)
++  }
++
++  const styleName = noteStyles.find(v => v.value === style)?.label || style
++
++  const formatDate = (date: string | Date | undefined) => {
++    if (!date) return ''
++    const d = typeof date === 'string' ? new Date(date) : date
++    if (isNaN(d.getTime())) return ''
++    return d
++      .toLocaleString('zh-CN', {
++        year: 'numeric',
++        month: '2-digit',
++        day: '2-digit',
++        hour: '2-digit',
++        minute: '2-digit',
++      })
++      .replace(/\//g, '-')
++  }
++
 +  // 版本按时间倒序排好，最新的在第 0 位
 +  const versions: VersionNote[] = Array.isArray(currentTask?.markdown)
 +    ? [...currentTask!.markdown].sort(
@@ -594,157 +2943,264 @@ index 89934b5..13fb3cf 100644
 +
 +  const currentVersionIndex = versions.findIndex(v => v.ver_id === currentVerId)
 +
-   return (
-     <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-white/95 px-4 py-2 backdrop-blur-sm">
-       {/* 左侧区域：版本 + 标签 + 创建时间 */}
-       <div className="flex flex-wrap items-center gap-3">
-         {isMultiVersion && (
-           <Select value={currentVerId} onValueChange={setCurrentVerId}>
--            <SelectTrigger className="h-8 w-[160px] text-sm">
-+            <SelectTrigger className="h-8 w-[210px] text-sm">
-               <div className="flex items-center">
--                {(() => {
--                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
--                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
--                })()}
++  // 换笔记不用退回书架：标题本身就是下拉，列出同文件夹的笔记 + 最近打开的
++  const canSwitch = (siblings?.length ?? 0) > 1
++  const switchEntries: MenuEntryOrSeparator[] = [
++    ...(siblings ?? []).map(sibling => ({
++      key: sibling.taskId,
++      label: <span className="block max-w-[280px] truncate">{sibling.title}</span>,
++      icon: sibling.active ? <Check className="text-primary h-4 w-4" /> : <FileText className="h-4 w-4" />,
++      disabled: sibling.active,
++      onSelect: () => onSwitchNote?.(sibling.taskId),
++    })),
++    '---',
++    {
++      key: 'back-to-shelf',
++      label: '回到书架',
++      icon: <Folder className="h-4 w-4" />,
++      onSelect: () => (onBackToShelf ?? onBack)(),
++    },
++  ]
++
++  const moreEntries: MenuEntryOrSeparator[] = [
++    ...(onEdit
++      ? [
++          {
++            key: 'edit',
++            label: editing ? '正在编辑…' : '编辑笔记',
++            icon: <Pencil className="h-4 w-4" />,
++            disabled: editing,
++            onSelect: onEdit,
++          },
++        ]
++      : []),
++    {
++      key: 'copy',
++      label: copied ? '已复制' : '复制内容',
++      icon: <Copy className="h-4 w-4" />,
++      onSelect: handleCopy,
++    },
++    {
++      key: 'download',
++      label: '导出 Markdown',
++      icon: <Download className="h-4 w-4" />,
++      onSelect: onDownload,
++    },
++    {
++      key: 'mindmap',
++      label: viewMode === 'map' ? '返回笔记视图' : '思维导图',
++      icon: <BrainCircuit className="h-4 w-4" />,
++      onSelect: () => setViewMode(viewMode === 'map' ? 'preview' : 'map'),
++    },
++    ...(onFoldAll && viewMode === 'preview'
++      ? [
++          {
++            key: 'fold',
++            label: foldAll ? '展开全部章节' : '收起全部章节',
++            icon: foldAll ? <ChevronsUpDown className="h-4 w-4" /> : <ChevronsDownUp className="h-4 w-4" />,
++            onSelect: onFoldAll,
++          },
++        ]
++      : []),
++    ...(onDeleteVersion
++      ? [
++          '---' as const,
++          {
++            key: 'delete-version',
++            label: '删除当前版本',
++            icon: <Trash2 className="h-4 w-4" />,
++            danger: true,
++            disabled: !canDeleteVersion,
++            onSelect: () => setConfirmDelete(true),
++          },
++        ]
++      : []),
++    ...(noteEntries?.length ? (['---' as const, ...noteEntries] as MenuEntryOrSeparator[]) : []),
++  ]
++
++  return (
++    <div className="sticky top-0 z-20 flex items-center gap-1.5 border-b bg-white/95 px-3 py-2 backdrop-blur-sm">
++      <TooltipProvider>
++        <Tooltip>
++          <TooltipTrigger asChild>
++            <Button
++              variant="ghost"
++              size="icon"
++              className="h-8 w-8 shrink-0"
++              onClick={onBack}
++              aria-label="返回书架"
++            >
++              <ArrowLeft className="h-4 w-4" />
++            </Button>
++          </TooltipTrigger>
++          <TooltipContent>返回书架</TooltipContent>
++        </Tooltip>
++      </TooltipProvider>
++
++      {folderName && (
++        <button
++          type="button"
++          onClick={onOpenFolder}
++          className="text-muted-foreground hover:text-primary flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-sm hover:bg-neutral-100"
++          title={`所在文件夹：${folderName}`}
++        >
++          <Folder className="h-3.5 w-3.5" />
++          <span className="max-w-[120px] truncate">{folderName}</span>
++        </button>
++      )}
++
++      <span className="text-muted-foreground shrink-0">/</span>
++
++      {canSwitch ? (
++        <Menu
++          align="start"
++          className="min-w-0 flex-1"
++          triggerClassName="flex w-full min-w-0 items-center gap-1 rounded px-2 py-1 text-sm font-medium hover:bg-neutral-100"
++          ariaLabel="切换到其他笔记"
++          trigger={
++            <>
++              <span className="truncate">{title}</span>
++              <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
++            </>
++          }
++          entries={switchEntries}
++        />
++      ) : (
++        <div className="min-w-0 flex-1 truncate px-2 text-sm font-medium" title={title}>
++          {title}
++        </div>
++      )}
++
++      <div className="ml-auto flex shrink-0 items-center gap-1">
++        {isMultiVersion && (
++          <Select value={currentVerId} onValueChange={setCurrentVerId}>
++            <SelectTrigger className="h-8 w-[190px] text-sm">
++              <div className="flex items-center">
 +                {currentVersionIndex === -1 ? '' : versionLabel(currentVersionIndex)}
-               </div>
-             </SelectTrigger>
- 
-             <SelectContent>
--              {(currentTask?.markdown || []).map((v, idx) => {
--                const shortId = v.ver_id.slice(-6)
--                return (
--                  <SelectItem key={v.ver_id} value={v.ver_id}>
--                    {`版本（${shortId}）`}
--                  </SelectItem>
--                )
--              })}
++              </div>
++            </SelectTrigger>
++            <SelectContent>
 +              {versions.map((v, idx) => (
 +                <SelectItem key={v.ver_id} value={v.ver_id}>
 +                  {versionLabel(idx)}
 +                </SelectItem>
 +              ))}
-             </SelectContent>
-           </Select>
-         )}
- 
-+        {isMultiVersion && onDeleteVersion && (
-+          <>
-+            <TooltipProvider>
-+              <Tooltip>
-+                <TooltipTrigger asChild>
-+                  <Button
-+                    variant="ghost"
-+                    size="sm"
-+                    className="h-8 w-8 p-0 text-neutral-500 hover:bg-red-50 hover:text-red-600"
-+                    disabled={!canDeleteVersion}
-+                    onClick={() => setConfirmDelete(true)}
-+                  >
-+                    <Trash2 className="h-4 w-4" />
-+                  </Button>
-+                </TooltipTrigger>
-+                <TooltipContent>
-+                  {canDeleteVersion ? '删除当前选中的版本' : '只剩一个版本，不能删'}
-+                </TooltipContent>
-+              </Tooltip>
-+            </TooltipProvider>
-+
-+            <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-+              <DialogContent className="max-w-sm">
-+                <DialogHeader>
-+                  <DialogTitle>删除这个版本？</DialogTitle>
-+                  <DialogDescription>
-+                    {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
-+                    　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
-+                  </DialogDescription>
-+                </DialogHeader>
-+                <DialogFooter>
-+                  <Button variant="outline" size="sm" onClick={() => setConfirmDelete(false)}>
-+                    取消
-+                  </Button>
-+                  <Button
-+                    variant="destructive"
-+                    size="sm"
-+                    onClick={() => {
-+                      setConfirmDelete(false)
-+                      onDeleteVersion()
-+                    }}
-+                  >
-+                    删除
-+                  </Button>
-+                </DialogFooter>
-+              </DialogContent>
-+            </Dialog>
-+          </>
++            </SelectContent>
++          </Select>
 +        )}
 +
-         <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200">
-           {modelName}
-         </Badge>
-@@ -146,6 +226,23 @@ export function MarkdownHeader({
-             <TooltipContent>思维导图</TooltipContent>
-           </Tooltip>
-         </TooltipProvider>
-+        {onFoldAll && (
-+          <TooltipProvider>
-+            <Tooltip>
-+              <TooltipTrigger asChild>
-+                <Button onClick={onFoldAll} variant="ghost" size="sm" className="h-8 px-2">
-+                  {foldAll ? (
-+                    <ChevronsUpDown className="mr-1.5 h-4 w-4" />
-+                  ) : (
-+                    <ChevronsDownUp className="mr-1.5 h-4 w-4" />
-+                  )}
-+                  <span className="text-sm">{foldAll ? '展开全部' : '收起全部'}</span>
-+                </Button>
-+              </TooltipTrigger>
-+              <TooltipContent>一键收起/展开所有章节，方便快速定位</TooltipContent>
-+            </Tooltip>
-+          </TooltipProvider>
-+        )}
-         <TooltipProvider>
-           <Tooltip>
-             <TooltipTrigger asChild>
-@@ -169,6 +266,25 @@ export function MarkdownHeader({
-             <TooltipContent>下载为 Markdown 文件</TooltipContent>
-           </Tooltip>
-         </TooltipProvider>
-+        {onEdit && (
++        {isMultiVersion && (
 +          <TooltipProvider>
 +            <Tooltip>
 +              <TooltipTrigger asChild>
 +                <Button
-+                  onClick={onEdit}
-+                  variant={editing ? 'default' : 'ghost'}
-+                  size="sm"
-+                  className="h-8 px-2"
-+                  disabled={editing}
++                  variant="ghost"
++                  size="icon"
++                  className="text-neutral-500 hover:bg-red-50 hover:text-red-600 h-8 w-8"
++                  disabled={!canDeleteVersion}
++                  onClick={() => setConfirmDelete(true)}
++                  aria-label="删除当前版本"
 +                >
-+                  <Pencil className="mr-1.5 h-4 w-4" />
-+                  <span className="text-sm">{editing ? '编辑中' : '编辑'}</span>
++                  <Trash2 className="h-4 w-4" />
 +                </Button>
 +              </TooltipTrigger>
-+              <TooltipContent>编辑笔记内容（可删除重复的图片行）</TooltipContent>
++              <TooltipContent>
++                {canDeleteVersion ? '删除当前选中的版本' : '只剩一个版本，不能删'}
++              </TooltipContent>
 +            </Tooltip>
 +          </TooltipProvider>
 +        )}
-         <TooltipProvider>
-           <Tooltip>
-             <TooltipTrigger asChild>
-@@ -208,4 +324,4 @@ export function MarkdownHeader({
-       </div>
-     </div>
-   )
--}
++
++        {onRegenerate && (
++          <TooltipProvider>
++            <Tooltip>
++              <TooltipTrigger asChild>
++                <Button variant="outline" size="sm" className="h-8" onClick={onRegenerate}>
++                  <RefreshCw className="h-4 w-4" />
++                  重新生成
++                </Button>
++              </TooltipTrigger>
++              <TooltipContent>用原来的链接重新生成，可以先改风格和模型；结果会作为新版本追加</TooltipContent>
++            </Tooltip>
++          </TooltipProvider>
++        )}
++
++        <Button
++          variant={showTranscribe ? 'secondary' : 'ghost'}
++          size="sm"
++          className="h-8"
++          onClick={() => setShowTranscribe(!showTranscribe)}
++        >
++          <FileText className="h-4 w-4" />
++          原文参照
++        </Button>
++
++        {setShowChat && (
++          <Button
++            variant={showChat ? 'secondary' : 'ghost'}
++            size="sm"
++            className="h-8"
++            onClick={() => setShowChat(showChat ? false : 'half')}
++          >
++            <MessageSquare className="h-4 w-4" />
++            AI 问答
++          </Button>
++        )}
++
++        <Menu
++          trigger={<MoreHorizontal className="h-4 w-4" />}
++          entries={moreEntries}
++          ariaLabel="更多操作"
++          info={
++            <div className="space-y-0.5">
++              <div>风格：{styleName || '—'}</div>
++              <div>模型：{modelName || '—'}</div>
++              {createAt && <div>创建：{formatDate(createAt)}</div>}
++              {versions.length > 0 && <div>版本数：{versions.length}</div>}
++            </div>
++          }
++        />
++      </div>
++
++      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
++        <DialogContent className="max-w-sm">
++          <DialogHeader>
++            <DialogTitle>删除这个版本？</DialogTitle>
++            <DialogDescription>
++              {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
++              　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter>
++            <Button variant="outline" size="sm" onClick={() => setConfirmDelete(false)}>
++              取消
++            </Button>
++            <Button
++              variant="destructive"
++              size="sm"
++              onClick={() => {
++                setConfirmDelete(false)
++                onDeleteVersion?.()
++              }}
++            >
++              删除
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++    </div>
++  )
 +}
-\ No newline at end of file
-diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
-index c34a0e5..856348c 100644
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
+similarity index 54%
+rename from BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
+index c34a0e5..4495f59 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
-+++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
-@@ -1,7 +1,7 @@
++++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
+@@ -1,12 +1,13 @@
  import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
++import { useNavigate } from 'react-router-dom'
  import ReactMarkdown from 'react-markdown'
  import { Button } from '@/components/ui/button.tsx'
 -import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
@@ -752,7 +3208,13 @@ index c34a0e5..856348c 100644
  import { toast } from 'react-hot-toast'
  import Error from '@/components/Lottie/error.tsx'
  import Loading from '@/components/Lottie/Loading.tsx'
-@@ -15,11 +15,14 @@ import gfm from 'remark-gfm'
+ import Idle from '@/components/Lottie/Idle.tsx'
+-import StepBar from '@/pages/HomePage/components/StepBar.tsx'
++import StepBar from '@/pages/NotePage/components/StepBar.tsx'
+ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+ import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
+ import Zoom from 'react-medium-image-zoom'
+@@ -15,40 +16,41 @@ import gfm from 'remark-gfm'
  import remarkMath from 'remark-math'
  import rehypeKatex from 'rehype-katex'
  import rehypeSlug from 'rehype-slug'
@@ -762,13 +3224,37 @@ index c34a0e5..856348c 100644
  import { ScrollArea } from '@/components/ui/scroll-area.tsx'
  import { useTaskStore } from '@/store/taskStore'
 -import { noteStyles } from '@/constant/note.ts'
+-import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
+-import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
+-import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
+-import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
+-import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
+-
+-interface VersionNote {
+-  ver_id: string
+-  content: string
+-  style: string
+-  model_name: string
+-  created_at?: string
+-}
 +import { update_note } from '@/services/note'
 +import { normalizeMathDelimiters } from '@/utils/math'
 +import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
- import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
- import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
- import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
-@@ -41,14 +44,16 @@ interface MarkdownViewerProps {
++import { MarkdownHeader } from '@/pages/NotePage/components/MarkdownHeader.tsx'
++import TranscriptViewer from '@/pages/NotePage/components/transcriptViewer.tsx'
++import MarkmapEditor from '@/pages/NotePage/components/MarkmapComponent.tsx'
++import ChatPanel from '@/pages/NotePage/components/ChatPanel.tsx'
++import VideoBanner from '@/pages/NotePage/components/VideoBanner.tsx'
++import { NoteFormDialog } from '@/components/NoteFormDialog'
++import { useNoteActions } from '@/hooks/useNoteActions'
++import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
++import { useLibraryStore } from '@/store/libraryStore'
++import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
+ 
+ interface MarkdownViewerProps {
+-  content: string | VersionNote[]
+   status: 'idle' | 'loading' | 'success' | 'failed'
+ }
  
  const steps = [
    { label: '解析链接', key: 'PARSING' },
@@ -787,7 +3273,7 @@ index c34a0e5..856348c 100644
  
  /**
   * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
-@@ -99,7 +104,7 @@ function createMarkdownComponents(baseURL: string) {
+@@ -99,7 +101,7 @@ function createMarkdownComponents(baseURL: string) {
          (children[0] as string).startsWith('原片 @')
  
        if (isOriginLink) {
@@ -796,7 +3282,7 @@ index c34a0e5..856348c 100644
          const timeText = timeMatch ? timeMatch[1] : '原片'
  
          return (
-@@ -145,6 +150,10 @@ function createMarkdownComponents(baseURL: string) {
+@@ -145,6 +147,10 @@ function createMarkdownComponents(baseURL: string) {
            }
  
            if (target) {
@@ -807,17 +3293,71 @@ index c34a0e5..856348c 100644
              target.scrollIntoView({ behavior: 'smooth', block: 'start' })
            } else {
              toast.error('未找到对应章节')
-@@ -330,6 +339,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+@@ -330,11 +336,62 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
    const [showTranscribe, setShowTranscribe] = useState(false)
    const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
    const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
+-  const svgRef = useRef<SVGSVGElement>(null)
 +  const [editing, setEditing] = useState(false)
 +  const [draft, setDraft] = useState('')
 +  const [saving, setSaving] = useState(false)
-   const svgRef = useRef<SVGSVGElement>(null)
  
    // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
-@@ -366,6 +378,56 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
+ 
++  // ---- 两级导航：返回书架 / 同文件夹切换 / 笔记级操作 ----
++  const navigate = useNavigate()
++  const shelfItems = useShelfItems()
++  const taskId = currentTask?.id
++  const {
++    title: noteTitle,
++    folderId,
++    folderName,
++    entries: noteEntries,
++    dialogs: noteDialogs,
++  } = useNoteActions(taskId, currentTask?.audioMeta?.title || '未命名笔记')
++  const [regenerateOpen, setRegenerateOpen] = useState(false)
++
++  // 标题下拉里放同文件夹的笔记 + 最近打开的，去重后截断：
++  // 换一篇笔记不该非得退回书架再点一次（两级导航最大的代价就是这个，得补回来）
++  const siblings = useMemo<NoteSibling[]>(() => {
++    const sameFolder = shelfItems.filter(item => item.folderId === folderId)
++    const recent = shelfItems
++      .filter(item => item.lastOpenedAt)
++      .sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))
++    const merged: ShelfItem[] = []
++    const seen = new Set<string>()
++    for (const item of [...sameFolder, ...recent]) {
++      if (seen.has(item.taskId)) continue
++      seen.add(item.taskId)
++      merged.push(item)
++    }
++    return merged.slice(0, 12).map(item => ({
++      taskId: item.taskId,
++      title: item.title,
++      active: item.taskId === taskId,
++    }))
++  }, [shelfItems, folderId, taskId])
++
++  const goShelf = (folder?: string | null) =>
++    navigate('/', folder ? { state: { folder } } : undefined)
++
++  const overlays = (
++    <>
++      <NoteFormDialog
++        open={regenerateOpen}
++        onOpenChange={setRegenerateOpen}
++        taskId={taskId ?? null}
++        onSubmitted={() => useLibraryStore.getState().fetchLibrary()}
++      />
++      {noteDialogs}
++    </>
++  )
++
+   // 多版本内容处理
+   useEffect(() => {
+     if (!currentTask) return
+@@ -366,6 +423,56 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
        setSelectedContent(currentVer.content)
      }
    }, [currentVerId, currentTask?.id])
@@ -874,7 +3414,41 @@ index c34a0e5..856348c 100644
    const handleCopy = async () => {
      try {
        await navigator.clipboard.writeText(selectedContent)
-@@ -415,14 +477,84 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+@@ -376,33 +483,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+       toast.error('复制失败')
+     }
+   }
+-  const alertButton = {
+-    id: 'alert',
+-    title: '测试警告',
+-    content: '⚠️',
+-    onClick: () => alert('你点击了自定义按钮！'),
+-  }
+-  const exportButton = {
+-    id: 'export',
+-    title: '导出思维导图',
+-    content: '⤓',
+-    onClick: () => {
+-      const svgEl = svgRef.current
+-      if (!svgEl) return
+-      // 同上面的序列化逻辑
+-      const serializer = new XMLSerializer()
+-      const source = serializer.serializeToString(svgEl)
+-      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
+-        type: 'image/svg+xml;charset=utf-8',
+-      })
+-      const url = URL.createObjectURL(blob)
+-      const a = document.createElement('a')
+-      a.href = url
+-      a.download = 'mindmap.svg'
+-      a.click()
+-      URL.revokeObjectURL(url)
+-    },
+-  }
+   const handleDownload = () => {
+     const task = getCurrentTask()
+     const name = task?.audioMeta.title || 'note'
+@@ -415,14 +495,84 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
      document.body.removeChild(link)
    }
  
@@ -948,7 +3522,8 @@ index c34a0e5..856348c 100644
 +
    if (status === 'loading') {
      return (
-       <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
++      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
          <StepBar steps={steps} currentStep={taskStatus} />
          <Loading className="h-5 w-5" />
          <div className="text-center text-sm">
@@ -961,7 +3536,64 @@ index c34a0e5..856348c 100644
          </div>
        </div>
      )
-@@ -475,6 +607,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+@@ -430,7 +580,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+ 
+   if (status === 'idle') {
+     return (
+-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
++      <div className="flex h-full w-full flex-col items-center justify-center space-y-3 text-neutral-500">
+         <Idle />
+         <div className="text-center">
+           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
+@@ -442,23 +592,40 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+ 
+   if (status === 'failed' && !isMultiVersion) {
+     return (
+-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
++      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
+         <Error />
+         <div className="text-center">
+           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
+-          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
+-
+-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
+-            重试
+-          </Button>
++          <p className="mt-2 mb-4 text-xs text-red-400">可以直接重试，也可以先换个模型或笔记风格</p>
++          <div className="flex justify-center gap-2">
++            <Button onClick={() => retryTask(currentTask.id)} size="lg">
++              直接重试
++            </Button>
++            <Button variant="outline" size="lg" onClick={() => setRegenerateOpen(true)}>
++              改参数重新生成
++            </Button>
++            <Button variant="ghost" size="lg" onClick={() => goShelf()}>
++              返回书架
++            </Button>
++          </div>
+         </div>
++        {overlays}
+       </div>
+     )
+   }
+ 
+   return (
+-    <div className="flex h-screen w-full flex-col overflow-hidden">
++    <div className="flex h-full w-full flex-col overflow-hidden">
+       <MarkdownHeader
++        title={noteTitle}
++        onBack={() => goShelf()}
++        folderName={folderName}
++        onOpenFolder={() => goShelf(folderId)}
++        siblings={siblings}
++        onSwitchNote={id => navigate(`/note/${id}`)}
++        onBackToShelf={() => goShelf()}
++        onRegenerate={() => setRegenerateOpen(true)}
++        noteEntries={noteEntries}
+         currentTask={currentTask}
+         isMultiVersion={isMultiVersion}
+         currentVerId={currentVerId}
+@@ -475,6 +642,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
          setShowChat={setShowChat}
          viewMode={viewMode}
          setViewMode={setViewMode}
@@ -974,7 +3606,7 @@ index c34a0e5..856348c 100644
        />
  
        {viewMode === 'map' ? (
-@@ -488,6 +626,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+@@ -488,6 +661,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
              />
            </div>
          </div>
@@ -1032,26 +3664,54 @@ index c34a0e5..856348c 100644
        ) : (
          <div className="flex flex-1 overflow-hidden bg-white py-2">
            {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
-@@ -505,13 +694,13 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+@@ -499,20 +723,22 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+               ) : (
+               <>
+               <ScrollArea className="min-w-0 flex-1">
+-                <div className="px-2">
++                {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
++                    成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
++                <div className="mx-auto w-full max-w-[1200px] px-2">
+                   <VideoBanner
+                     audioMeta={currentTask?.audioMeta}
                      videoUrl={currentTask?.formData?.video_url}
                    />
-                 </div>
+-                </div>
 -                <div className={'markdown-body w-full px-2'}>
-+                <div className={'markdown-body w-full px-2'} ref={bodyRef} onClick={handleFoldClick}>
-                   <ReactMarkdown
-                     remarkPlugins={remarkPlugins}
-                     rehypePlugins={rehypePlugins}
-                     components={markdownComponents}
-                   >
+-                  <ReactMarkdown
+-                    remarkPlugins={remarkPlugins}
+-                    rehypePlugins={rehypePlugins}
+-                    components={markdownComponents}
+-                  >
 -                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
-+                    {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
-                   </ReactMarkdown>
+-                  </ReactMarkdown>
++                  <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
++                    <ReactMarkdown
++                      remarkPlugins={remarkPlugins}
++                      rehypePlugins={rehypePlugins}
++                      components={markdownComponents}
++                    >
++                      {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
++                    </ReactMarkdown>
++                  </div>
                  </div>
                </ScrollArea>
-diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
+               {showTranscribe && (
+@@ -542,6 +768,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+           )}
+         </div>
+       )}
++      {overlays}
+     </div>
+   )
+ })
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkmapComponent.tsx
+similarity index 99%
+rename from BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/MarkmapComponent.tsx
 index 21a7e8d..e5268d3 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
-+++ b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
++++ b/BillNote_frontend/src/pages/NotePage/components/MarkmapComponent.tsx
 @@ -1,6 +1,7 @@
  import { useEffect, useRef, useState } from 'react'
  import { Markmap } from 'markmap-view'
@@ -1069,11 +3729,37 @@ index 21a7e8d..e5268d3 100644
  }
  
  function createExportSvg(svgEl: SVGSVGElement) {
-diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx b/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
-index 8a04b7c..4a9f44c 100644
+diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx b/BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
+similarity index 87%
+rename from BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
+index 8a04b7c..e9b7243 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
-+++ b/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
-@@ -36,7 +36,7 @@ import {
++++ b/BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
+@@ -7,12 +7,12 @@ import {
+   FormLabel,
+   FormMessage,
+ } from '@/components/ui/form.tsx'
+-import { useEffect,useState } from 'react'
++import { useEffect, useMemo, useState } from 'react'
+ import { useForm, useWatch } from 'react-hook-form'
+ import { zodResolver } from '@hookform/resolvers/zod'
+ import { z } from 'zod'
+ 
+-import { Info, Loader2, Plus } from 'lucide-react'
++import { Info, Loader2 } from 'lucide-react'
+ import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
+ import { generateNote } from '@/services/note.ts'
+ import { uploadFile } from '@/services/upload.ts'
+@@ -25,7 +25,6 @@ import {
+   TooltipTrigger,
+ } from '@/components/ui/tooltip.tsx'
+ import { Checkbox } from '@/components/ui/checkbox.tsx'
+-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+ import { Button } from '@/components/ui/button.tsx'
+ import {
+   Select,
+@@ -36,7 +35,7 @@ import {
  } from '@/components/ui/select.tsx'
  import { Input } from '@/components/ui/input.tsx'
  import { Textarea } from '@/components/ui/textarea.tsx'
@@ -1082,13 +3768,77 @@ index 8a04b7c..4a9f44c 100644
  import { fetchModels } from '@/services/model.ts'
  import { useNavigate } from 'react-router-dom'
  import toast from 'react-hot-toast'
-@@ -199,8 +199,11 @@ const NoteForm = () => {
+@@ -131,13 +130,23 @@ const CheckboxGroup = ({
+ )
+ 
+ /* -------------------- 主组件 -------------------- */
+-const NoteForm = () => {
++interface NoteFormProps {
++  /**
++   * 指定这张表单对应哪篇笔记（即「重新生成」模式）。
++   * 传 null = 强制新建；不传 = 跟随全局 currentTaskId（旧行为）。
++   */
++  taskId?: string | null
++  /** 提交成功后回调，用来关掉对话框并跳到详情页 */
++  onSubmitted?: (taskId: string) => void
++}
++
++const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
+   const navigate = useNavigate();
+   const [isUploading, setIsUploading] = useState(false)
+   const [uploadSuccess, setUploadSuccess] = useState(false)
+   /* ---- 全局状态 ---- */
+-  const { addPendingTask, currentTaskId, setCurrentTask, getCurrentTask, retryTask } =
+-    useTaskStore()
++  const { addPendingTask, currentTaskId, retryTask } = useTaskStore()
++  const tasks = useTaskStore(state => state.tasks)
+   const { loadEnabledModels, modelList, showFeatureHint, setShowFeatureHint } = useModelStore()
+ 
+   /* ---- 表单 ---- */
+@@ -153,12 +162,16 @@ const NoteForm = () => {
+       format: [],
+     },
+   })
+-  const currentTask = getCurrentTask()
++  const targetId = taskId === undefined ? currentTaskId : taskId
++  const currentTask = useMemo(
++    () => tasks.find(task => task.id === targetId) ?? null,
++    [tasks, targetId],
++  )
+ 
+   /* ---- 派生状态（只 watch 一次，提高性能） ---- */
+   const platform = useWatch({ control: form.control, name: 'platform' }) as string
+   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
+-  const editing = currentTask && currentTask.id
++  const editing = !!currentTask
+ 
+   const goModelAdd = () => {
+     navigate("/settings/model");
+@@ -173,8 +186,6 @@ const NoteForm = () => {
+     if (!currentTask) return
+     const { formData } = currentTask
+ 
+-    console.log('currentTask.formData.platform:', formData.platform)
+-
+     form.reset({
+       platform: formData.platform || 'bilibili',
+       video_url: formData.video_url || '',
+@@ -191,7 +202,7 @@ const NoteForm = () => {
+     })
+   }, [
+     // 当下面任意一个变了，就重新 reset
+-    currentTaskId,
++    targetId,
+     // modelList 用来兜底 model_name
+     modelList.length,
+     // 还要加上 formData 的各字段，或者直接 currentTask
+@@ -199,8 +210,11 @@ const NoteForm = () => {
    ])
  
    /* ---- 帮助函数 ---- */
 -  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
 -  const generating = isGenerating()
-+  const taskStatus = getCurrentTask()?.status
++  const taskStatus = currentTask?.status
 +  const generating = isTaskRunning(taskStatus)
 +  // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
 +  const [submitting, setSubmitting] = useState(false)
@@ -1096,7 +3846,7 @@ index 8a04b7c..4a9f44c 100644
    const handleFileUpload = async (file: File, cb: (url: string) => void) => {
      const formData = new FormData()
      formData.append('file', file)
-@@ -221,21 +224,25 @@ const NoteForm = () => {
+@@ -221,23 +235,29 @@ const NoteForm = () => {
    }
  
    const onSubmit = async (values: NoteFormValues) => {
@@ -1123,18 +3873,22 @@ index 8a04b7c..4a9f44c 100644
 +        video_url:
 +          values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
 +        provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
-+        task_id: currentTaskId || '',
++        task_id: currentTask?.id || '',
 +      }
-+      if (currentTaskId) {
++      if (currentTask) {
 +        // 必须 await：retryTask 内部会先把状态置成 PENDING，锁才接得上
-+        await retryTask(currentTaskId, payload)
++        const ok = await retryTask(currentTask.id, payload)
++        if (ok) onSubmitted?.(currentTask.id)
 +        return
 +      }
 +
        const data = await generateNote(payload)
        addPendingTask(data.task_id, values.platform, payload)
++      onSubmitted?.(data.task_id)
      } catch (e: any) {
-@@ -253,6 +260,8 @@ const NoteForm = () => {
+       // 就绪门禁：本地转写模型还没下载好。后端返回 reason='transcriber_model_not_ready'，
+       // 引导用户去「设置 → 音频转写配置」下载，而不是留一个静默失败的任务。
+@@ -253,38 +273,28 @@ const NoteForm = () => {
        }
        // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
        console.error('提交任务失败：', e)
@@ -1143,9 +3897,16 @@ index 8a04b7c..4a9f44c 100644
      }
    }
    const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
-@@ -265,16 +274,20 @@ const NoteForm = () => {
-     setCurrentTask(null)
+     console.warn('表单校验失败：', errors)
+     // message.error('请完善所有必填项后再提交')
    }
+-  const handleCreateNew = () => {
+-    // 🔁 这里清空当前任务状态
+-    // 比如调用 resetCurrentTask() 或者 navigate 到一个新页面
+-    setCurrentTask(null)
+-  }
++  // 表单现在只活在对话框里：新建走书架页的「+ 新建笔记」，重新生成走详情页顶栏，
++  // 所以不再需要那个会把 currentTask 清空的「新建笔记」副按钮
    const FormButton = () => {
 -    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
 +    const label = busy
@@ -1155,18 +3916,203 @@ index 8a04b7c..4a9f44c 100644
 +        : '生成笔记'
  
      return (
-       <div className="flex gap-2">
-         <Button
-           type="submit"
-           className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
+-      <div className="flex gap-2">
+-        <Button
+-          type="submit"
+-          className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
 -          disabled={generating}
-+          disabled={busy}
-         >
+-        >
 -          {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-+          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-           {label}
-         </Button>
+-          {label}
+-        </Button>
+-
+-        {editing && (
+-          <Button type="button" variant="outline" className="w-1/3" onClick={handleCreateNew}>
+-            <Plus className="mr-2 h-4 w-4" />
+-            新建笔记
+-          </Button>
+-        )}
+-      </div>
++      <Button type="submit" className="w-full" disabled={busy}>
++        {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
++        {label}
++      </Button>
+     )
+   }
  
+@@ -293,9 +303,6 @@ const NoteForm = () => {
+     <div className="h-full w-full">
+       <Form {...form}>
+         <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="space-y-4">
+-          {/* 顶部按钮 */}
+-          <FormButton></FormButton>
+-
+           {/* 视频链接 & 平台 */}
+           <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
+           <div className="flex gap-2">
+@@ -575,6 +582,9 @@ const NoteForm = () => {
+               </FormItem>
+             )}
+           />
++
++          {/* 提交按钮放在末尾：表单现在活在模态框里，主操作该在滚动内容的最后 */}
++          <FormButton />
+         </form>
+       </Form>
+     </div>
+diff --git a/BillNote_frontend/src/pages/HomePage/components/StepBar.tsx b/BillNote_frontend/src/pages/NotePage/components/StepBar.tsx
+similarity index 100%
+rename from BillNote_frontend/src/pages/HomePage/components/StepBar.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/StepBar.tsx
+diff --git a/BillNote_frontend/src/pages/HomePage/components/VideoBanner.tsx b/BillNote_frontend/src/pages/NotePage/components/VideoBanner.tsx
+similarity index 92%
+rename from BillNote_frontend/src/pages/HomePage/components/VideoBanner.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/VideoBanner.tsx
+index 6acd3a9..b4481e1 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/VideoBanner.tsx
++++ b/BillNote_frontend/src/pages/NotePage/components/VideoBanner.tsx
+@@ -18,8 +18,9 @@ export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
+   if (!audioMeta) return null
+ 
+   const rawCover = audioMeta.cover_url
+-  // 通过后端代理加载封面，避免跨域/Referrer 限制
+-  const apiBase = String(import.meta.env.VITE_API_BASE_URL || 'api').replace(/\/$/, '')
++  // 通过后端代理加载封面，避免跨域/Referrer 限制。
++  // 兜底用绝对的 /api：本页在 /note/:taskId 这一层，相对的 'api' 会解析成 /note/api/... 而 404
++  const apiBase = String(import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
+   const coverUrl = rawCover
+     ? `${apiBase}/image_proxy?url=${encodeURIComponent(rawCover)}`
+     : ''
+diff --git a/BillNote_frontend/src/pages/HomePage/components/transcriptViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/transcriptViewer.tsx
+similarity index 100%
+rename from BillNote_frontend/src/pages/HomePage/components/transcriptViewer.tsx
+rename to BillNote_frontend/src/pages/NotePage/components/transcriptViewer.tsx
+diff --git a/BillNote_frontend/src/pages/NotePage/index.tsx b/BillNote_frontend/src/pages/NotePage/index.tsx
+new file mode 100644
+index 0000000..5a79762
+--- /dev/null
++++ b/BillNote_frontend/src/pages/NotePage/index.tsx
+@@ -0,0 +1,120 @@
++import { FC, useEffect, useRef, useState } from 'react'
++import { Navigate, useNavigate, useParams } from 'react-router-dom'
++import { Loader2 } from 'lucide-react'
++import { Button } from '@/components/ui/button'
++import MarkdownViewer from '@/pages/NotePage/components/MarkdownViewer'
++import { get_task_status } from '@/services/note'
++import { useLibraryStore } from '@/store/libraryStore'
++import { useTaskStore } from '@/store/taskStore'
++
++type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
++
++/**
++ * 详情页（第二级）：只负责阅读一篇笔记。
++ *
++ * 走真路由（/note/:taskId）之后浏览器后退键、刷新、收藏夹都能用了；
++ * 以前是纯 store 驱动，刷新一下就从笔记回到空白首页。
++ */
++const NotePage: FC = () => {
++  const { taskId } = useParams<{ taskId: string }>()
++  const navigate = useNavigate()
++  const tasks = useTaskStore(state => state.tasks)
++  const setCurrentTask = useTaskStore(state => state.setCurrentTask)
++  const hydrateTask = useTaskStore(state => state.hydrateTask)
++  const touchNote = useLibraryStore(state => state.touchNote)
++  const fetchLibrary = useLibraryStore(state => state.fetchLibrary)
++  const libraryLoaded = useLibraryStore(state => state.loaded)
++
++  const currentTask = tasks.find(task => task.id === taskId)
++  const [status, setStatus] = useState<ViewStatus>('idle')
++  const [restoring, setRestoring] = useState(false)
++  const [restoreFailed, setRestoreFailed] = useState(false)
++  // 每篇只尝试恢复一次：条件里若只看 currentTask/restoring，notes 一变化就会反复打后端
++  const attemptedRef = useRef<string | null>(null)
++
++  useEffect(() => {
++    fetchLibrary()
++  }, [fetchLibrary])
++
++  useEffect(() => {
++    if (!taskId) return
++    setCurrentTask(taskId)
++    touchNote(taskId)
++  }, [taskId, setCurrentTask, touchNote])
++
++  // 清过浏览器缓存 / 换了浏览器时本地没有这篇，用后端 note_results 里存的那份重建，
++  // 否则直接刷新 /note/:id 会是一片空白。
++  // 必须等笔记库索引拉回来再动手：form_data 和 created_at 都在索引里，抢跑的话
++  // 恢复出来的笔记会缺「重新生成」要用的原始参数，创建时间也会变成"现在"。
++  useEffect(() => {
++    if (!taskId || currentTask || attemptedRef.current === taskId) return
++    if (!libraryLoaded) return
++    attemptedRef.current = taskId
++    setRestoring(true)
++    const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
++    get_task_status(taskId)
++      .then(res => {
++        if (!res?.status) {
++          setRestoreFailed(true)
++          return
++        }
++        hydrateTask({
++          task_id: taskId,
++          status: res.status,
++          markdown: res.result?.markdown,
++          transcript: res.result?.transcript,
++          audio_meta: res.result?.audio_meta,
++          form_data: indexed?.form_data ?? null,
++          created_at: indexed?.created_at ?? null,
++        })
++      })
++      .catch(() => setRestoreFailed(true))
++      .finally(() => setRestoring(false))
++  }, [taskId, currentTask, libraryLoaded, hydrateTask])
++
++  useEffect(() => {
++    if (!currentTask) {
++      setStatus('idle')
++    } else if (currentTask.status === 'SUCCESS') {
++      setStatus('success')
++    } else if (currentTask.status === 'FAILED') {
++      setStatus('failed')
++    } else {
++      // PENDING、DOWNLOADING、EXTRACTING、TRANSCRIBING、SUMMARIZING 等所有进行中状态
++      setStatus('loading')
++    }
++  }, [currentTask?.id, currentTask?.status])
++
++  if (!taskId) return <Navigate to="/" replace />
++
++  if (restoring) {
++    return (
++      <div className="text-muted-foreground flex h-screen items-center justify-center gap-2 text-sm">
++        <Loader2 className="h-4 w-4 animate-spin" />
++        正在从后端恢复这篇笔记…
++      </div>
++    )
++  }
++
++  if (!currentTask || restoreFailed) {
++    return (
++      <div className="flex h-screen flex-col items-center justify-center gap-3">
++        <p className="text-lg font-medium text-neutral-700">找不到这篇笔记</p>
++        <p className="text-muted-foreground max-w-md text-center text-sm">
++          后端也没有它的记录。可能已经被删除，或者生成从未成功落盘。
++        </p>
++        <Button variant="outline" onClick={() => navigate('/')}>
++          返回书架
++        </Button>
++      </div>
++    )
++  }
++
++  return (
++    <div className="flex h-screen flex-col overflow-hidden bg-white">
++      <MarkdownViewer status={status} />
++    </div>
++  )
++}
++
++export default NotePage
 diff --git a/BillNote_frontend/src/services/chat.ts b/BillNote_frontend/src/services/chat.ts
 index 32f541f..3ef58d0 100644
 --- a/BillNote_frontend/src/services/chat.ts
@@ -1187,11 +4133,117 @@ index 32f541f..3ef58d0 100644
 -}
 +}
 \ No newline at end of file
+diff --git a/BillNote_frontend/src/services/library.ts b/BillNote_frontend/src/services/library.ts
+new file mode 100644
+index 0000000..13a0fc5
+--- /dev/null
++++ b/BillNote_frontend/src/services/library.ts
+@@ -0,0 +1,63 @@
++import request from '@/utils/request'
++
++export interface LibraryFolder {
++  id: string
++  name: string
++  sort_order: number
++  created_at: number | null
++  note_count?: number
++}
++
++export interface LibraryNote {
++  task_id: string
++  title: string | null
++  video_title: string | null
++  folder_id: string | null
++  status: string | null
++  video_id: string | null
++  platform: string | null
++  cover_url: string | null
++  duration: number | null
++  created_at: number | null
++  updated_at: number | null
++  last_opened_at: number | null
++  /** 生成时的表单参数，浏览器本地记录丢了以后靠它恢复「重新生成」 */
++  form_data: Record<string, any> | null
++}
++
++export interface LibraryPayload {
++  folders: LibraryFolder[]
++  notes: LibraryNote[]
++  uncategorized: number
++}
++
++export type DeleteFolderMode = 'move' | 'delete'
++
++// 响应拦截器已经把 { code, msg, data } 拆成了 data，所以第二个泛型参数才是真正拿到的类型。
++// 所有时间字段是 epoch 毫秒（后端存的是 naive UTC，返回 ISO 字符串会被 new Date() 当本地时间解析）。
++export const getLibrary = () => request.get<any, LibraryPayload>('/library')
++
++export const createFolder = (name: string) =>
++  request.post<any, LibraryFolder>('/library/folder', { name })
++
++export const renameFolder = (id: string, name: string) =>
++  request.patch<any, LibraryFolder>(`/library/folder/${id}`, { name })
++
++export const deleteFolder = (id: string, mode: DeleteFolderMode) =>
++  request.delete<any, { deleted_notes: number }>(`/library/folder/${id}`, { params: { mode } })
++
++export const moveNote = (taskId: string, folderId: string | null) =>
++  request.post<any, { task_id: string; folder_id: string | null }>('/library/move', {
++    task_id: taskId,
++    folder_id: folderId,
++  })
++
++export const renameNote = (taskId: string, title: string) =>
++  request.post<any, { task_id: string; title: string | null }>('/library/rename', {
++    task_id: taskId,
++    title,
++  })
++
++/** 进详情页时打点，书架页的「最近打开」靠它排序。失败不值得打扰用户。 */
++export const touchNote = (taskId: string) =>
++  request.post<any, null>('/library/touch', { task_id: taskId }, { suppressToast: true })
 diff --git a/BillNote_frontend/src/services/note.ts b/BillNote_frontend/src/services/note.ts
-index 722bd92..fd72928 100644
+index 722bd92..0092a05 100644
 --- a/BillNote_frontend/src/services/note.ts
 +++ b/BillNote_frontend/src/services/note.ts
-@@ -70,6 +70,11 @@ export const get_task_status = async (task_id: string) => {
+@@ -41,22 +41,20 @@ export const generateNote = async (data: {
+   }
+ }
+ 
+-export const delete_task = async ({ video_id, platform }) => {
+-  try {
+-    const data = {
+-      video_id,
+-      platform,
+-    }
+-    const res = await request.post('/delete_task', data)
+-
+-
+-      toast.success('任务已成功删除')
+-      return res
+-  } catch (e) {
+-    toast.error('请求异常，删除任务失败')
+-    console.error('❌ 删除任务失败:', e)
+-    throw e
+-  }
++/**
++ * 删除一篇笔记。后端会真正清掉 note_results 下的 5 个文件、这篇引用的截图、
++ * SQLite 索引行和向量索引（以前那个接口是空壳，界面上删了盘上什么都没少）。
++ * 失败提示交给请求拦截器统一弹，这里不重复 toast。
++ */
++export const delete_task = async ({ task_id }: { task_id: string }) => {
++  const res = await request.post<any, { deleted_files: number; deleted_screenshots: number }>(
++    '/delete_task',
++    { task_id },
++  )
++  toast.success(
++    res?.deleted_screenshots ? `已删除笔记，释放 ${res.deleted_screenshots} 张截图` : '已删除笔记',
++  )
++  return res
+ }
+ 
+ export const get_task_status = async (task_id: string) => {
+@@ -70,6 +68,11 @@ export const get_task_status = async (task_id: string) => {
      // 错误提示
      toast.error('笔记生成失败，请稍后重试')
  
@@ -1236,20 +4288,249 @@ index 51baa57..12a03bb 100644
 -)
 +)
 \ No newline at end of file
+diff --git a/BillNote_frontend/src/store/libraryStore.ts b/BillNote_frontend/src/store/libraryStore.ts
+new file mode 100644
+index 0000000..0fed00d
+--- /dev/null
++++ b/BillNote_frontend/src/store/libraryStore.ts
+@@ -0,0 +1,163 @@
++import { create } from 'zustand'
++import { persist, createJSONStorage } from 'zustand/middleware'
++import { del, get, set } from 'idb-keyval'
++import * as api from '@/services/library'
++import type { DeleteFolderMode, LibraryFolder, LibraryNote } from '@/services/library'
++
++export type ShelfViewMode = 'card' | 'list'
++
++interface LibraryState {
++  folders: LibraryFolder[]
++  notes: LibraryNote[]
++  uncategorized: number
++  viewMode: ShelfViewMode
++  loaded: boolean
++  loading: boolean
++  fetchLibrary: () => Promise<void>
++  setViewMode: (mode: ShelfViewMode) => void
++  addFolder: (name: string) => Promise<boolean>
++  renameFolder: (id: string, name: string) => Promise<boolean>
++  removeFolder: (id: string, mode: DeleteFolderMode) => Promise<boolean>
++  moveNote: (taskId: string, folderId: string | null) => Promise<boolean>
++  renameNote: (taskId: string, title: string) => Promise<boolean>
++  touchNote: (taskId: string) => Promise<void>
++  folderName: (folderId: string | null | undefined) => string
++}
++
++/**
++ * 书架页的数据源。文件夹与笔记索引以后端 SQLite 为准——历史列表以前只存在浏览器
++ * IndexedDB 里，清一次缓存就再也找不回来（盘上的 json 没有任何接口能列出来）。
++ * 写操作一律先调后端再改本地 state；失败时请求拦截器已经弹过 toast，这里只返回 false。
++ */
++export const useLibraryStore = create<LibraryState>()(
++  persist(
++    (set, get) => ({
++      folders: [],
++      notes: [],
++      uncategorized: 0,
++      viewMode: 'card',
++      loaded: false,
++      loading: false,
++
++      fetchLibrary: async () => {
++        if (get().loading) return
++        set({ loading: true })
++        try {
++          const data = await api.getLibrary()
++          set({
++            folders: data?.folders ?? [],
++            notes: data?.notes ?? [],
++            uncategorized: data?.uncategorized ?? 0,
++            loaded: true,
++          })
++        } catch {
++          // 后端不可用时保留上一次的数据，界面不至于变成空白书架
++        } finally {
++          set({ loading: false })
++        }
++      },
++
++      setViewMode: mode => set({ viewMode: mode }),
++
++      addFolder: async name => {
++        try {
++          const folder = await api.createFolder(name)
++          set(state => ({ folders: [...state.folders, { ...folder, note_count: 0 }] }))
++          return true
++        } catch {
++          return false
++        }
++      },
++
++      renameFolder: async (id, name) => {
++        try {
++          const folder = await api.renameFolder(id, name)
++          set(state => ({
++            folders: state.folders.map(f => (f.id === id ? { ...f, ...folder } : f)),
++          }))
++          return true
++        } catch {
++          return false
++        }
++      },
++
++      removeFolder: async (id, mode) => {
++        try {
++          await api.deleteFolder(id, mode)
++          set(state => ({
++            folders: state.folders.filter(f => f.id !== id),
++            notes:
++              mode === 'delete'
++                ? state.notes.filter(n => n.folder_id !== id)
++                : state.notes.map(n => (n.folder_id === id ? { ...n, folder_id: null } : n)),
++          }))
++          return true
++        } catch {
++          return false
++        }
++      },
++
++      moveNote: async (taskId, folderId) => {
++        const before = get().notes
++        // 先本地改一遍，拖拽松手要立刻看到卡片落到新文件夹里，不等网络往返
++        set(state => ({
++          notes: state.notes.map(n => (n.task_id === taskId ? { ...n, folder_id: folderId } : n)),
++        }))
++        try {
++          await api.moveNote(taskId, folderId)
++          return true
++        } catch {
++          set({ notes: before })
++          return false
++        }
++      },
++
++      renameNote: async (taskId, title) => {
++        try {
++          const data = await api.renameNote(taskId, title)
++          set(state => ({
++            notes: state.notes.map(n =>
++              n.task_id === taskId ? { ...n, title: data?.title ?? null } : n,
++            ),
++          }))
++          return true
++        } catch {
++          return false
++        }
++      },
++
++      touchNote: async taskId => {
++        const now = Date.now()
++        set(state => ({
++          notes: state.notes.map(n => (n.task_id === taskId ? { ...n, last_opened_at: now } : n)),
++        }))
++        try {
++          await api.touchNote(taskId)
++        } catch {
++          // 打点失败无所谓，不值得提示
++        }
++      },
++
++      folderName: folderId => {
++        if (!folderId) return '未分类'
++        return get().folders.find(f => f.id === folderId)?.name ?? '未分类'
++      },
++    }),
++    {
++      name: 'library-storage',
++      // 只持久化视图偏好；文件夹和笔记每次都从后端拉，避免两边不一致
++      partialize: state => ({ viewMode: state.viewMode }) as LibraryState,
++      storage: createJSONStorage(() => ({
++        getItem: async (name: string): Promise<string | null> => (await get(name)) ?? null,
++        setItem: async (name: string, value: string): Promise<void> => {
++          await set(name, value)
++        },
++        removeItem: async (name: string): Promise<void> => {
++          await del(name)
++        },
++      })),
++    },
++  ),
++)
++
++export type { LibraryFolder, LibraryNote }
 diff --git a/BillNote_frontend/src/store/taskStore/index.ts b/BillNote_frontend/src/store/taskStore/index.ts
-index f511f78..8811874 100644
+index f511f78..4ccf5c3 100644
 --- a/BillNote_frontend/src/store/taskStore/index.ts
 +++ b/BillNote_frontend/src/store/taskStore/index.ts
-@@ -4,6 +4,7 @@ import { delete_task, generateNote } from '@/services/note.ts'
+@@ -4,9 +4,25 @@ import { delete_task, generateNote } from '@/services/note.ts'
  import { v4 as uuidv4 } from 'uuid'
  import toast from 'react-hot-toast'
  import { get, set, del } from 'idb-keyval'
 +import { isTaskRunning, taskStatusLabels } from '@/constant/note'
  
  
- export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
-@@ -62,10 +63,11 @@ interface TaskStore {
-   addPendingTask: (taskId: string, platform: string) => void
+-export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
++/**
++ * 后端 TaskStatus 枚举的取值（app/enmus/task_status_enums.py）。
++ * 以前这里写的是 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'：FAILD 拼错、RUNNING 后端根本不发、
++ * 中间阶段全缺。运行时靠 taskStatusLabels 的 Record<string,string> 兜住了才没出事。
++ */
++export type TaskStatus =
++  | 'PENDING'
++  | 'PARSING'
++  | 'DOWNLOADING'
++  | 'EXTRACTING'
++  | 'TRANSCRIBING'
++  | 'SUMMARIZING'
++  | 'FORMATTING'
++  | 'SAVING'
++  | 'SUCCESS'
++  | 'FAILED'
+ 
+ export interface AudioMeta {
+   cover_url: string
+@@ -45,27 +61,49 @@ export interface Task {
+   status: TaskStatus
+   audioMeta: AudioMeta
+   createdAt: string
++  /** addPendingTask 一直在写这个字段（书架页靠它判断封面走不走代理），接口里以前漏了声明 */
++  platform: string
++  /** 所属文件夹，null = 未分类。权威值在后端 notes 表，这里只是本地副本 */
++  folderId?: string | null
++  /** 用户自定义别名，为空时显示视频标题 */
++  title?: string | null
+   formData: {
+     video_url: string
+-    link: undefined | boolean
+-    screenshot: undefined | boolean
++    link?: boolean
++    screenshot?: boolean
+     platform: string
+     quality: string
+     model_name: string
+     provider_id: string
++    // NoteForm 提交时是把整个 payload 存进来的，style / format / extras /
++    // video_understanding / video_interval / grid_size 也都在里面，重新生成要用
++    [key: string]: any
+   }
+ }
+ 
++/** 详情页刷新后本地没这篇时，用后端 /api/task_status 的返回把它重建出来 */
++export interface HydratePayload {
++  task_id: string
++  status?: string
++  markdown?: string
++  transcript?: Transcript
++  audio_meta?: AudioMeta
++  form_data?: Record<string, any> | null
++  created_at?: number | null
++}
++
+ interface TaskStore {
+   tasks: Task[]
+   currentTaskId: string | null
+-  addPendingTask: (taskId: string, platform: string) => void
++  addPendingTask: (taskId: string, platform: string, formData: Task['formData']) => void
++  hydrateTask: (payload: HydratePayload) => void
    updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
    removeTask: (id: string) => void
 +  removeVersion: (taskId: string, verId: string) => void
@@ -1261,7 +4542,26 @@ index f511f78..8811874 100644
  }
  
  export const useTaskStore = create<TaskStore>()(
-@@ -116,6 +118,12 @@ export const useTaskStore = create<TaskStore>()(
+@@ -74,8 +112,7 @@ export const useTaskStore = create<TaskStore>()(
+       tasks: [],
+       currentTaskId: null,
+ 
+-      addPendingTask: (taskId: string, platform: string, formData: any) =>
+-
++      addPendingTask: (taskId, platform, formData) =>
+         set(state => ({
+           tasks: [
+             {
+@@ -84,6 +121,8 @@ export const useTaskStore = create<TaskStore>()(
+               status: 'PENDING',
+               markdown: '',
+               platform: platform,
++              folderId: null,
++              title: null,
+               transcript: {
+                 full_text: '',
+                 language: '',
+@@ -116,6 +155,12 @@ export const useTaskStore = create<TaskStore>()(
                // 如果是 markdown 字符串，封装为版本
                if (typeof data.markdown === 'string') {
                  const prev = task.markdown
@@ -1274,7 +4574,7 @@ index f511f78..8811874 100644
                  const newVersion: Markdown = {
                    ver_id: `${task.id}-${uuidv4()}`,
                    content: data.markdown,
-@@ -159,50 +167,65 @@ export const useTaskStore = create<TaskStore>()(
+@@ -159,66 +204,128 @@ export const useTaskStore = create<TaskStore>()(
          return get().tasks.find(task => task.id === currentTaskId) || null
        },
        retryTask: async (id: string, payload?: any) => {
@@ -1347,6 +4647,8 @@ index f511f78..8811874 100644
        },
  
  
+-      removeTask: async id => {
+-        const task = get().tasks.find(t => t.id === id)
 +      removeVersion: (taskId, verId) =>
 +        set(state => ({
 +          tasks: state.tasks.map(task => {
@@ -1357,10 +4659,101 @@ index f511f78..8811874 100644
 +            return { ...task, markdown: rest }
 +          }),
 +        })),
-+
-       removeTask: async id => {
-         const task = get().tasks.find(t => t.id === id)
  
+-        // 更新 Zustand 状态
++      removeTask: async id => {
++        // 先本地移除让界面立刻响应。后端删除失败不回滚——条目塞回来只会让人以为没删掉，
++        // 书架页刷新后它本来也会重新出现。
+         set(state => ({
+           tasks: state.tasks.filter(task => task.id !== id),
+           currentTaskId: state.currentTaskId === id ? null : state.currentTaskId,
+         }))
++        // 不管本地有没有这条都要通知后端：清过浏览器缓存时本地记录已经没了，
++        // 但 note_results 里的文件和截图还在盘上
++        await delete_task({ task_id: id })
++      },
+ 
+-        // 调用后端删除接口（如果找到了任务）
+-        if (task) {
+-          await delete_task({
+-            video_id: task.audioMeta.video_id,
+-            platform: task.platform,
+-          })
++      hydrateTask: payload => {
++        const { task_id } = payload
++        // 本地已有就不覆盖：浏览器里可能存着多个版本，后端只留最新一份
++        if (get().tasks.some(task => task.id === task_id)) return
++
++        const meta = payload.audio_meta
++        const form = payload.form_data ?? {}
++        const createdAt = new Date(payload.created_at ?? Date.now()).toISOString()
++        const task: Task = {
++          id: task_id,
++          status: (payload.status || 'SUCCESS') as TaskStatus,
++          markdown: payload.markdown
++            ? [
++                {
++                  ver_id: `${task_id}-restored`,
++                  content: payload.markdown,
++                  style: form.style || '',
++                  model_name: form.model_name || '',
++                  created_at: createdAt,
++                },
++              ]
++            : '',
++          transcript: payload.transcript ?? {
++            full_text: '',
++            language: '',
++            raw: null,
++            segments: [],
++          },
++          platform: meta?.platform || form.platform || '',
++          folderId: null,
++          title: null,
++          audioMeta: meta ?? {
++            cover_url: '',
++            duration: 0,
++            file_path: '',
++            platform: '',
++            raw_info: null,
++            title: '',
++            video_id: '',
++          },
++          createdAt,
++          formData: {
++            video_url: form.video_url || meta?.raw_info?.webpage_url || '',
++            platform: form.platform || meta?.platform || '',
++            quality: form.quality || 'medium',
++            model_name: form.model_name || '',
++            provider_id: form.provider_id || '',
++            ...form,
++          },
+         }
++        set(state => ({ tasks: [task, ...state.tasks] }))
+       },
+ 
+       clearTasks: () => set({ tasks: [], currentTaskId: null }),
+@@ -227,6 +334,20 @@ export const useTaskStore = create<TaskStore>()(
+     }),
+     {
+       name: 'task-storage',
++      version: 2,
++      migrate: (persisted: any, version: number) => {
++        // v2：Task 增加 folderId / title，并把一直在写却没声明的 platform 补进类型。
++        // 老记录只补默认值，内容和版本历史一律不动。
++        if (version < 2 && Array.isArray(persisted?.tasks)) {
++          persisted.tasks = persisted.tasks.map((task: any) => ({
++            ...task,
++            folderId: task.folderId ?? null,
++            title: task.title ?? null,
++            platform: task.platform ?? task.audioMeta?.platform ?? '',
++          }))
++        }
++        return persisted
++      },
+       storage: createJSONStorage(() => ({
+         getItem: async (name: string): Promise<string | null> => {
+           const value = await get(name)
 diff --git a/BillNote_frontend/src/utils/math.ts b/BillNote_frontend/src/utils/math.ts
 new file mode 100644
 index 0000000..b4fd56a
@@ -1382,6 +4775,23 @@ index 0000000..b4fd56a
 +    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
 +}
 \ No newline at end of file
+diff --git a/BillNote_frontend/vite.config.ts b/BillNote_frontend/vite.config.ts
+index e2af180..4edd2d7 100644
+--- a/BillNote_frontend/vite.config.ts
++++ b/BillNote_frontend/vite.config.ts
+@@ -31,7 +31,11 @@ export default defineConfig(({ mode }) => {
+   const appVersion = env.VITE_APP_VERSION || process.env.VITE_APP_VERSION || readAppVersion()
+ 
+   return {
+-    base: './',
++    // Docker（nginx 静态部署）必须用绝对路径：笔记详情页是 /note/:taskId 这样的深链接，
++    // 相对路径会被解析成 /note/assets/xxx.js，nginx 的 SPA fallback 返回 index.html，
++    // 浏览器就以 "Expected a JavaScript module script" 拒绝执行，整页空白。
++    // Tauri 桌面端仍用相对路径（构建时没有 DOCKER_BUILD）。
++    base: process.env.DOCKER_BUILD ? '/' : './',
+     define: {
+       __APP_VERSION__: JSON.stringify(appVersion),
+     },
 diff --git a/Dockerfile.gpu-base b/Dockerfile.gpu-base
 new file mode 100644
 index 0000000..6b3e4dc
@@ -1407,10 +4817,10 @@ index 0000000..6b3e4dc
 \ No newline at end of file
 diff --git a/Dockerfile.patch b/Dockerfile.patch
 new file mode 100644
-index 0000000..a86c25c
+index 0000000..6b4d770
 --- /dev/null
 +++ b/Dockerfile.patch
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,50 @@
 +# 构建前端（与官方 Dockerfile.complete 一致的 node:20 + pnpm 9.15 环境，走国内镜像）
 +FROM docker.m.daocloud.io/library/node:20-alpine AS ui
 +ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
@@ -1423,7 +4833,8 @@ index 0000000..a86c25c
 +RUN pnpm run build
 +
 +# 在 GPU 基础镜像上叠加：新前端构建产物 + 修补后的后端
-+# （chat 贴图问答 / 公式渲染 / 笔记编辑保存 / Whisper 下载 / 截图相似去重 / 目录锚点与长视频时间戳修复）
++# （chat 贴图问答 / 公式渲染 / 笔记编辑保存 / Whisper 下载 / 截图相似去重 / 目录锚点与长视频时间戳修复
++#   / 笔记库：文件夹收纳 + 书架页 + 真正生效的删除）
 +# 基础镜像 bilinote-gpu-base:local 由本仓库的 Dockerfile.gpu-base 构建（上游镜像 + CUDA torch + CUDA12 运行库）；
 +# 两者必须是不同的 tag：以前 patch 直接 FROM bilinote-gpu:local 又打回同一个 tag，每次构建都往上叠一层，
 +# 叠到第 5 次就撞上 Docker 的 127 层上限（docker run 报 "max depth exceeded"）。
@@ -1449,9 +4860,365 @@ index 0000000..a86c25c
 +COPY backend/app/enmus/task_status_enums.py /app/backend/app/enmus/task_status_enums.py
 +COPY backend/app/transcriber/whisper.py /app/backend/app/transcriber/whisper.py
 +COPY backend/app/transcriber/transcriber_provider.py /app/backend/app/transcriber/transcriber_provider.py
++# 笔记库（书架页 / 文件夹）：新表 + 索引接口 + 真正删除笔记产物；main.py 里加了启动回填
++COPY backend/main.py /app/backend/main.py
++COPY backend/app/__init__.py /app/backend/app/__init__.py
++COPY backend/app/db/init_db.py /app/backend/app/db/init_db.py
++COPY backend/app/db/video_task_dao.py /app/backend/app/db/video_task_dao.py
++COPY backend/app/db/library_dao.py /app/backend/app/db/library_dao.py
++COPY backend/app/db/models/library.py /app/backend/app/db/models/library.py
++COPY backend/app/routers/library.py /app/backend/app/routers/library.py
++COPY backend/app/services/library_service.py /app/backend/app/services/library_service.py
 +# 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
 +COPY backend/tests/ /app/backend/tests/
 \ No newline at end of file
+diff --git a/backend/app/__init__.py b/backend/app/__init__.py
+index f97ca9a..ddd046f 100644
+--- a/backend/app/__init__.py
++++ b/backend/app/__init__.py
+@@ -1,6 +1,6 @@
+ from fastapi import FastAPI
+ 
+-from .routers import note, provider, model, config, chat
++from .routers import note, provider, model, config, chat, library
+ 
+ 
+ 
+@@ -11,5 +11,6 @@ def create_app(lifespan) -> FastAPI:
+     app.include_router(model.router,prefix="/api")
+     app.include_router(config.router,  prefix="/api")
+     app.include_router(chat.router, prefix="/api")
++    app.include_router(library.router, prefix="/api")
+ 
+     return app
+diff --git a/backend/app/db/init_db.py b/backend/app/db/init_db.py
+index d7e9847..6a9e9b7 100644
+--- a/backend/app/db/init_db.py
++++ b/backend/app/db/init_db.py
+@@ -1,6 +1,7 @@
+ from app.db.models.models import Model
+ from app.db.models.providers import Provider
+ from app.db.models.video_tasks import VideoTask
++from app.db.models.library import Folder, NoteRecord
+ from app.db.engine import get_engine, Base
+ 
+ def init_db():
+diff --git a/backend/app/db/library_dao.py b/backend/app/db/library_dao.py
+new file mode 100644
+index 0000000..2546817
+--- /dev/null
++++ b/backend/app/db/library_dao.py
+@@ -0,0 +1,237 @@
++import json
++import uuid
++from datetime import datetime, timezone
++from typing import Optional
++
++from app.db.engine import get_db
++from app.db.models.library import Folder, NoteRecord
++from app.utils.logger import get_logger
++
++logger = get_logger(__name__)
++
++
++def _ms(dt: Optional[datetime]) -> Optional[int]:
++    """SQLite 里存的是 naive UTC（func.now() 走 CURRENT_TIMESTAMP）。
++
++    直接返回 ISO 字符串会被前端 new Date() 当成本地时间解析，界面就会比实际早/晚若干小时
++    ——之前踩过这个坑。统一转成 epoch 毫秒，前端 new Date(ms) 没有歧义。
++    """
++    if dt is None:
++        return None
++    if dt.tzinfo is None:
++        dt = dt.replace(tzinfo=timezone.utc)
++    return int(dt.timestamp() * 1000)
++
++
++def _folder_to_dict(row: Folder) -> dict:
++    return {
++        "id": row.id,
++        "name": row.name,
++        "sort_order": row.sort_order or 0,
++        "created_at": _ms(row.created_at),
++    }
++
++
++def _note_to_dict(row: NoteRecord) -> dict:
++    try:
++        form_data = json.loads(row.form_data) if row.form_data else None
++    except (TypeError, ValueError):
++        form_data = None
++    return {
++        "task_id": row.task_id,
++        "title": row.title,
++        "video_title": row.video_title,
++        "folder_id": row.folder_id,
++        "status": row.status,
++        "video_id": row.video_id,
++        "platform": row.platform,
++        "cover_url": row.cover_url,
++        "duration": row.duration,
++        "created_at": _ms(row.created_at),
++        "updated_at": _ms(row.updated_at),
++        "last_opened_at": _ms(row.last_opened_at),
++        "form_data": form_data,
++    }
++
++
++# ── 文件夹 ────────────────────────────────────────────────────
++
++
++def list_folders() -> list[dict]:
++    db = next(get_db())
++    try:
++        rows = db.query(Folder).order_by(Folder.sort_order.asc(), Folder.created_at.asc()).all()
++        return [_folder_to_dict(r) for r in rows]
++    finally:
++        db.close()
++
++
++def create_folder(name: str) -> dict:
++    name = (name or "").strip()
++    if not name:
++        raise ValueError("文件夹名称不能为空")
++    db = next(get_db())
++    try:
++        if db.query(Folder).filter_by(name=name).first():
++            raise ValueError(f"已存在同名文件夹：{name}")
++        row = Folder(id=str(uuid.uuid4()), name=name, sort_order=0)
++        db.add(row)
++        db.commit()
++        db.refresh(row)
++        logger.info(f"已创建文件夹: {row.name} ({row.id})")
++        return _folder_to_dict(row)
++    finally:
++        db.close()
++
++
++def rename_folder(folder_id: str, name: str) -> Optional[dict]:
++    name = (name or "").strip()
++    if not name:
++        raise ValueError("文件夹名称不能为空")
++    db = next(get_db())
++    try:
++        row = db.query(Folder).filter_by(id=folder_id).first()
++        if not row:
++            return None
++        clash = db.query(Folder).filter(Folder.name == name, Folder.id != folder_id).first()
++        if clash:
++            raise ValueError(f"已存在同名文件夹：{name}")
++        row.name = name
++        db.commit()
++        db.refresh(row)
++        return _folder_to_dict(row)
++    finally:
++        db.close()
++
++
++def delete_folder(folder_id: str, mode: str) -> list[str]:
++    """删除文件夹。
++
++    mode='move'   → 里面的笔记归入未分类（folder_id 置空）
++    mode='delete' → 连笔记一起删；这里只摘出 task_id 并删掉行，
++                    真正的文件/截图/向量索引清理由调用方（library_service）执行。
++    返回受影响的 task_id 列表（mode='move' 时返回空列表）。
++    """
++    db = next(get_db())
++    try:
++        row = db.query(Folder).filter_by(id=folder_id).first()
++        if not row:
++            return []
++        notes = db.query(NoteRecord).filter_by(folder_id=folder_id).all()
++        affected = [n.task_id for n in notes] if mode == "delete" else []
++        if mode == "delete":
++            for n in notes:
++                db.delete(n)
++        else:
++            for n in notes:
++                n.folder_id = None
++        db.delete(row)
++        db.commit()
++        logger.info(f"已删除文件夹: {row.name} (mode={mode}, 涉及笔记 {len(notes)} 篇)")
++        return affected
++    finally:
++        db.close()
++
++
++# ── 笔记索引 ──────────────────────────────────────────────────
++
++
++def list_notes() -> list[dict]:
++    db = next(get_db())
++    try:
++        rows = db.query(NoteRecord).order_by(NoteRecord.created_at.desc()).all()
++        return [_note_to_dict(r) for r in rows]
++    finally:
++        db.close()
++
++
++def get_note(task_id: str) -> Optional[dict]:
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        return _note_to_dict(row) if row else None
++    finally:
++        db.close()
++
++
++def upsert_note(task_id: str, **fields) -> None:
++    """写入/更新笔记索引。只更新显式传入且非 None 的字段。
++
++    生命周期里会调用多次（提交时 PENDING、成功时补标题封面、失败时改状态），
++    所以不能整行覆盖，否则后一次会把前一次写好的字段冲掉。
++    要把 folder_id 置空请用 move_note()。
++    """
++    payload = {k: v for k, v in fields.items() if v is not None}
++    if "form_data" in payload and not isinstance(payload["form_data"], str):
++        payload["form_data"] = json.dumps(payload["form_data"], ensure_ascii=False)
++    now = datetime.now(timezone.utc).replace(tzinfo=None)
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        if row is None:
++            row = NoteRecord(task_id=task_id, created_at=now)
++            db.add(row)
++        for key, value in payload.items():
++            if hasattr(row, key):
++                setattr(row, key, value)
++        row.updated_at = now
++        db.commit()
++    except Exception as e:
++        db.rollback()
++        logger.error(f"写入笔记索引失败 task_id={task_id}: {e}")
++    finally:
++        db.close()
++
++
++def move_note(task_id: str, folder_id: Optional[str]) -> bool:
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        if not row:
++            return False
++        if folder_id is not None and not db.query(Folder).filter_by(id=folder_id).first():
++            raise ValueError("目标文件夹不存在")
++        row.folder_id = folder_id
++        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
++        db.commit()
++        return True
++    finally:
++        db.close()
++
++
++def rename_note(task_id: str, title: str) -> bool:
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        if not row:
++            return False
++        row.title = (title or "").strip() or None
++        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
++        db.commit()
++        return True
++    finally:
++        db.close()
++
++
++def touch_note(task_id: str) -> bool:
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        if not row:
++            return False
++        row.last_opened_at = datetime.now(timezone.utc).replace(tzinfo=None)
++        db.commit()
++        return True
++    finally:
++        db.close()
++
++
++def delete_note_row(task_id: str) -> None:
++    db = next(get_db())
++    try:
++        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
++        if row:
++            db.delete(row)
++            db.commit()
++    finally:
++        db.close()
+diff --git a/backend/app/db/models/library.py b/backend/app/db/models/library.py
+new file mode 100644
+index 0000000..d00f000
+--- /dev/null
++++ b/backend/app/db/models/library.py
+@@ -0,0 +1,41 @@
++from sqlalchemy import Column, DateTime, Float, Integer, String, Text, func
++
++from app.db.engine import Base
++
++
++class Folder(Base):
++    __tablename__ = "folders"
++
++    id = Column(String, primary_key=True)
++    name = Column(String, nullable=False, unique=True)
++    sort_order = Column(Integer, default=0)
++    created_at = Column(DateTime, server_default=func.now())
++
++
++class NoteRecord(Base):
++    """笔记库索引。
++
++    笔记正文仍然以 note_results/{task_id}.json 扁平存放——task_id 同时是 5 个缓存文件名、
++    ChromaDB collection 名、抽帧目录前缀，真按文件夹建子目录会连坐一大片路径反解逻辑。
++    所以文件夹只是这里的一列元数据。
++    """
++
++    __tablename__ = "notes"
++
++    task_id = Column(String, primary_key=True)
++    # 用户自定义别名；为空时前端回退到 video_title
++    title = Column(String, nullable=True)
++    video_title = Column(String, nullable=True)
++    # null = 未分类。不建外键级联，删文件夹时由 DAO 显式置空或连带删笔记
++    folder_id = Column(String, nullable=True)
++    status = Column(String, nullable=True)
++    video_id = Column(String, nullable=True)
++    platform = Column(String, nullable=True)
++    cover_url = Column(String, nullable=True)
++    duration = Column(Float, nullable=True)
++    created_at = Column(DateTime, nullable=True)
++    updated_at = Column(DateTime, nullable=True)
++    last_opened_at = Column(DateTime, nullable=True)
++    # 生成这篇笔记时的表单参数（JSON 文本）。详情页刷新后若浏览器本地记录已丢，
++    # 「重新生成」还得知道原来的链接/风格/模型，只能从这里恢复。
++    form_data = Column(Text, nullable=True)
+diff --git a/backend/app/db/video_task_dao.py b/backend/app/db/video_task_dao.py
+index 42cd435..ea96044 100644
+--- a/backend/app/db/video_task_dao.py
++++ b/backend/app/db/video_task_dao.py
+@@ -42,6 +42,21 @@ def get_task_by_video(video_id: str, platform: str):
+         db.close()
+ 
+ 
++# 按 task_id 删除（删除笔记时用；delete_task_by_video 只能按视频维度删，会误伤同一视频的其他任务）
++def delete_by_task_id(task_id: str):
++    db = next(get_db())
++    try:
++        deleted = db.query(VideoTask).filter_by(task_id=task_id).delete()
++        db.commit()
++        if deleted:
++            logger.info(f"Video task rows deleted. task_id: {task_id}, count: {deleted}")
++    except Exception as e:
++        db.rollback()
++        logger.error(f"Failed to delete video task by task_id: {e}")
++    finally:
++        db.close()
++
++
+ # 删除任务
+ def delete_task_by_video(video_id: str, platform: str):
+     db = next(get_db())
 diff --git a/backend/app/enmus/task_status_enums.py b/backend/app/enmus/task_status_enums.py
 index f83daa1..b945467 100644
 --- a/backend/app/enmus/task_status_enums.py
@@ -1726,19 +5493,229 @@ index 1e08c22..16deb4b 100644
              allow_patterns=[
                  "config.json",
                  "preprocessor_config.json",
+diff --git a/backend/app/routers/library.py b/backend/app/routers/library.py
+new file mode 100644
+index 0000000..12433f0
+--- /dev/null
++++ b/backend/app/routers/library.py
+@@ -0,0 +1,131 @@
++from typing import Optional
++
++from fastapi import APIRouter, BackgroundTasks
++from pydantic import BaseModel
++
++from app.db import library_dao
++from app.services.library_service import delete_note_artifacts
++from app.utils.logger import get_logger
++from app.utils.response import ResponseWrapper as R
++
++logger = get_logger(__name__)
++
++router = APIRouter()
++
++
++class FolderCreate(BaseModel):
++    name: str
++
++
++class FolderRename(BaseModel):
++    name: str
++
++
++class MoveRequest(BaseModel):
++    task_id: str
++    folder_id: Optional[str] = None
++
++
++class RenameRequest(BaseModel):
++    task_id: str
++    title: str
++
++
++class TouchRequest(BaseModel):
++    task_id: str
++
++
++@router.get("/library")
++def get_library():
++    """书架页的唯一数据源：文件夹 + 全部笔记索引。"""
++    try:
++        notes = library_dao.list_notes()
++        folders = library_dao.list_folders()
++        counts: dict[str, int] = {}
++        for note in notes:
++            key = note["folder_id"] or ""
++            counts[key] = counts.get(key, 0) + 1
++        for folder in folders:
++            folder["note_count"] = counts.get(folder["id"], 0)
++        return R.success(data={"folders": folders, "notes": notes, "uncategorized": counts.get("", 0)})
++    except Exception as e:
++        logger.error(f"读取笔记库失败: {e}", exc_info=True)
++        return R.error(msg=f"读取笔记库失败: {e}")
++
++
++@router.post("/library/folder")
++def create_folder(data: FolderCreate):
++    try:
++        return R.success(data=library_dao.create_folder(data.name))
++    except ValueError as e:
++        return R.error(msg=str(e))
++    except Exception as e:
++        logger.error(f"创建文件夹失败: {e}", exc_info=True)
++        return R.error(msg=f"创建文件夹失败: {e}")
++
++
++@router.patch("/library/folder/{folder_id}")
++def rename_folder(folder_id: str, data: FolderRename):
++    try:
++        folder = library_dao.rename_folder(folder_id, data.name)
++        if folder is None:
++            return R.error(msg="文件夹不存在")
++        return R.success(data=folder)
++    except ValueError as e:
++        return R.error(msg=str(e))
++    except Exception as e:
++        logger.error(f"重命名文件夹失败: {e}", exc_info=True)
++        return R.error(msg=f"重命名失败: {e}")
++
++
++@router.delete("/library/folder/{folder_id}")
++def delete_folder(folder_id: str, background_tasks: BackgroundTasks, mode: str = "move"):
++    """mode=move 把里面的笔记归入未分类；mode=delete 连笔记一起删。"""
++    if mode not in ("move", "delete"):
++        return R.error(msg="mode 只能是 move 或 delete")
++    try:
++        affected = library_dao.delete_folder(folder_id, mode)
++        if affected:
++            # 索引行已经删掉了，书架立刻看不到这些笔记；磁盘/截图/向量索引的清理放后台，
++            # 几十篇一起删时不该让请求卡在这里
++            for task_id in affected:
++                background_tasks.add_task(delete_note_artifacts, task_id)
++        return R.success(data={"deleted_notes": len(affected)})
++    except Exception as e:
++        logger.error(f"删除文件夹失败: {e}", exc_info=True)
++        return R.error(msg=f"删除文件夹失败: {e}")
++
++
++@router.post("/library/move")
++def move_note(data: MoveRequest):
++    try:
++        if not library_dao.move_note(data.task_id, data.folder_id):
++            return R.error(msg="笔记不存在")
++        return R.success(data={"task_id": data.task_id, "folder_id": data.folder_id})
++    except ValueError as e:
++        return R.error(msg=str(e))
++    except Exception as e:
++        logger.error(f"移动笔记失败: {e}", exc_info=True)
++        return R.error(msg=f"移动失败: {e}")
++
++
++@router.post("/library/rename")
++def rename_note(data: RenameRequest):
++    try:
++        if not library_dao.rename_note(data.task_id, data.title):
++            return R.error(msg="笔记不存在")
++        return R.success(data={"task_id": data.task_id, "title": data.title.strip() or None})
++    except Exception as e:
++        logger.error(f"重命名笔记失败: {e}", exc_info=True)
++        return R.error(msg=f"重命名失败: {e}")
++
++
++@router.post("/library/touch")
++def touch_note(data: TouchRequest):
++    """进入详情页时调用，供书架页的「最近打开」一行排序。笔记不在索引里不算错误。"""
++    try:
++        library_dao.touch_note(data.task_id)
++        return R.success()
++    except Exception as e:
++        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
++        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..4d22fca 100644
+index f433e46..4cdf29e 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
-@@ -1,6 +1,7 @@
+@@ -1,7 +1,9 @@
  # app/routers/note.py
  import json
  import os
 +import threading
  import uuid
++from enum import Enum
  from pathlib import Path
  from typing import Optional
-@@ -121,6 +122,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+ from urllib.parse import urlparse
+@@ -11,6 +13,8 @@ from pydantic import BaseModel, validator, field_validator, model_validator
+ from dataclasses import asdict
+ 
+ from app.db.video_task_dao import get_task_by_video
++from app.db import library_dao
++from app.services.library_service import delete_note_artifacts
+ from app.enmus.exception import NoteErrorEnum
+ from app.enmus.note_enums import DownloadQuality
+ from app.exceptions.note import NoteError
+@@ -30,9 +34,8 @@ from app.enmus.task_status_enums import TaskStatus
+ router = APIRouter()
+ 
+ 
+-class RecordRequest(BaseModel):
+-    video_id: str
+-    platform: str
++class DeleteTaskRequest(BaseModel):
++    task_id: str
+ 
+ 
+ class VideoRequest(BaseModel):
+@@ -87,6 +90,49 @@ def save_note_to_file(task_id: str, note):
+         json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+ 
+ 
++def _index_note(task_id: str, status: str, audio_meta: Optional[dict] = None, platform: Optional[str] = None,
++                form_data: Optional[dict] = None) -> None:
++    """把笔记登记进笔记库索引（书架页的数据源）。
++
++    索引写失败不该影响生成流程，所以整段吞掉异常只记日志。
++    upsert_note 只覆盖显式传入的非 None 字段，提交时的 PENDING 不会把成功后补的标题冲掉。
++    """
++    try:
++        fields = {"status": status}
++        if platform:
++            fields["platform"] = platform
++        if form_data:
++            fields["form_data"] = form_data
++        if audio_meta:
++            fields.update({
++                "video_title": audio_meta.get("title"),
++                "cover_url": audio_meta.get("cover_url"),
++                "duration": audio_meta.get("duration"),
++                "platform": audio_meta.get("platform") or platform,
++                "video_id": audio_meta.get("video_id"),
++            })
++        library_dao.upsert_note(task_id, **fields)
++    except Exception as e:
++        logger.warning(f"写入笔记库索引失败（不影响生成）{task_id}: {e}")
++
++
++# 详情页刷新后如果浏览器本地记录丢了，「重新生成」要靠这份快照恢复原来的链接/风格/模型。
++# 刻意不含 prefetched_transcript：那是整篇字幕，体积大且能从转写缓存文件重新拿到。
++_FORM_SNAPSHOT_FIELDS = (
++    "video_url", "platform", "quality", "screenshot", "link", "model_name",
++    "provider_id", "format", "style", "extras", "video_understanding",
++    "video_interval", "grid_size",
++)
++
++
++def _form_snapshot(data: "VideoRequest") -> dict:
++    snapshot = {}
++    for key in _FORM_SNAPSHOT_FIELDS:
++        value = getattr(data, key, None)
++        snapshot[key] = value.value if isinstance(value, Enum) else value
++    return snapshot
++
++
+ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+     """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
+ 
+@@ -121,6 +167,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
  
  
@@ -1751,7 +5728,7 @@ index f433e46..4d22fca 100644
  def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                    link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                    _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-@@ -130,6 +137,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -130,6 +182,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
      if not model_name or not provider_id:
          raise HTTPException(status_code=400, detail="请选择模型和提供者")
  
@@ -1777,10 +5754,47 @@ index f433e46..4d22fca 100644
      def _execute_note_task():
          return NoteGenerator().generate(
              video_url=video_url,
-@@ -174,6 +200,47 @@ def delete_task(data: RecordRequest):
-         return R.error(msg=e)
+@@ -149,12 +220,20 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+         )
+ 
+     logger.info(f"任务进入执行队列 (task_id={task_id})")
+-    note = task_serial_executor.run(_execute_note_task)
++    try:
++        note = task_serial_executor.run(_execute_note_task)
++    except Exception as e:
++        logger.error(f"任务 {task_id} 执行异常: {e}", exc_info=True)
++        _index_note(task_id, "FAILED", platform=platform)
++        raise
+     logger.info(f"Note generated: {task_id}")
+     if not note or not note.markdown:
+         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
++        _index_note(task_id, "FAILED", platform=platform)
+         return
+     save_note_to_file(task_id, note)
++    _index_note(task_id, "SUCCESS", audio_meta=asdict(note.audio_meta) if note.audio_meta else None,
++                platform=platform)
+ 
+     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
+     try:
+@@ -165,13 +244,59 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
  
  
+ @router.post('/delete_task')
+-def delete_task(data: RecordRequest):
++def delete_task(data: DeleteTaskRequest):
++    """真正删除一篇笔记：note_results 下的 5 个文件、它引用的截图、SQLite 行、向量索引。
++
++    这里以前是个空壳（请求体被注释掉、无条件返回成功），界面上的"删除"只是让它从浏览器
++    IndexedDB 消失，盘上的 json 和截图一直堆着。
++    """
++    try:
++        result = delete_note_artifacts(data.task_id)
++        return R.success(data=result, msg='删除成功')
++    except Exception as e:
++        logger.error(f"删除笔记失败 {data.task_id}: {e}", exc_info=True)
++        return R.error(msg=f'删除失败: {e}')
++
++
 +class UpdateNoteRequest(BaseModel):
 +    task_id: str
 +    markdown: str
@@ -1803,7 +5817,10 @@ index f433e46..4d22fca 100644
 +    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
 +    if not os.path.exists(note_path):
 +        return R.error(msg='笔记文件不存在，无法保存')
-+    try:
+     try:
+-        # TODO: 待持久化完成
+-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
+-        return R.success(msg='删除成功')
 +        with open(note_path, 'r', encoding='utf-8') as f:
 +            note_data = json.load(f)
 +        note_data['markdown'] = data.markdown
@@ -1817,14 +5834,22 @@ index f433e46..4d22fca 100644
 +        background_tasks.add_task(_reindex_note, data.task_id)
 +        logger.info(f"笔记已手动编辑保存: {data.task_id}")
 +        return R.success(msg='保存成功')
-+    except Exception as e:
+     except Exception as e:
+-        return R.error(msg=e)
 +        logger.error(f"保存笔记失败: {e}")
 +        return R.error(msg=f'保存失败: {e}')
-+
-+
+ 
+ 
  @router.post("/upload")
- async def upload(file: UploadFile = File(...)):
-     os.makedirs(UPLOAD_DIR, exist_ok=True)
+@@ -227,6 +352,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+ 
+         # 统一先写入 PENDING，表示已进入队列等待串行执行
+         NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
++        # 同步登记进笔记库索引，这样"生成中"的笔记立刻出现在书架页上
++        _index_note(task_id, TaskStatus.PENDING.value, platform=data.platform, form_data=_form_snapshot(data))
+ 
+         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
+         if data.prefetched_transcript:
 diff --git a/backend/app/services/chat_service.py b/backend/app/services/chat_service.py
 index e7239cf..d15aced 100644
 --- a/backend/app/services/chat_service.py
@@ -1875,6 +5900,164 @@ index e7239cf..d15aced 100644
  
      # 3. 获取 LLM client
      provider = ProviderService.get_provider_by_id(provider_id)
+diff --git a/backend/app/services/library_service.py b/backend/app/services/library_service.py
+new file mode 100644
+index 0000000..77de4ca
+--- /dev/null
++++ b/backend/app/services/library_service.py
+@@ -0,0 +1,152 @@
++"""笔记库的落地操作：删除一篇笔记的全部产物、启动时回填历史笔记索引。
++
++放在 service 层而不是 router 里，是因为 routers/note.py（删除单篇）和
++routers/library.py（删文件夹时连带删笔记）都要用，放任一边都会造成互相 import。
++"""
++
++import json
++import os
++import re
++from datetime import datetime, timezone
++from pathlib import Path
++
++from app.db import library_dao, video_task_dao
++from app.utils.logger import get_logger
++
++logger = get_logger(__name__)
++
++NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
++IMAGE_OUTPUT_DIR = Path(os.getenv("OUT_DIR", "./static/screenshots"))
++
++# 截图文件名形如 screenshot_003_<uuid4>.jpg（utils/video_helper.py:22），uuid4 保证全局唯一，
++# 所以能靠 markdown 里的引用反查某篇笔记拥有哪些截图。
++_SCREENSHOT_NAME_RE = re.compile(r"screenshot_\d{3}_[0-9a-fA-F-]{36}\.jpg")
++# note_results 下只有 {task_id}.json 是"一篇笔记"，其余带下划线的都是派生缓存
++_NOTE_FILE_RE = re.compile(r"^[0-9a-fA-F-]{36}\.json$")
++
++# 一篇笔记在 note_results 下的全部文件。
++# _markdown.status.json 是历史遗留：早期有个 bug 会把 SUMMARIZING 状态写到这个文件名上，
++# 现有数据里确实存在，删除时一并清掉。
++_NOTE_FILE_SUFFIXES = (
++    ".json",
++    ".status.json",
++    "_audio.json",
++    "_transcript.json",
++    "_markdown.md",
++    "_markdown.status.json",
++)
++
++
++def _referenced_screenshots(note_data: dict) -> set[str]:
++    """从笔记 markdown 里摘出它引用的截图文件名（只要 basename，防路径穿越）。"""
++    markdown = note_data.get("markdown", "") or ""
++    return set(_SCREENSHOT_NAME_RE.findall(markdown))
++
++
++def _unlink(path: Path) -> bool:
++    try:
++        if path.is_file():
++            path.unlink()
++            return True
++    except OSError as e:
++        logger.warning(f"删除文件失败 {path}: {e}")
++    return False
++
++
++def delete_note_artifacts(task_id: str) -> dict:
++    """删掉一篇笔记在磁盘、SQLite、向量库里的全部痕迹。
++
++    任何一步失败只记日志、继续删其余的，最后返回实际删除计数——
++    删到一半就抛异常会留下更难以清理的残骸。
++    """
++    deleted_files = 0
++    deleted_screenshots = 0
++
++    note_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}.json"
++    referenced: set[str] = set()
++    if note_path.is_file():
++        try:
++            with open(note_path, "r", encoding="utf-8") as f:
++                referenced = _referenced_screenshots(json.load(f))
++        except Exception as e:
++            logger.warning(f"读取笔记 json 失败，跳过截图清理 {task_id}: {e}")
++
++    for suffix in _NOTE_FILE_SUFFIXES:
++        if _unlink(Path(NOTE_OUTPUT_DIR) / f"{task_id}{suffix}"):
++            deleted_files += 1
++
++    for name in referenced:
++        target = IMAGE_OUTPUT_DIR / name
++        # 双保险：正则已经限定了文件名形态，这里再确认解析后仍在截图目录内
++        if target.resolve().is_relative_to(IMAGE_OUTPUT_DIR.resolve()) and _unlink(target):
++            deleted_screenshots += 1
++
++    try:
++        video_task_dao.delete_by_task_id(task_id)
++    except Exception as e:
++        logger.warning(f"删除 video_tasks 记录失败 {task_id}: {e}")
++
++    library_dao.delete_note_row(task_id)
++
++    try:
++        from app.services.vector_store import VectorStoreManager
++
++        VectorStoreManager().delete_index(task_id)
++    except Exception as e:
++        logger.warning(f"删除向量索引失败 {task_id}: {e}")
++
++    logger.info(
++        f"已删除笔记 {task_id}：文件 {deleted_files} 个，截图 {deleted_screenshots} 张"
++    )
++    return {"deleted_files": deleted_files, "deleted_screenshots": deleted_screenshots}
++
++
++def backfill_library() -> int:
++    """启动时把 note_results/ 里已有但没进 notes 表的笔记补进去。
++
++    这是"清浏览器缓存也能找回历史"的兜底：以前历史列表完全依赖浏览器 IndexedDB，
++    盘上的 json 没有任何接口能列出来。幂等，失败不阻断启动。
++    """
++    note_dir = Path(NOTE_OUTPUT_DIR)
++    if not note_dir.is_dir():
++        return 0
++
++    existing = {n["task_id"] for n in library_dao.list_notes()}
++    added = 0
++    for path in sorted(note_dir.iterdir()):
++        if not _NOTE_FILE_RE.match(path.name):
++            continue
++        task_id = path.stem
++        if task_id in existing:
++            continue
++        try:
++            with open(path, "r", encoding="utf-8") as f:
++                data = json.load(f)
++        except Exception as e:
++            logger.warning(f"回填时读取失败，跳过 {path.name}: {e}")
++            continue
++
++        meta = data.get("audio_meta") or {}
++        raw = meta.get("raw_info") or {}
++        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None)
++        library_dao.upsert_note(
++            task_id,
++            video_title=meta.get("title"),
++            platform=meta.get("platform"),
++            cover_url=meta.get("cover_url"),
++            duration=meta.get("duration"),
++            video_id=meta.get("video_id"),
++            status="SUCCESS",
++            created_at=mtime,
++            # 老笔记没有留下生成参数，至少把链接和平台补上，
++            # 否则浏览器本地记录丢了以后「重新生成」会是一张空表单
++            form_data={
++                "video_url": raw.get("webpage_url") or "",
++                "platform": meta.get("platform") or "",
++            },
++        )
++        added += 1
++
++    if added:
++        logger.info(f"已回填 {added} 篇历史笔记到笔记库索引")
++    return added
 diff --git a/backend/app/services/note.py b/backend/app/services/note.py
 index f493c91..ae00458 100644
 --- a/backend/app/services/note.py
@@ -2931,6 +7114,26 @@ index 100dbff..db6cc64 100644
                  out_path = self.concat_images(group, f"grid_{idx}")
                  image_paths.append(out_path)
  
+diff --git a/backend/main.py b/backend/main.py
+index 4b1d080..898f65e 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -48,6 +48,15 @@ async def lifespan(app: FastAPI):
+         logger.info("[startup 2/5] init_db() — 初始化 SQLite 数据库")
+         init_db()
+ 
++        # 把 note_results/ 里已有但没进 notes 表的笔记补进笔记库索引。
++        # 历史列表以前只存在浏览器 IndexedDB 里，盘上的 json 没有任何接口能列出来，
++        # 清一次浏览器数据历史就再也找不回来。回填失败不该阻断启动。
++        from app.services.library_service import backfill_library
++        try:
++            backfill_library()
++        except Exception as e:
++            logger.warning(f"[startup 2/5] 笔记库回填失败（不影响启动）: {e}")
++
+         logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
+         # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
+         # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
 diff --git a/backend/tests/test_image_dedup.py b/backend/tests/test_image_dedup.py
 new file mode 100644
 index 0000000..dfdeb48
@@ -3014,6 +7217,289 @@ index 0000000..dfdeb48
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/backend/tests/test_library_store.py b/backend/tests/test_library_store.py
+new file mode 100644
+index 0000000..b128e9d
+--- /dev/null
++++ b/backend/tests/test_library_store.py
+@@ -0,0 +1,277 @@
++"""笔记库（文件夹 + 笔记索引）的数据层与删除逻辑测试。
++
++app.db.engine / app.services.library_service / app.services.vector_store 都在 import 时读环境变量。
++但 unittest discover 会先把所有测试模块导入一遍，别的模块很可能已经用默认值把这几个模块导入过了，
++所以光设 os.environ 不够——必须在导入之后把模块里的常量直接改指到临时目录，
++否则会往真实的 bili_note.db 和 note_results/ 里写。
++"""
++
++import atexit
++import json
++import pathlib
++import shutil
++import sys
++import tempfile
++import unittest
++from datetime import datetime, timezone
++
++import os
++from sqlalchemy import create_engine
++from sqlalchemy.orm import sessionmaker
++
++_ROOT = pathlib.Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(_ROOT))
++
++_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-library-test-"))
++os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
++os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
++os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
++os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
++
++import app.db.engine as db_engine  # noqa: E402
++
++# 把全局 engine / SessionLocal 换成测试库：library_dao 与 video_task_dao 都是
++# 通过 app.db.engine.get_db() 拿会话，而 get_db 在调用时才查模块全局 SessionLocal。
++_TEST_ENGINE = create_engine(os.environ["DATABASE_URL"], connect_args={"check_same_thread": False})
++db_engine.engine = _TEST_ENGINE
++db_engine.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_TEST_ENGINE)
++
++from app.db.engine import Base, get_engine  # noqa: E402
++from app.db import library_dao  # noqa: E402
++from app.db.init_db import init_db  # noqa: E402
++from app.services import library_service  # noqa: E402
++
++NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
++SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
++
++library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
++library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
++
++# 删笔记时会顺带删向量索引；不指到临时目录就会去动真实的 vector_db
++try:
++    from app.services import vector_store as _vector_store
++
++    _vector_store.VECTOR_DB_DIR = os.environ["VECTOR_DB_DIR"]
++except Exception:  # chromadb 不在环境里时跳过，delete_note_artifacts 自己会吞掉异常
++    pass
++
++init_db()
++atexit.register(shutil.rmtree, _TMP, True)
++
++# utils/video_helper.py:22 的命名规则：screenshot_{index:03}_{uuid4}.jpg
++SHOT_A = "screenshot_003_11111111-1111-4111-8111-111111111111.jpg"
++SHOT_B = "screenshot_004_22222222-2222-4222-8222-222222222222.jpg"
++
++
++def _write_note(task_id: str, markdown: str, title: str = "某个视频") -> None:
++    NOTE_DIR.mkdir(parents=True, exist_ok=True)
++    for suffix in (".json", ".status.json", "_audio.json", "_transcript.json", "_markdown.md"):
++        (NOTE_DIR / f"{task_id}{suffix}").write_text("{}", encoding="utf-8")
++    payload = {
++        "markdown": markdown,
++        "transcript": {"segments": []},
++        "audio_meta": {
++            "title": title,
++            "cover_url": "http://example.com/cover.jpg",
++            "duration": 600.0,
++            "platform": "bilibili",
++            "video_id": "BV1xx",
++        },
++    }
++    (NOTE_DIR / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
++
++
++class TestLibraryDao(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        init_db()
++
++    def setUp(self):
++        # 每个用例从空库开始，避免相互干扰
++        engine = get_engine()
++        for table in reversed(Base.metadata.sorted_tables):
++            with engine.begin() as conn:
++                conn.execute(table.delete())
++
++    def test_folder_crud_and_duplicate_name(self):
++        folder = library_dao.create_folder("行测")
++        self.assertEqual(folder["name"], "行测")
++        self.assertEqual([f["id"] for f in library_dao.list_folders()], [folder["id"]])
++
++        with self.assertRaises(ValueError):
++            library_dao.create_folder("行测")
++        with self.assertRaises(ValueError):
++            library_dao.create_folder("   ")
++
++        renamed = library_dao.rename_folder(folder["id"], "申论")
++        self.assertEqual(renamed["name"], "申论")
++        self.assertIsNone(library_dao.rename_folder("不存在", "x"))
++
++    def test_upsert_note_only_overwrites_given_fields(self):
++        """提交时写 PENDING、成功后补标题封面，第二次不能把第一次的字段冲掉，
++        反过来第二次补的标题也不能被后续的状态更新抹掉。"""
++        library_dao.upsert_note("t1", status="PENDING", platform="bilibili")
++        library_dao.upsert_note("t1", status="SUCCESS", video_title="数量关系专项", cover_url="http://c/1.jpg",
++                                duration=6100.0)
++        library_dao.upsert_note("t1", status="SUCCESS")
++
++        note = library_dao.get_note("t1")
++        self.assertEqual(note["status"], "SUCCESS")
++        self.assertEqual(note["platform"], "bilibili")
++        self.assertEqual(note["video_title"], "数量关系专项")
++        self.assertEqual(note["cover_url"], "http://c/1.jpg")
++        self.assertEqual(note["duration"], 6100.0)
++        self.assertIsNotNone(note["created_at"])
++
++    def test_datetimes_serialise_as_epoch_ms(self):
++        """SQLite 里是 naive UTC，返回 ISO 字符串会被前端 new Date() 当成本地时间解析，
++        界面就会差 8 小时（用户已经指出过一次）。必须是 epoch 毫秒。"""
++        naive_utc = datetime(2026, 10, 12, 0, 0, 0)
++        self.assertEqual(library_dao._ms(naive_utc), 1791763200000)
++        self.assertIsNone(library_dao._ms(None))
++
++    def test_move_note(self):
++        folder = library_dao.create_folder("行测")
++        library_dao.upsert_note("t1", status="SUCCESS")
++        self.assertTrue(library_dao.move_note("t1", folder["id"]))
++        self.assertEqual(library_dao.get_note("t1")["folder_id"], folder["id"])
++
++        self.assertTrue(library_dao.move_note("t1", None))
++        self.assertIsNone(library_dao.get_note("t1")["folder_id"])
++
++        with self.assertRaises(ValueError):
++            library_dao.move_note("t1", "不存在的文件夹")
++        self.assertFalse(library_dao.move_note("没有这篇", folder["id"]))
++
++    def test_rename_and_touch_note(self):
++        library_dao.upsert_note("t1", status="SUCCESS", video_title="原标题")
++        self.assertTrue(library_dao.rename_note("t1", "  我的别名  "))
++        self.assertEqual(library_dao.get_note("t1")["title"], "我的别名")
++
++        # 清空别名 → 回退到视频标题（title 存 None）
++        library_dao.rename_note("t1", "   ")
++        self.assertIsNone(library_dao.get_note("t1")["title"])
++
++        self.assertIsNone(library_dao.get_note("t1")["last_opened_at"])
++        self.assertTrue(library_dao.touch_note("t1"))
++        self.assertIsNotNone(library_dao.get_note("t1")["last_opened_at"])
++
++    def test_form_data_round_trip(self):
++        """「重新生成」要靠这份快照恢复原来的链接/风格/模型，存进去取出来必须一模一样。"""
++        payload = {"video_url": "https://www.bilibili.com/video/BV1xx", "style": "xingce_course",
++                   "grid_size": [3, 3], "quality": "medium"}
++        library_dao.upsert_note("t1", status="PENDING", form_data=payload)
++        self.assertEqual(library_dao.get_note("t1")["form_data"], payload)
++
++        # 成功后只更新状态，不能把快照冲掉
++        library_dao.upsert_note("t1", status="SUCCESS", video_title="标题")
++        note = library_dao.get_note("t1")
++        self.assertEqual(note["form_data"], payload)
++        self.assertEqual(note["status"], "SUCCESS")
++
++    def test_form_data_tolerates_garbage(self):
++        library_dao.upsert_note("t1", status="SUCCESS", form_data="这不是 json")
++        self.assertIsNone(library_dao.get_note("t1")["form_data"])
++
++    def test_delete_folder_move_keeps_notes(self):
++        folder = library_dao.create_folder("行测")
++        library_dao.upsert_note("t1", status="SUCCESS", folder_id=folder["id"])
++        library_dao.upsert_note("t2", status="SUCCESS", folder_id=folder["id"])
++
++        affected = library_dao.delete_folder(folder["id"], "move")
++
++        self.assertEqual(affected, [])
++        self.assertEqual(library_dao.list_folders(), [])
++        self.assertIsNone(library_dao.get_note("t1")["folder_id"])
++        self.assertIsNotNone(library_dao.get_note("t2"))
++
++    def test_delete_folder_delete_removes_note_rows(self):
++        folder = library_dao.create_folder("行测")
++        library_dao.upsert_note("t1", status="SUCCESS", folder_id=folder["id"])
++        library_dao.upsert_note("t2", status="SUCCESS")  # 未分类，不该被牵连
++
++        affected = library_dao.delete_folder(folder["id"], "delete")
++
++        self.assertEqual(affected, ["t1"])
++        self.assertIsNone(library_dao.get_note("t1"))
++        self.assertIsNotNone(library_dao.get_note("t2"))
++
++
++class TestDeleteNoteArtifacts(unittest.TestCase):
++    def setUp(self):
++        shutil.rmtree(NOTE_DIR, ignore_errors=True)
++        shutil.rmtree(SHOT_DIR, ignore_errors=True)
++        NOTE_DIR.mkdir(parents=True, exist_ok=True)
++        SHOT_DIR.mkdir(parents=True, exist_ok=True)
++        engine = get_engine()
++        for table in reversed(Base.metadata.sorted_tables):
++            with engine.begin() as conn:
++                conn.execute(table.delete())
++
++    def test_deletes_files_and_only_referenced_screenshots(self):
++        """delete_task 以前是空壳，界面删了盘上什么都没少。
++        截图目录是全局扁平的，只能靠 markdown 里的引用反查归属，绝不能整目录清。"""
++        (SHOT_DIR / SHOT_A).write_bytes(b"a")
++        (SHOT_DIR / SHOT_B).write_bytes(b"b")
++        _write_note("t1", f"# 标题\n\n![](/static/screenshots/{SHOT_A})\n")
++        library_dao.upsert_note("t1", status="SUCCESS")
++
++        result = library_service.delete_note_artifacts("t1")
++
++        self.assertEqual(result["deleted_files"], 5)
++        self.assertEqual(result["deleted_screenshots"], 1)
++        self.assertEqual(list(NOTE_DIR.glob("t1*")), [])
++        self.assertFalse((SHOT_DIR / SHOT_A).exists())
++        self.assertTrue((SHOT_DIR / SHOT_B).exists(), "别的笔记的截图被误删了")
++        self.assertIsNone(library_dao.get_note("t1"))
++
++    def test_tolerates_missing_note(self):
++        result = library_service.delete_note_artifacts("根本不存在的任务")
++        self.assertEqual(result, {"deleted_files": 0, "deleted_screenshots": 0})
++
++    def test_unreadable_json_still_deletes_files(self):
++        NOTE_DIR.mkdir(parents=True, exist_ok=True)
++        for suffix in (".json", ".status.json"):
++            (NOTE_DIR / f"t2{suffix}").write_text("{}", encoding="utf-8")
++        (NOTE_DIR / "t2.json").write_text("这不是 json", encoding="utf-8")
++
++        result = library_service.delete_note_artifacts("t2")
++
++        self.assertEqual(result["deleted_files"], 2)
++        self.assertEqual(result["deleted_screenshots"], 0)
++
++
++class TestBackfill(unittest.TestCase):
++    def setUp(self):
++        shutil.rmtree(NOTE_DIR, ignore_errors=True)
++        NOTE_DIR.mkdir(parents=True, exist_ok=True)
++        engine = get_engine()
++        for table in reversed(Base.metadata.sorted_tables):
++            with engine.begin() as conn:
++                conn.execute(table.delete())
++
++    def test_backfills_existing_notes_and_is_idempotent(self):
++        _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "# 笔记", title="数量关系专项")
++        # 派生缓存文件名带下划线，不该被当成一篇笔记
++        (NOTE_DIR / "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee_transcript.json").write_text("{}", encoding="utf-8")
++
++        self.assertEqual(library_service.backfill_library(), 1)
++        note = library_dao.get_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
++        self.assertEqual(note["video_title"], "数量关系专项")
++        self.assertEqual(note["status"], "SUCCESS")
++        self.assertEqual(note["platform"], "bilibili")
++        self.assertEqual(note["duration"], 600.0)
++
++        # 再跑一次不该重复插入，也不该覆盖用户后来改过的别名
++        library_dao.rename_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "我的别名")
++        self.assertEqual(library_service.backfill_library(), 0)
++        self.assertEqual(library_dao.get_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")["title"], "我的别名")
++
++    def test_skips_unreadable_file(self):
++        (NOTE_DIR / "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff.json").write_text("坏文件", encoding="utf-8")
++        self.assertEqual(library_service.backfill_library(), 0)
++        self.assertEqual(library_dao.list_notes(), [])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
 diff --git a/backend/tests/test_markdown_toc.py b/backend/tests/test_markdown_toc.py
 new file mode 100644
 index 0000000..90fdeda
