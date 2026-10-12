@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import uuid
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -12,6 +13,8 @@ from pydantic import BaseModel, validator, field_validator, model_validator
 from dataclasses import asdict
 
 from app.db.video_task_dao import get_task_by_video
+from app.db import library_dao
+from app.services.library_service import delete_note_artifacts
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
@@ -31,9 +34,8 @@ from app.enmus.task_status_enums import TaskStatus
 router = APIRouter()
 
 
-class RecordRequest(BaseModel):
-    video_id: str
-    platform: str
+class DeleteTaskRequest(BaseModel):
+    task_id: str
 
 
 class VideoRequest(BaseModel):
@@ -86,6 +88,49 @@ def save_note_to_file(task_id: str, note):
     os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
     with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
         json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+
+
+def _index_note(task_id: str, status: str, audio_meta: Optional[dict] = None, platform: Optional[str] = None,
+                form_data: Optional[dict] = None) -> None:
+    """把笔记登记进笔记库索引（书架页的数据源）。
+
+    索引写失败不该影响生成流程，所以整段吞掉异常只记日志。
+    upsert_note 只覆盖显式传入的非 None 字段，提交时的 PENDING 不会把成功后补的标题冲掉。
+    """
+    try:
+        fields = {"status": status}
+        if platform:
+            fields["platform"] = platform
+        if form_data:
+            fields["form_data"] = form_data
+        if audio_meta:
+            fields.update({
+                "video_title": audio_meta.get("title"),
+                "cover_url": audio_meta.get("cover_url"),
+                "duration": audio_meta.get("duration"),
+                "platform": audio_meta.get("platform") or platform,
+                "video_id": audio_meta.get("video_id"),
+            })
+        library_dao.upsert_note(task_id, **fields)
+    except Exception as e:
+        logger.warning(f"写入笔记库索引失败（不影响生成）{task_id}: {e}")
+
+
+# 详情页刷新后如果浏览器本地记录丢了，「重新生成」要靠这份快照恢复原来的链接/风格/模型。
+# 刻意不含 prefetched_transcript：那是整篇字幕，体积大且能从转写缓存文件重新拿到。
+_FORM_SNAPSHOT_FIELDS = (
+    "video_url", "platform", "quality", "screenshot", "link", "model_name",
+    "provider_id", "format", "style", "extras", "video_understanding",
+    "video_interval", "grid_size",
+)
+
+
+def _form_snapshot(data: "VideoRequest") -> dict:
+    snapshot = {}
+    for key in _FORM_SNAPSHOT_FIELDS:
+        value = getattr(data, key, None)
+        snapshot[key] = value.value if isinstance(value, Enum) else value
+    return snapshot
 
 
 def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
@@ -175,12 +220,20 @@ def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: D
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
+    try:
+        note = task_serial_executor.run(_execute_note_task)
+    except Exception as e:
+        logger.error(f"任务 {task_id} 执行异常: {e}", exc_info=True)
+        _index_note(task_id, "FAILED", platform=platform)
+        raise
     logger.info(f"Note generated: {task_id}")
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
+        _index_note(task_id, "FAILED", platform=platform)
         return
     save_note_to_file(task_id, note)
+    _index_note(task_id, "SUCCESS", audio_meta=asdict(note.audio_meta) if note.audio_meta else None,
+                platform=platform)
 
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
@@ -191,13 +244,18 @@ def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: D
 
 
 @router.post('/delete_task')
-def delete_task(data: RecordRequest):
+def delete_task(data: DeleteTaskRequest):
+    """真正删除一篇笔记：note_results 下的 5 个文件、它引用的截图、SQLite 行、向量索引。
+
+    这里以前是个空壳（请求体被注释掉、无条件返回成功），界面上的"删除"只是让它从浏览器
+    IndexedDB 消失，盘上的 json 和截图一直堆着。
+    """
     try:
-        # TODO: 待持久化完成
-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
-        return R.success(msg='删除成功')
+        result = delete_note_artifacts(data.task_id)
+        return R.success(data=result, msg='删除成功')
     except Exception as e:
-        return R.error(msg=e)
+        logger.error(f"删除笔记失败 {data.task_id}: {e}", exc_info=True)
+        return R.error(msg=f'删除失败: {e}')
 
 
 class UpdateNoteRequest(BaseModel):
@@ -294,6 +352,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         # 统一先写入 PENDING，表示已进入队列等待串行执行
         NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        # 同步登记进笔记库索引，这样"生成中"的笔记立刻出现在书架页上
+        _index_note(task_id, TaskStatus.PENDING.value, platform=data.platform, form_data=_form_snapshot(data))
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:

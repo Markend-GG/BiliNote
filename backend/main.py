@@ -48,6 +48,15 @@ async def lifespan(app: FastAPI):
         logger.info("[startup 2/5] init_db() — 初始化 SQLite 数据库")
         init_db()
 
+        # 把 note_results/ 里已有但没进 notes 表的笔记补进笔记库索引。
+        # 历史列表以前只存在浏览器 IndexedDB 里，盘上的 json 没有任何接口能列出来，
+        # 清一次浏览器数据历史就再也找不回来。回填失败不该阻断启动。
+        from app.services.library_service import backfill_library
+        try:
+            backfill_library()
+        except Exception as e:
+            logger.warning(f"[startup 2/5] 笔记库回填失败（不影响启动）: {e}")
+
         logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
         # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
         # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。

@@ -42,6 +42,21 @@ def get_task_by_video(video_id: str, platform: str):
         db.close()
 
 
+# 按 task_id 删除（删除笔记时用；delete_task_by_video 只能按视频维度删，会误伤同一视频的其他任务）
+def delete_by_task_id(task_id: str):
+    db = next(get_db())
+    try:
+        deleted = db.query(VideoTask).filter_by(task_id=task_id).delete()
+        db.commit()
+        if deleted:
+            logger.info(f"Video task rows deleted. task_id: {task_id}, count: {deleted}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to delete video task by task_id: {e}")
+    finally:
+        db.close()
+
+
 # 删除任务
 def delete_task_by_video(video_id: str, platform: str):
     db = next(get_db())

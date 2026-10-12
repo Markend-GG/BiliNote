@@ -8,10 +8,12 @@ import BackendInitDialog from '@/components/BackendInitDialog'
 import StartupBanner from '@/components/SystemDiagnostic/StartupBanner'
 import BackendHealthIndicator from '@/components/BackendHealth/BackendHealthIndicator'
 import Index from '@/pages/Index.tsx'
-import { HomePage } from './pages/HomePage/Home.tsx'
+import LibraryPage from '@/pages/LibraryPage'
 
-// 非首屏页面使用 React.lazy 按需加载
+// 非首屏页面使用 React.lazy 按需加载。
+// 详情页拖着 markdown / katex / markmap 一大串依赖，按需加载能让书架页首屏快不少。
 const Onboarding = lazy(() => import('@/pages/Onboarding'))
+const NotePage = lazy(() => import('@/pages/NotePage'))
 const SettingPage = lazy(() => import('./pages/SettingPage/index.tsx'))
 
 // 桌面端首启引导守卫：未完成 onboarding 时强制跳到 /onboarding
@@ -71,7 +73,10 @@ function App() {
           <Routes>
             <Route path="/onboarding" element={<Onboarding />} />
             <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
-              <Route index element={<HomePage />} />
+              {/* 两级导航：书架（整理与挑选）→ 详情（阅读）。走真路由之后
+                  浏览器后退键、刷新、收藏夹才都能用 */}
+              <Route index element={<LibraryPage />} />
+              <Route path="note/:taskId" element={<NotePage />} />
               <Route path="settings" element={<SettingPage />}>
                 <Route index element={<Navigate to="model" replace />} />
                 <Route path="model" element={<Model />}>

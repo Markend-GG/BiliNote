@@ -7,12 +7,12 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form.tsx'
-import { useEffect,useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
-import { Info, Loader2, Plus } from 'lucide-react'
+import { Info, Loader2 } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
 import { generateNote } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
@@ -25,7 +25,6 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip.tsx'
 import { Checkbox } from '@/components/ui/checkbox.tsx'
-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import {
   Select,
@@ -131,13 +130,23 @@ const CheckboxGroup = ({
 )
 
 /* -------------------- 主组件 -------------------- */
-const NoteForm = () => {
+interface NoteFormProps {
+  /**
+   * 指定这张表单对应哪篇笔记（即「重新生成」模式）。
+   * 传 null = 强制新建；不传 = 跟随全局 currentTaskId（旧行为）。
+   */
+  taskId?: string | null
+  /** 提交成功后回调，用来关掉对话框并跳到详情页 */
+  onSubmitted?: (taskId: string) => void
+}
+
+const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
   const navigate = useNavigate();
   const [isUploading, setIsUploading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
   /* ---- 全局状态 ---- */
-  const { addPendingTask, currentTaskId, setCurrentTask, getCurrentTask, retryTask } =
-    useTaskStore()
+  const { addPendingTask, currentTaskId, retryTask } = useTaskStore()
+  const tasks = useTaskStore(state => state.tasks)
   const { loadEnabledModels, modelList, showFeatureHint, setShowFeatureHint } = useModelStore()
 
   /* ---- 表单 ---- */
@@ -153,12 +162,16 @@ const NoteForm = () => {
       format: [],
     },
   })
-  const currentTask = getCurrentTask()
+  const targetId = taskId === undefined ? currentTaskId : taskId
+  const currentTask = useMemo(
+    () => tasks.find(task => task.id === targetId) ?? null,
+    [tasks, targetId],
+  )
 
   /* ---- 派生状态（只 watch 一次，提高性能） ---- */
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
-  const editing = currentTask && currentTask.id
+  const editing = !!currentTask
 
   const goModelAdd = () => {
     navigate("/settings/model");
@@ -172,8 +185,6 @@ const NoteForm = () => {
   useEffect(() => {
     if (!currentTask) return
     const { formData } = currentTask
-
-    console.log('currentTask.formData.platform:', formData.platform)
 
     form.reset({
       platform: formData.platform || 'bilibili',
@@ -191,7 +202,7 @@ const NoteForm = () => {
     })
   }, [
     // 当下面任意一个变了，就重新 reset
-    currentTaskId,
+    targetId,
     // modelList 用来兜底 model_name
     modelList.length,
     // 还要加上 formData 的各字段，或者直接 currentTask
@@ -199,7 +210,7 @@ const NoteForm = () => {
   ])
 
   /* ---- 帮助函数 ---- */
-  const taskStatus = getCurrentTask()?.status
+  const taskStatus = currentTask?.status
   const generating = isTaskRunning(taskStatus)
   // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
   const [submitting, setSubmitting] = useState(false)
@@ -235,16 +246,18 @@ const NoteForm = () => {
         video_url:
           values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
         provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
-        task_id: currentTaskId || '',
+        task_id: currentTask?.id || '',
       }
-      if (currentTaskId) {
+      if (currentTask) {
         // 必须 await：retryTask 内部会先把状态置成 PENDING，锁才接得上
-        await retryTask(currentTaskId, payload)
+        const ok = await retryTask(currentTask.id, payload)
+        if (ok) onSubmitted?.(currentTask.id)
         return
       }
 
       const data = await generateNote(payload)
       addPendingTask(data.task_id, values.platform, payload)
+      onSubmitted?.(data.task_id)
     } catch (e: any) {
       // 就绪门禁：本地转写模型还没下载好。后端返回 reason='transcriber_model_not_ready'，
       // 引导用户去「设置 → 音频转写配置」下载，而不是留一个静默失败的任务。
@@ -268,11 +281,8 @@ const NoteForm = () => {
     console.warn('表单校验失败：', errors)
     // message.error('请完善所有必填项后再提交')
   }
-  const handleCreateNew = () => {
-    // 🔁 这里清空当前任务状态
-    // 比如调用 resetCurrentTask() 或者 navigate 到一个新页面
-    setCurrentTask(null)
-  }
+  // 表单现在只活在对话框里：新建走书架页的「+ 新建笔记」，重新生成走详情页顶栏，
+  // 所以不再需要那个会把 currentTask 清空的「新建笔记」副按钮
   const FormButton = () => {
     const label = busy
       ? `正在${taskStatusLabels[taskStatus ?? ''] || '生成'}…`
@@ -281,23 +291,10 @@ const NoteForm = () => {
         : '生成笔记'
 
     return (
-      <div className="flex gap-2">
-        <Button
-          type="submit"
-          className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
-          disabled={busy}
-        >
-          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          {label}
-        </Button>
-
-        {editing && (
-          <Button type="button" variant="outline" className="w-1/3" onClick={handleCreateNew}>
-            <Plus className="mr-2 h-4 w-4" />
-            新建笔记
-          </Button>
-        )}
-      </div>
+      <Button type="submit" className="w-full" disabled={busy}>
+        {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+        {label}
+      </Button>
     )
   }
 
@@ -306,9 +303,6 @@ const NoteForm = () => {
     <div className="h-full w-full">
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="space-y-4">
-          {/* 顶部按钮 */}
-          <FormButton></FormButton>
-
           {/* 视频链接 & 平台 */}
           <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
           <div className="flex gap-2">
@@ -588,6 +582,9 @@ const NoteForm = () => {
               </FormItem>
             )}
           />
+
+          {/* 提交按钮放在末尾：表单现在活在模态框里，主操作该在滚动内容的最后 */}
+          <FormButton />
         </form>
       </Form>
     </div>

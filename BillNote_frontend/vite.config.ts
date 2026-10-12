@@ -31,7 +31,11 @@ export default defineConfig(({ mode }) => {
   const appVersion = env.VITE_APP_VERSION || process.env.VITE_APP_VERSION || readAppVersion()
 
   return {
-    base: './',
+    // Docker（nginx 静态部署）必须用绝对路径：笔记详情页是 /note/:taskId 这样的深链接，
+    // 相对路径会被解析成 /note/assets/xxx.js，nginx 的 SPA fallback 返回 index.html，
+    // 浏览器就以 "Expected a JavaScript module script" 拒绝执行，整页空白。
+    // Tauri 桌面端仍用相对路径（构建时没有 DOCKER_BUILD）。
+    base: process.env.DOCKER_BUILD ? '/' : './',
     define: {
       __APP_VERSION__: JSON.stringify(appVersion),
     },

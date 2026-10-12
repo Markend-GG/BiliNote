@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
 import { Copy, Download, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
@@ -6,7 +7,7 @@ import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
 import Idle from '@/components/Lottie/Idle.tsx'
-import StepBar from '@/pages/HomePage/components/StepBar.tsx'
+import StepBar from '@/pages/NotePage/components/StepBar.tsx'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import Zoom from 'react-medium-image-zoom'
@@ -23,22 +24,18 @@ import { useTaskStore } from '@/store/taskStore'
 import { update_note } from '@/services/note'
 import { normalizeMathDelimiters } from '@/utils/math'
 import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
-import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
-import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
-import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
-import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
-import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
-
-interface VersionNote {
-  ver_id: string
-  content: string
-  style: string
-  model_name: string
-  created_at?: string
-}
+import { MarkdownHeader } from '@/pages/NotePage/components/MarkdownHeader.tsx'
+import TranscriptViewer from '@/pages/NotePage/components/transcriptViewer.tsx'
+import MarkmapEditor from '@/pages/NotePage/components/MarkmapComponent.tsx'
+import ChatPanel from '@/pages/NotePage/components/ChatPanel.tsx'
+import VideoBanner from '@/pages/NotePage/components/VideoBanner.tsx'
+import { NoteFormDialog } from '@/components/NoteFormDialog'
+import { useNoteActions } from '@/hooks/useNoteActions'
+import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
+import { useLibraryStore } from '@/store/libraryStore'
+import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
 
 interface MarkdownViewerProps {
-  content: string | VersionNote[]
   status: 'idle' | 'loading' | 'success' | 'failed'
 }
 
@@ -342,10 +339,58 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
-  const svgRef = useRef<SVGSVGElement>(null)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
+
+  // ---- 两级导航：返回书架 / 同文件夹切换 / 笔记级操作 ----
+  const navigate = useNavigate()
+  const shelfItems = useShelfItems()
+  const taskId = currentTask?.id
+  const {
+    title: noteTitle,
+    folderId,
+    folderName,
+    entries: noteEntries,
+    dialogs: noteDialogs,
+  } = useNoteActions(taskId, currentTask?.audioMeta?.title || '未命名笔记')
+  const [regenerateOpen, setRegenerateOpen] = useState(false)
+
+  // 标题下拉里放同文件夹的笔记 + 最近打开的，去重后截断：
+  // 换一篇笔记不该非得退回书架再点一次（两级导航最大的代价就是这个，得补回来）
+  const siblings = useMemo<NoteSibling[]>(() => {
+    const sameFolder = shelfItems.filter(item => item.folderId === folderId)
+    const recent = shelfItems
+      .filter(item => item.lastOpenedAt)
+      .sort((a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0))
+    const merged: ShelfItem[] = []
+    const seen = new Set<string>()
+    for (const item of [...sameFolder, ...recent]) {
+      if (seen.has(item.taskId)) continue
+      seen.add(item.taskId)
+      merged.push(item)
+    }
+    return merged.slice(0, 12).map(item => ({
+      taskId: item.taskId,
+      title: item.title,
+      active: item.taskId === taskId,
+    }))
+  }, [shelfItems, folderId, taskId])
+
+  const goShelf = (folder?: string | null) =>
+    navigate('/', folder ? { state: { folder } } : undefined)
+
+  const overlays = (
+    <>
+      <NoteFormDialog
+        open={regenerateOpen}
+        onOpenChange={setRegenerateOpen}
+        taskId={taskId ?? null}
+        onSubmitted={() => useLibraryStore.getState().fetchLibrary()}
+      />
+      {noteDialogs}
+    </>
+  )
 
   // 多版本内容处理
   useEffect(() => {
@@ -438,33 +483,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       toast.error('复制失败')
     }
   }
-  const alertButton = {
-    id: 'alert',
-    title: '测试警告',
-    content: '⚠️',
-    onClick: () => alert('你点击了自定义按钮！'),
-  }
-  const exportButton = {
-    id: 'export',
-    title: '导出思维导图',
-    content: '⤓',
-    onClick: () => {
-      const svgEl = svgRef.current
-      if (!svgEl) return
-      // 同上面的序列化逻辑
-      const serializer = new XMLSerializer()
-      const source = serializer.serializeToString(svgEl)
-      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
-        type: 'image/svg+xml;charset=utf-8',
-      })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'mindmap.svg'
-      a.click()
-      URL.revokeObjectURL(url)
-    },
-  }
   const handleDownload = () => {
     const task = getCurrentTask()
     const name = task?.audioMeta.title || 'note'
@@ -547,7 +565,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
@@ -562,7 +580,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'idle') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-3 text-neutral-500">
         <Idle />
         <div className="text-center">
           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
@@ -574,23 +592,40 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'failed' && !isMultiVersion) {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
+      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
         <div className="text-center">
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
-          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
-
-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
-            重试
-          </Button>
+          <p className="mt-2 mb-4 text-xs text-red-400">可以直接重试，也可以先换个模型或笔记风格</p>
+          <div className="flex justify-center gap-2">
+            <Button onClick={() => retryTask(currentTask.id)} size="lg">
+              直接重试
+            </Button>
+            <Button variant="outline" size="lg" onClick={() => setRegenerateOpen(true)}>
+              改参数重新生成
+            </Button>
+            <Button variant="ghost" size="lg" onClick={() => goShelf()}>
+              返回书架
+            </Button>
+          </div>
         </div>
+        {overlays}
       </div>
     )
   }
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden">
       <MarkdownHeader
+        title={noteTitle}
+        onBack={() => goShelf()}
+        folderName={folderName}
+        onOpenFolder={() => goShelf(folderId)}
+        siblings={siblings}
+        onSwitchNote={id => navigate(`/note/${id}`)}
+        onBackToShelf={() => goShelf()}
+        onRegenerate={() => setRegenerateOpen(true)}
+        noteEntries={noteEntries}
         currentTask={currentTask}
         isMultiVersion={isMultiVersion}
         currentVerId={currentVerId}
@@ -688,20 +723,22 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               ) : (
               <>
               <ScrollArea className="min-w-0 flex-1">
-                <div className="px-2">
+                {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
+                    成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
+                <div className="mx-auto w-full max-w-[1200px] px-2">
                   <VideoBanner
                     audioMeta={currentTask?.audioMeta}
                     videoUrl={currentTask?.formData?.video_url}
                   />
-                </div>
-                <div className={'markdown-body w-full px-2'} ref={bodyRef} onClick={handleFoldClick}>
-                  <ReactMarkdown
-                    remarkPlugins={remarkPlugins}
-                    rehypePlugins={rehypePlugins}
-                    components={markdownComponents}
-                  >
-                    {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
-                  </ReactMarkdown>
+                  <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
+                    <ReactMarkdown
+                      remarkPlugins={remarkPlugins}
+                      rehypePlugins={rehypePlugins}
+                      components={markdownComponents}
+                    >
+                      {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               </ScrollArea>
               {showTranscribe && (
@@ -731,6 +768,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           )}
         </div>
       )}
+      {overlays}
     </div>
   )
 })

@@ -7,7 +7,22 @@ import { get, set, del } from 'idb-keyval'
 import { isTaskRunning, taskStatusLabels } from '@/constant/note'
 
 
-export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
+/**
+ * 后端 TaskStatus 枚举的取值（app/enmus/task_status_enums.py）。
+ * 以前这里写的是 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'：FAILD 拼错、RUNNING 后端根本不发、
+ * 中间阶段全缺。运行时靠 taskStatusLabels 的 Record<string,string> 兜住了才没出事。
+ */
+export type TaskStatus =
+  | 'PENDING'
+  | 'PARSING'
+  | 'DOWNLOADING'
+  | 'EXTRACTING'
+  | 'TRANSCRIBING'
+  | 'SUMMARIZING'
+  | 'FORMATTING'
+  | 'SAVING'
+  | 'SUCCESS'
+  | 'FAILED'
 
 export interface AudioMeta {
   cover_url: string
@@ -46,21 +61,42 @@ export interface Task {
   status: TaskStatus
   audioMeta: AudioMeta
   createdAt: string
+  /** addPendingTask 一直在写这个字段（书架页靠它判断封面走不走代理），接口里以前漏了声明 */
+  platform: string
+  /** 所属文件夹，null = 未分类。权威值在后端 notes 表，这里只是本地副本 */
+  folderId?: string | null
+  /** 用户自定义别名，为空时显示视频标题 */
+  title?: string | null
   formData: {
     video_url: string
-    link: undefined | boolean
-    screenshot: undefined | boolean
+    link?: boolean
+    screenshot?: boolean
     platform: string
     quality: string
     model_name: string
     provider_id: string
+    // NoteForm 提交时是把整个 payload 存进来的，style / format / extras /
+    // video_understanding / video_interval / grid_size 也都在里面，重新生成要用
+    [key: string]: any
   }
+}
+
+/** 详情页刷新后本地没这篇时，用后端 /api/task_status 的返回把它重建出来 */
+export interface HydratePayload {
+  task_id: string
+  status?: string
+  markdown?: string
+  transcript?: Transcript
+  audio_meta?: AudioMeta
+  form_data?: Record<string, any> | null
+  created_at?: number | null
 }
 
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string) => void
+  addPendingTask: (taskId: string, platform: string, formData: Task['formData']) => void
+  hydrateTask: (payload: HydratePayload) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
   removeVersion: (taskId: string, verId: string) => void
@@ -76,8 +112,7 @@ export const useTaskStore = create<TaskStore>()(
       tasks: [],
       currentTaskId: null,
 
-      addPendingTask: (taskId: string, platform: string, formData: any) =>
-
+      addPendingTask: (taskId, platform, formData) =>
         set(state => ({
           tasks: [
             {
@@ -86,6 +121,8 @@ export const useTaskStore = create<TaskStore>()(
               status: 'PENDING',
               markdown: '',
               platform: platform,
+              folderId: null,
+              title: null,
               transcript: {
                 full_text: '',
                 language: '',
@@ -227,21 +264,68 @@ export const useTaskStore = create<TaskStore>()(
         })),
 
       removeTask: async id => {
-        const task = get().tasks.find(t => t.id === id)
-
-        // 更新 Zustand 状态
+        // 先本地移除让界面立刻响应。后端删除失败不回滚——条目塞回来只会让人以为没删掉，
+        // 书架页刷新后它本来也会重新出现。
         set(state => ({
           tasks: state.tasks.filter(task => task.id !== id),
           currentTaskId: state.currentTaskId === id ? null : state.currentTaskId,
         }))
+        // 不管本地有没有这条都要通知后端：清过浏览器缓存时本地记录已经没了，
+        // 但 note_results 里的文件和截图还在盘上
+        await delete_task({ task_id: id })
+      },
 
-        // 调用后端删除接口（如果找到了任务）
-        if (task) {
-          await delete_task({
-            video_id: task.audioMeta.video_id,
-            platform: task.platform,
-          })
+      hydrateTask: payload => {
+        const { task_id } = payload
+        // 本地已有就不覆盖：浏览器里可能存着多个版本，后端只留最新一份
+        if (get().tasks.some(task => task.id === task_id)) return
+
+        const meta = payload.audio_meta
+        const form = payload.form_data ?? {}
+        const createdAt = new Date(payload.created_at ?? Date.now()).toISOString()
+        const task: Task = {
+          id: task_id,
+          status: (payload.status || 'SUCCESS') as TaskStatus,
+          markdown: payload.markdown
+            ? [
+                {
+                  ver_id: `${task_id}-restored`,
+                  content: payload.markdown,
+                  style: form.style || '',
+                  model_name: form.model_name || '',
+                  created_at: createdAt,
+                },
+              ]
+            : '',
+          transcript: payload.transcript ?? {
+            full_text: '',
+            language: '',
+            raw: null,
+            segments: [],
+          },
+          platform: meta?.platform || form.platform || '',
+          folderId: null,
+          title: null,
+          audioMeta: meta ?? {
+            cover_url: '',
+            duration: 0,
+            file_path: '',
+            platform: '',
+            raw_info: null,
+            title: '',
+            video_id: '',
+          },
+          createdAt,
+          formData: {
+            video_url: form.video_url || meta?.raw_info?.webpage_url || '',
+            platform: form.platform || meta?.platform || '',
+            quality: form.quality || 'medium',
+            model_name: form.model_name || '',
+            provider_id: form.provider_id || '',
+            ...form,
+          },
         }
+        set(state => ({ tasks: [task, ...state.tasks] }))
       },
 
       clearTasks: () => set({ tasks: [], currentTaskId: null }),
@@ -250,6 +334,20 @@ export const useTaskStore = create<TaskStore>()(
     }),
     {
       name: 'task-storage',
+      version: 2,
+      migrate: (persisted: any, version: number) => {
+        // v2：Task 增加 folderId / title，并把一直在写却没声明的 platform 补进类型。
+        // 老记录只补默认值，内容和版本历史一律不动。
+        if (version < 2 && Array.isArray(persisted?.tasks)) {
+          persisted.tasks = persisted.tasks.map((task: any) => ({
+            ...task,
+            folderId: task.folderId ?? null,
+            title: task.title ?? null,
+            platform: task.platform ?? task.audioMeta?.platform ?? '',
+          }))
+        }
+        return persisted
+      },
       storage: createJSONStorage(() => ({
         getItem: async (name: string): Promise<string | null> => {
           const value = await get(name)

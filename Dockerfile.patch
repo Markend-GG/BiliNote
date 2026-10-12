@@ -10,7 +10,8 @@ ENV DOCKER_BUILD=1
 RUN pnpm run build
 
 # 在 GPU 基础镜像上叠加：新前端构建产物 + 修补后的后端
-# （chat 贴图问答 / 公式渲染 / 笔记编辑保存 / Whisper 下载 / 截图相似去重 / 目录锚点与长视频时间戳修复）
+# （chat 贴图问答 / 公式渲染 / 笔记编辑保存 / Whisper 下载 / 截图相似去重 / 目录锚点与长视频时间戳修复
+#   / 笔记库：文件夹收纳 + 书架页 + 真正生效的删除）
 # 基础镜像 bilinote-gpu-base:local 由本仓库的 Dockerfile.gpu-base 构建（上游镜像 + CUDA torch + CUDA12 运行库）；
 # 两者必须是不同的 tag：以前 patch 直接 FROM bilinote-gpu:local 又打回同一个 tag，每次构建都往上叠一层，
 # 叠到第 5 次就撞上 Docker 的 127 层上限（docker run 报 "max depth exceeded"）。
@@ -36,5 +37,14 @@ COPY backend/app/gpt/prompt.py /app/backend/app/gpt/prompt.py
 COPY backend/app/enmus/task_status_enums.py /app/backend/app/enmus/task_status_enums.py
 COPY backend/app/transcriber/whisper.py /app/backend/app/transcriber/whisper.py
 COPY backend/app/transcriber/transcriber_provider.py /app/backend/app/transcriber/transcriber_provider.py
+# 笔记库（书架页 / 文件夹）：新表 + 索引接口 + 真正删除笔记产物；main.py 里加了启动回填
+COPY backend/main.py /app/backend/main.py
+COPY backend/app/__init__.py /app/backend/app/__init__.py
+COPY backend/app/db/init_db.py /app/backend/app/db/init_db.py
+COPY backend/app/db/video_task_dao.py /app/backend/app/db/video_task_dao.py
+COPY backend/app/db/library_dao.py /app/backend/app/db/library_dao.py
+COPY backend/app/db/models/library.py /app/backend/app/db/models/library.py
+COPY backend/app/routers/library.py /app/backend/app/routers/library.py
+COPY backend/app/services/library_service.py /app/backend/app/services/library_service.py
 # 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
 COPY backend/tests/ /app/backend/tests/
