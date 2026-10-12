@@ -86,6 +86,7 @@ export interface TaskRecord {
 // 与 backend/app/gpt/prompt_builder.py note_styles 一一对齐
 export type NoteStyle =
   | 'minimal' | 'detailed' | 'academic' | 'tutorial'
+  | 'xingce_course' | 'shenlun_course' | 'xingce_cheatsheet'
   | 'xiaohongshu' | 'life_journal' | 'task_oriented'
   | 'business' | 'meeting_minutes'
 
@@ -96,6 +97,9 @@ export const NOTE_STYLES: Array<{ value: NoteStyle, label: string }> = [
   { value: 'minimal', label: '精简' },
   { value: 'detailed', label: '详细' },
   { value: 'tutorial', label: '教程' },
+  { value: 'xingce_course', label: '行测课程' },
+  { value: 'shenlun_course', label: '申论课程' },
+  { value: 'xingce_cheatsheet', label: '行测速查卡' },
   { value: 'academic', label: '学术' },
   { value: 'xiaohongshu', label: '小红书' },
   { value: 'life_journal', label: '生活向' },

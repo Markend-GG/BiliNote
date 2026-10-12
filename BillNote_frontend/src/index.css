@@ -146,3 +146,100 @@ html, body, #root {
     @apply bg-background text-foreground;
   }
 }
+
+/* ---------- 笔记章节折叠（src/lib/rehypeFold.ts + MarkdownViewer 的事件委托） ---------- */
+/* 标题行做成 flex，箭头在左、标题在右；标题自身的 margin / 下划线移到行容器上，
+   否则 github-markdown-css 的 h2 底边框在 flex 里只会跟文字一样宽 */
+.md-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.md-section-head > h1,
+.md-section-head > h2,
+.md-section-head > h3,
+.md-section-head > h4 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  border-bottom: none !important;
+}
+.md-section {
+  margin-top: 1.1em;
+}
+.md-section[data-level='1'] {
+  margin-top: 0.2em;
+}
+.md-section[data-level='1'] > .md-section-head,
+.md-section[data-level='2'] > .md-section-head {
+  border-bottom: 1px solid #d8dee4;
+  padding-bottom: 0.3em;
+}
+.md-section-body {
+  margin-top: 0.5em;
+}
+.md-collapsed > .md-section-body {
+  display: none;
+}
+/* 子章节缩进一条浅色竖线，层级一眼能看出来 */
+.md-section-body > .md-section {
+  margin-top: 0.7em;
+  padding-left: 1rem;
+  border-left: 2px solid #eaecef;
+}
+
+.md-fold-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  color: #57606a;
+  cursor: pointer;
+  line-height: 1;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+.md-fold-toggle:hover {
+  background: #ddf4ff;
+  border-color: #0969da;
+  color: #0969da;
+}
+.md-fold-toggle:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: 1px;
+}
+.md-fold-toggle::before {
+  content: '▸';
+  font-size: 15px;
+  font-weight: 700;
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+.md-section:not(.md-collapsed) > .md-section-head > .md-fold-toggle::before {
+  transform: rotate(90deg);
+}
+/* 收起状态用实心蓝底，一眼能看出"这里还有内容没展开" */
+.md-section.md-collapsed > .md-section-head > .md-fold-toggle {
+  background: #0969da;
+  border-color: #0969da;
+  color: #fff;
+}
+/* 一二级箭头更大，三四级也要看得出是标题行 */
+.md-section[data-level='1'] > .md-section-head > .md-fold-toggle,
+.md-section[data-level='2'] > .md-section-head > .md-fold-toggle {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+.md-section[data-level='1'] > .md-section-head > .md-fold-toggle::before,
+.md-section[data-level='2'] > .md-section-head > .md-fold-toggle::before {
+  font-size: 18px;
+}

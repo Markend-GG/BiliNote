@@ -5,6 +5,7 @@ class TaskStatus(str, enum.Enum):
     PENDING = "PENDING"
     PARSING = "PARSING"
     DOWNLOADING = "DOWNLOADING"
+    EXTRACTING = "EXTRACTING"
     TRANSCRIBING = "TRANSCRIBING"
     SUMMARIZING = "SUMMARIZING"
     FORMATTING = "FORMATTING"
@@ -18,6 +19,7 @@ class TaskStatus(str, enum.Enum):
             cls.PENDING: "排队中",
             cls.PARSING: "解析链接",
             cls.DOWNLOADING: "下载中",
+            cls.EXTRACTING: "抽取画面",
             cls.TRANSCRIBING: "转录中",
             cls.SUMMARIZING: "总结中",
             cls.FORMATTING: "格式化中",

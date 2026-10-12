@@ -1,6 +1,7 @@
 # app/routers/note.py
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -121,6 +122,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
 
 
+# 同一个 task_id 在跑时忽略重复提交：抽帧加生成要几分钟，界面上看着像卡住，用户很容易再点一次「重试」；
+# 而任务执行器其实是并发线程池（ConcurrentTaskExecutor），两次同时跑会互相删掉对方的中间帧文件
+_running_tasks: set[str] = set()
+_running_tasks_lock = threading.Lock()
+
+
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
@@ -129,6 +136,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
 
     if not model_name or not provider_id:
         raise HTTPException(status_code=400, detail="请选择模型和提供者")
+
+    with _running_tasks_lock:
+        if task_id in _running_tasks:
+            logger.warning(f"任务 {task_id} 正在执行中，忽略重复提交")
+            return
+        _running_tasks.add(task_id)
+
+    try:
+        _run_note_task_inner(task_id, video_url, platform, quality, link, screenshot, model_name, provider_id,
+                             _format, style, extras, video_understanding, video_interval, grid_size)
+    finally:
+        with _running_tasks_lock:
+            _running_tasks.discard(task_id)
+
+
+def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
+                         link: bool, screenshot: bool, model_name: str, provider_id: str,
+                         _format: list, style: str, extras: str, video_understanding: bool,
+                         video_interval, grid_size):
 
     def _execute_note_task():
         return NoteGenerator().generate(

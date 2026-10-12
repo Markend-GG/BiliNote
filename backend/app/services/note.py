@@ -1,6 +1,7 @@
 import json
-import logging
 import os
+import shutil
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -31,8 +32,18 @@ from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
+from app.utils.image_dedup import ImageSignature, compute_signature, has_more_detail, is_similar
+from app.utils.logger import get_logger
+from app.utils.markdown_toc import linkify_toc, nest_example_headings
 from app.utils.note_helper import replace_content_markers, prepend_source_link
-from app.utils.screenshot_marker import extract_screenshot_timestamps
+from app.utils.path_helper import get_app_dir
+from app.utils.screenshot_marker import (
+    collapse_image_runs,
+    drop_screenshot_marker,
+    extract_screenshot_timestamps,
+    lift_markers_out_of_headings,
+    move_first_image_under_heading,
+)
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
@@ -54,9 +65,10 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
 # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 
-# 日志配置
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# 日志：必须用 get_logger。项目里没有任何 basicConfig/dictConfig，裸 logging.getLogger 的 INFO
+# 会被 lastResort（只放 WARNING 及以上）吞掉——"检测到转写缓存""截图整理：N 个标记 → 保留 M 张"
+# "任务进入执行队列"这些关键节点在 backend.log 里全都看不到，排查时只能靠猜。
+logger = get_logger(__name__)
 
 
 class NoteGenerator:
@@ -396,14 +408,23 @@ class NoteGenerator:
         task_id = audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
+        need_video = screenshot or video_understanding
+        if screenshot and not grid_size:
+            grid_size = [2, 2]
+
         # 已有缓存，尝试加载
         if audio_cache_file.exists():
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
+            audio = None
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                return AudioDownloadResult(**data)
+                audio = AudioDownloadResult(**data)
             except Exception as e:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
+            if audio is not None:
+                # 音频可以复用，但截图/视频理解还需要视频文件和网格图，不能一起跳过
+                self._prepare_video(downloader, video_url, need_video, grid_size, video_interval, task_id)
+                return audio
 
         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
         if skip_download:
@@ -425,34 +446,7 @@ class NoteGenerator:
             except Exception as exc:
                 logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
 
-        # 判断是否需要下载视频
-        need_video = screenshot or video_understanding
-        if screenshot and not grid_size:
-            grid_size = [2, 2]
-
-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
-        if need_video:
-            try:
-                logger.info("开始下载视频")
-                video_path_str = downloader.download_video(video_url)
-                self.video_path = Path(video_path_str)
-                logger.info(f"视频下载完成：{self.video_path}")
-
-                if grid_size:
-                    self.video_img_urls = VideoReader(
-                        video_path=str(self.video_path),
-                        grid_size=tuple(grid_size),
-                        frame_interval=frame_interval,
-                        unit_width=960,
-                        unit_height=540,
-                        save_quality=80,
-                    ).run()
-                else:
-                    logger.info("未指定 grid_size，跳过缩略图生成")
-            except Exception as exc:
-                logger.error(f"视频下载失败：{exc}")
-                self._handle_exception(task_id, exc)
-                raise
+        self._prepare_video(downloader, video_url, need_video, grid_size, video_interval, task_id)
 
         # 下载音频
         try:
@@ -470,6 +464,58 @@ class NoteGenerator:
             logger.error(f"音频下载失败：{exc}")
             self._handle_exception(task_id, exc)
             raise
+
+    def _prepare_video(
+        self,
+        downloader: Downloader,
+        video_url: str,
+        need_video: bool,
+        grid_size: List[int],
+        video_interval: int,
+        task_id: str,
+    ) -> None:
+        """下载视频并按需生成网格缩略图，结果写入 self.video_path / self.video_img_urls。
+
+        截图插入与视频理解都依赖它，所以音频缓存命中时也必须走一遍（视频文件本身有缓存，不会重复下载）。
+        """
+        if not need_video:
+            return
+
+        frame_interval = video_interval if video_interval and video_interval > 0 else 6
+        # 每次运行用独立目录：任务是并发执行的（ConcurrentTaskExecutor），共用 output_frames 时
+        # 后一次 run() 的清空动作会把前一次正在用的帧删掉
+        run_dir = f"{task_id}-{uuid.uuid4().hex[:8]}"
+        frame_dir = Path(get_app_dir("output_frames")) / run_dir
+        grid_dir = Path(get_app_dir("grid_output")) / run_dir
+        try:
+            logger.info("开始下载视频")
+            video_path_str = downloader.download_video(video_url)
+            self.video_path = Path(video_path_str)
+            logger.info(f"视频下载完成：{self.video_path}")
+
+            if grid_size:
+                # 长视频抽帧要几分钟，单独报一个阶段，免得前端一直显示"下载中"像卡住了
+                self._update_status(task_id, TaskStatus.EXTRACTING)
+                self.video_img_urls = VideoReader(
+                    video_path=str(self.video_path),
+                    grid_size=tuple(grid_size),
+                    frame_interval=frame_interval,
+                    unit_width=960,
+                    unit_height=540,
+                    save_quality=80,
+                    frame_dir=str(frame_dir),
+                    grid_dir=str(grid_dir),
+                ).run()
+            else:
+                logger.info("未指定 grid_size，跳过缩略图生成")
+        except Exception as exc:
+            logger.error(f"视频下载失败：{exc}")
+            self._handle_exception(task_id, exc)
+            raise
+        finally:
+            # 网格图已经编码成 base64 存在 video_img_urls 里，中间文件可以删（一条长视频约 45MB）
+            shutil.rmtree(frame_dir, ignore_errors=True)
+            shutil.rmtree(grid_dir, ignore_errors=True)
 
 
     def _get_transcript(
@@ -560,6 +606,10 @@ class NoteGenerator:
         try:
             logger.info("开始转写音频")
             transcript = self.transcriber.transcript(file_path=audio_file)
+            if transcript is None:
+                # 转写器返回 None 时，下面 asdict() 会报"should be called on dataclass instances"，
+                # 把真正的原因盖掉，这里先拦下来给个能看懂的错
+                raise RuntimeError("转写器没有返回结果，请查看后端日志里的转写失败原因")
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
@@ -595,7 +645,10 @@ class NoteGenerator:
         :param extras: GPT 额外参数
         :return: 生成的 Markdown 字符串
         """
-        task_id = markdown_cache_file.stem
+        # 缓存文件名是 {task_id}_markdown.md，直接取 stem 会把状态写到
+        # {task_id}_markdown.status.json，前端轮询的是 {task_id}.status.json，
+        # 于是整个 AI 生成阶段界面都停在上一个阶段（看着像卡死）
+        task_id = markdown_cache_file.stem.split("_")[0]
         self._update_status(task_id, TaskStatus.SUMMARIZING)
 
         source = GPTSource(
@@ -639,6 +692,9 @@ class NoteGenerator:
         :param platform: 平台标识，用于链接替换
         :return: 处理后的 Markdown 字符串
         """
+        # 跳转/截图标记写在标题行里会毁掉目录锚点，先挪到标题下面一行
+        markdown = lift_markers_out_of_headings(markdown)
+
         if "screenshot" in formats and video_path:
             try:
                 markdown = self._insert_screenshots(markdown, video_path)
@@ -651,28 +707,79 @@ class NoteGenerator:
             except Exception as e:
                 logger.warning(f"链接插入失败，跳过该步骤：{e}")
 
+        # 模型总把截图写到小节末尾，搬回标题下面（要在链接替换之后，才能认出「原片跳转」那一行）
+        try:
+            markdown = move_first_image_under_heading(markdown)
+        except Exception as e:
+            logger.warning(f"截图位置调整失败，跳过该步骤：{e}")
+
+        # 模型常把解法和例题写成同级标题，先把例题压到上一级标题下面，再修目录锚点
+        try:
+            markdown = nest_example_headings(markdown)
+        except Exception as e:
+            logger.warning(f"标题层级调整失败，跳过该步骤：{e}")
+
+        try:
+            markdown = linkify_toc(markdown)
+        except Exception as e:
+            logger.warning(f"目录锚点修复失败，跳过该步骤：{e}")
+
         return markdown
 
-    def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
+    def _insert_screenshots(self, markdown: str, video_path: Path) -> str:
         """
         扫描 Markdown 文本中所有 Screenshot 标记，并替换为实际生成的截图链接。
+        同一页课件被标记多次时只保留一张：位置用第一次出现的标记，画面取信息量最全的那张。
 
         :param markdown: 含有 *Screenshot-mm:ss 或 Screenshot-[mm:ss] 标记的 Markdown 文本
         :param video_path: 本地视频文件路径
         :return: 替换后的 Markdown 字符串
         """
         matches: List[Tuple[str, int]] = extract_screenshot_timestamps(markdown)
+        kept: List[Tuple[ImageSignature, str]] = []  # (画面签名, 已写进笔记的图片路径)
+        dropped = 0
         for idx, (marker, ts) in enumerate(matches):
             try:
                 img_path = generate_screenshot(str(video_path), str(IMAGE_OUTPUT_DIR), ts, idx)
+                signature = compute_signature(img_path)
+            except Exception as exc:
+                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
+                markdown = drop_screenshot_marker(markdown, marker)
+                dropped += 1
+                continue
+
+            duplicate_at = next(
+                (i for i, (kept_sig, _) in enumerate(kept) if is_similar(signature, kept_sig)),
+                None,
+            )
+            if duplicate_at is None:
                 filename = Path(img_path).name
                 # 构建前端可访问的 URL，例如 /static/screenshots/{filename}
                 img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
                 markdown = markdown.replace(marker, f"![]({img_url})", 1)
-            except Exception as exc:
-                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
-                # self._handle_exception(task_id, exc)
-                return None
+                kept.append((signature, img_path))
+                continue
+
+            # 板书逐渐写满的场景：新截图内容更全时原位覆盖，笔记里的链接不变
+            kept_sig, kept_path = kept[duplicate_at]
+            if has_more_detail(signature, kept_sig):
+                os.replace(img_path, kept_path)
+                kept[duplicate_at] = (signature, kept_path)
+            else:
+                os.remove(img_path)
+            markdown = drop_screenshot_marker(markdown, marker)
+            dropped += 1
+
+        # 模型常给一道题连插好几帧板书：连续插图只留第一张，其余连文件一起删掉
+        markdown, run_dropped = collapse_image_runs(markdown)
+        for url in run_dropped:
+            (Path(IMAGE_OUTPUT_DIR) / url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
+
+        if dropped or run_dropped:
+            logger.info(
+                f"截图整理：{len(matches)} 个标记 → 笔记保留 {len(kept) - len(run_dropped)} 张"
+                f"（相似合并 {dropped} 张、连续插图丢弃 {len(run_dropped)} 张）"
+            )
         return markdown
 
     @staticmethod

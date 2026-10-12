@@ -100,10 +100,21 @@ class UniversalGPT(GPT):
         return self.checkpoint_dir / f"{safe_key}.gpt.checkpoint.json"
 
     def _build_source_signature(self, source: GPTSource) -> str:
+        # 提示词正文也要进签名：否则改了 prompt.py / prompt_builder.py 之后，
+        # 上一次失败留下的 checkpoint 会被静默复用，新提示词根本不生效
+        prompt_text = generate_base_prompt(
+            title=source.title,
+            segment_text="",
+            tags=source.tags,
+            _format=source._format,
+            style=source.style,
+            extras=source.extras,
+        ) + MERGE_PROMPT
         payload = {
             "model": self.model,
             "temperature": self.temperature,
             "max_request_bytes": self.max_request_bytes,
+            "prompt_fingerprint": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
             "title": source.title,
             "tags": source.tags,
             "format": source._format,

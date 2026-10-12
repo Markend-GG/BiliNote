@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/select.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
-import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
+import { noteStyles, noteFormats, videoPlatforms, isTaskRunning, taskStatusLabels } from '@/constant/note.ts'
 import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
@@ -199,8 +199,11 @@ const NoteForm = () => {
   ])
 
   /* ---- 帮助函数 ---- */
-  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
-  const generating = isGenerating()
+  const taskStatus = getCurrentTask()?.status
+  const generating = isTaskRunning(taskStatus)
+  // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
+  const [submitting, setSubmitting] = useState(false)
+  const busy = generating || submitting
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -221,21 +224,25 @@ const NoteForm = () => {
   }
 
   const onSubmit = async (values: NoteFormValues) => {
-    console.log('Not even go here')
-    const payload: NoteFormValues = {
-      ...values,
-      video_url:
-        values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-      provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
-      task_id: currentTaskId || '',
-    }
-    if (currentTaskId) {
-      retryTask(currentTaskId, payload)
+    if (busy) {
+      toast(`正在${taskStatusLabels[taskStatus ?? ''] || '生成'}，请勿重复点击`, { icon: '⏳' })
       return
     }
-
-    // message.success('已提交任务')
+    setSubmitting(true)
     try {
+      const payload: NoteFormValues = {
+        ...values,
+        video_url:
+          values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
+        provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+        task_id: currentTaskId || '',
+      }
+      if (currentTaskId) {
+        // 必须 await：retryTask 内部会先把状态置成 PENDING，锁才接得上
+        await retryTask(currentTaskId, payload)
+        return
+      }
+
       const data = await generateNote(payload)
       addPendingTask(data.task_id, values.platform, payload)
     } catch (e: any) {
@@ -253,6 +260,8 @@ const NoteForm = () => {
       }
       // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
       console.error('提交任务失败：', e)
+    } finally {
+      setSubmitting(false)
     }
   }
   const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
@@ -265,16 +274,20 @@ const NoteForm = () => {
     setCurrentTask(null)
   }
   const FormButton = () => {
-    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
+    const label = busy
+      ? `正在${taskStatusLabels[taskStatus ?? ''] || '生成'}…`
+      : editing
+        ? '重新生成'
+        : '生成笔记'
 
     return (
       <div className="flex gap-2">
         <Button
           type="submit"
           className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
-          disabled={generating}
+          disabled={busy}
         >
-          {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           {label}
         </Button>
 

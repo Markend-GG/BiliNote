@@ -14,6 +14,7 @@ from app.utils.path_helper import get_model_dir
 
 from events import transcription_finished
 from pathlib import Path
+import gc
 import os
 import shutil
 
@@ -141,12 +142,30 @@ class WhisperTranscriber(Transcriber):
                 language=info.language,
                 full_text=full_text.strip(),
                 segments=segments,
-                raw=info
+                # info 是 faster-whisper 的 TranscriptionInfo 对象而不是 dict，
+                # 原样塞进 raw 会让上层写缓存的 asdict()+json.dumps 直接炸掉
+                raw=transcription_info_to_dict(info)
             )
             # self.on_finish(file_path, result)
             return result
         except Exception as e:
-            print(f"转写失败：{e}")
+            # 原来这里只 print 不抛、隐式返回 None，上层 asdict(None) 报的是
+            # "asdict() should be called on dataclass instances"，真正的错因（比如缺 libcublas.so.12）被埋掉
+            logger.error(f"转写失败：{e}")
+            raise
+
+
+    def unload(self) -> None:
+        """释放显存：丢掉 CTranslate2 模型对象，下次 get_transcriber 会重新加载（约 8 秒）。
+
+        由 transcriber_provider 的闲置回收线程调用；正在跑的任务自己还持有实例引用，
+        所以卸载不会影响进行中的转写。
+        """
+        model, self.model = self.model, None
+        if model is not None:
+            del model
+        gc.collect()
+        logger.info("Whisper 模型已从显存卸载")
 
 
     def on_finish(self,video_path:str,result: TranscriptResult)->None:
@@ -154,4 +173,10 @@ class WhisperTranscriber(Transcriber):
         transcription_finished.send({
             "file_path": video_path,
         })
+
+
+def transcription_info_to_dict(info) -> dict:
+    """把 faster-whisper 的 TranscriptionInfo 转成可 JSON 序列化的 dict。"""
+    fields = ("language", "language_probability", "duration", "model_id", "device", "compute_type")
+    return {name: getattr(info, name, None) for name in fields}
 

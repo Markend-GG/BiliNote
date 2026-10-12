@@ -31,5 +31,30 @@ class TestNoteHelper(unittest.TestCase):
         self.assertEqual(result, markdown)
 
 
+class TestReplaceContentMarkers(unittest.TestCase):
+    def test_bilibili_single_part_uses_question_mark(self):
+        result = note_helper.replace_content_markers("看这里 *Content-[02:43]*", "BV1h8Ng6cEv4", "bilibili")
+        self.assertEqual(result, "看这里 [原片 @ 02:43](https://www.bilibili.com/video/BV1h8Ng6cEv4?t=163)")
+
+    def test_bilibili_multi_part_keeps_p_then_t(self):
+        result = note_helper.replace_content_markers("Content-01:00", "BV1xx_p2", "bilibili")
+        self.assertEqual(result, "[原片 @ 01:00](https://www.bilibili.com/video/BV1xx?p=2&t=60)")
+
+    def test_minutes_over_99_are_replaced(self):
+        """100 分钟以上的课，模型会写 *Content-[102:47]*。"""
+        result = note_helper.replace_content_markers("*Content-[102:47]*", "BV1h8Ng6cEv4", "bilibili")
+        self.assertEqual(result, "[原片 @ 102:47](https://www.bilibili.com/video/BV1h8Ng6cEv4?t=6167)")
+
+    def test_surrounding_asterisks_are_consumed(self):
+        self.assertNotIn("*", note_helper.replace_content_markers("*Content-00:30*", "BV1xx", "bilibili"))
+
+    def test_youtube_and_other_platforms(self):
+        self.assertEqual(
+            note_helper.replace_content_markers("Content-[00:30]", "abc123", "youtube"),
+            "[原片 @ 00:30](https://www.youtube.com/watch?v=abc123&t=30s)",
+        )
+        self.assertEqual(note_helper.replace_content_markers("Content-[00:30]", "x", "local"), "(00:30)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,16 @@
+FROM ghcr.io/jefferyhcool/bilinote:latest
+
+# CUDA-enabled torch from Tsinghua mirror (also pulls nvidia-cublas/cudnn/cudart wheels that ctranslate2 needs)
+RUN /usr/local/bin/pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple torch
+
+# faster-whisper 底层的 CTranslate2 是按 CUDA 12 编的，只认 libcublas.so.12 / libcudart.so.12。
+# 上面那个 torch 现在拉的是 CUDA 13 轮子（装在 nvidia/cu13/lib/libcublas.so.13），
+# 本地转写会报 "Library libcublas.so.12 is not found or cannot be loaded"，所以单独补一份 CUDA 12 运行库。
+# 这两个轮子正好装进下面 LD_LIBRARY_PATH 已经写好的 nvidia/cublas/lib 与 nvidia/cuda_runtime/lib。
+RUN /usr/local/bin/pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    nvidia-cublas-cu12 nvidia-cuda-runtime-cu12
+
+# Make NVIDIA pip wheels' shared libraries discoverable at runtime
+RUN for d in /usr/local/lib/python3.11/site-packages/nvidia/*/lib; do echo "$d"; done > /etc/ld.so.conf.d/nvidia-pip.conf && ldconfig || true
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cufft/lib

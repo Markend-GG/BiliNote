@@ -1,141 +1,115 @@
-import importlib.util
 import pathlib
 import re
 import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-def _install_stubs():
-    app_mod = types.ModuleType("app")
-    utils_pkg = types.ModuleType("app.utils")
+from PIL import Image, ImageDraw
 
-    logger_mod = types.ModuleType("app.utils.logger")
-
-    class _Logger:
-        @staticmethod
-        def info(*_args, **_kwargs):
-            return None
-
-        @staticmethod
-        def warning(*_args, **_kwargs):
-            return None
-
-        @staticmethod
-        def error(*_args, **_kwargs):
-            return None
-
-    def _get_logger(_name):
-        return _Logger()
-
-    logger_mod.get_logger = _get_logger
-
-    path_helper_mod = types.ModuleType("app.utils.path_helper")
-    ffmpeg_mod = types.ModuleType("ffmpeg")
-
-    pil_mod = types.ModuleType("PIL")
-    pil_image_mod = types.ModuleType("PIL.Image")
-    pil_draw_mod = types.ModuleType("PIL.ImageDraw")
-    pil_font_mod = types.ModuleType("PIL.ImageFont")
-
-    class _FakeImage:
-        pass
-
-    class _FakeImageDraw:
-        @staticmethod
-        def Draw(*_args, **_kwargs):
-            return None
-
-    class _FakeImageFont:
-        @staticmethod
-        def truetype(*_args, **_kwargs):
-            return None
-
-        @staticmethod
-        def load_default():
-            return None
-
-    pil_image_mod.Image = _FakeImage
-    pil_draw_mod.ImageDraw = _FakeImageDraw
-    pil_font_mod.ImageFont = _FakeImageFont
-
-    def _get_app_dir(name):
-        return name
-
-    path_helper_mod.get_app_dir = _get_app_dir
-    ffmpeg_mod.probe = lambda *_args, **_kwargs: {"format": {"duration": "0"}}
-
-    sys.modules.setdefault("app", app_mod)
-    sys.modules.setdefault("app.utils", utils_pkg)
-    sys.modules["PIL"] = pil_mod
-    sys.modules["PIL.Image"] = pil_image_mod
-    sys.modules["PIL.ImageDraw"] = pil_draw_mod
-    sys.modules["PIL.ImageFont"] = pil_font_mod
-    sys.modules["ffmpeg"] = ffmpeg_mod
-    sys.modules["app.utils.logger"] = logger_mod
-    sys.modules["app.utils.path_helper"] = path_helper_mod
+from app.utils.video_reader import VideoReader
+from app.utils import video_reader as video_reader_module
 
 
-def _load_video_reader_module():
-    _install_stubs()
-    root = pathlib.Path(__file__).resolve().parents[1]
-    module_path = root / "app" / "utils" / "video_reader.py"
-    spec = importlib.util.spec_from_file_location("video_reader", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError("video_reader module spec not found")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def make_slide(lines: int, cursor: bool = False, chart: bool = False, extra_line: bool = False) -> Image.Image:
+    """造一张"课件"：白底 + 标题条 + lines 行正文条。"""
+    img = Image.new("RGB", (1280, 720), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([80, 50, 1200, 95], fill=(20, 20, 20))
+    for i in range(lines):
+        y = 150 + i * 60
+        draw.rectangle([120, y, 1000 - i * 30, y + 26], fill=(20, 20, 20))
+    if extra_line:
+        # 模拟老师又补了一行板书：画面几乎没变，但内容更全
+        draw.rectangle([120, 400, 720, 412], fill=(20, 20, 20))
+    if chart:
+        draw.rectangle([820, 460, 1200, 680], outline=(20, 20, 20), width=5)
+        draw.line([(850, 650), (950, 520), (1050, 600), (1170, 480)], fill=(200, 40, 40), width=6)
+    if cursor:
+        draw.polygon([(600, 360), (600, 400), (626, 384)], fill=(255, 255, 255), outline=(0, 0, 0))
+    return img
 
 
-video_reader_module = _load_video_reader_module()
-VideoReader = video_reader_module.VideoReader
-
-
-def _make_fake_ffmpeg_runner(colors_by_second):
+def _make_fake_ffmpeg_runner(images_by_second):
     def _runner(cmd, check=True):
         output_path = next((arg for arg in cmd if isinstance(arg, str) and arg.endswith(".jpg")), None)
         if output_path is None:
             raise AssertionError("Output path not found in ffmpeg cmd")
-        match = re.search(r"frame_(\d{2})_(\d{2})\.jpg$", output_path)
+        match = re.search(r"frame_(\d{2,3})_(\d{2})\.jpg$", output_path)
         if match is None:
-            raise AssertionError("Unexpected output path")
+            raise AssertionError(f"Unexpected output path: {output_path}")
         sec = int(match.group(1)) * 60 + int(match.group(2))
-        payload = colors_by_second[sec]
-        with open(output_path, "wb") as f:
-            f.write(payload)
+        images_by_second[sec].save(output_path, quality=92)
         return 0
 
     return _runner
 
 
 class TestVideoReaderDeduplicateFrames(unittest.TestCase):
-    def test_extract_frames_skips_adjacent_duplicates_when_enabled(self):
+    def _run(self, images_by_second, action, duration=None, **reader_kwargs):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            frame_dir = pathlib.Path(tmp_dir) / "frames"
-            grid_dir = pathlib.Path(tmp_dir) / "grids"
             reader = VideoReader(
                 video_path="dummy.mp4",
                 frame_interval=1,
-                frame_dir=str(frame_dir),
-                grid_dir=str(grid_dir),
+                frame_dir=str(pathlib.Path(tmp_dir) / "frames"),
+                grid_dir=str(pathlib.Path(tmp_dir) / "grids"),
+                **reader_kwargs,
             )
+            duration = str(duration if duration is not None else max(images_by_second) + 1)
+            with patch.object(video_reader_module.ffmpeg, "probe",
+                              return_value={"format": {"duration": duration}}), \
+                    patch.object(video_reader_module.subprocess, "run",
+                                 side_effect=_make_fake_ffmpeg_runner(images_by_second)):
+                return action(reader), pathlib.Path(reader.frame_dir)
 
-            fake_colors = {
-                0: b"frame-a",
-                1: b"frame-a",
-                2: b"frame-b",
-                3: b"frame-b",
-            }
+    def _extract(self, images_by_second, max_frames=10, duration=None, **reader_kwargs):
+        (paths, frame_dir) = self._run(images_by_second, lambda r: r.extract_frames(max_frames=max_frames),
+                                       duration=duration, **reader_kwargs)
+        return [pathlib.Path(p).name for p in paths], frame_dir
 
-            with patch.object(video_reader_module.ffmpeg, "probe", return_value={"format": {"duration": "4"}}), \
-                    patch.object(video_reader_module.subprocess, "run", side_effect=_make_fake_ffmpeg_runner(fake_colors)):
-                paths = reader.extract_frames(max_frames=10)
+    def test_skips_identical_adjacent_frames(self):
+        same = make_slide(3)
+        other = make_slide(3, chart=True)
+        names, _ = self._extract({0: same, 1: same, 2: other, 3: other})
+        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
 
-            names = [pathlib.Path(p).name for p in paths]
-            self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
+    def test_skips_visually_similar_frames(self):
+        """同一页课件只是多了个鼠标指针 → 只留一张；换了一页 → 保留。"""
+        names, _ = self._extract({0: make_slide(3), 1: make_slide(3, cursor=True), 2: make_slide(5)})
+        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
+
+    def test_keeps_the_more_complete_frame_of_a_similar_group(self):
+        """板书逐渐写满时留下写满的那一帧，网格图上的时间水印也跟着更新。"""
+        names, _ = self._extract({0: make_slide(3), 1: make_slide(3, extra_line=True)})
+        self.assertEqual(names, ["frame_00_01.jpg"])
+
+    def test_long_video_stretches_step_to_reach_the_tail(self):
+        """帧数有上限时自动放大步长：30 秒视频、间隔 1 秒、上限 5 帧 → 步长 6 秒，覆盖到片尾。"""
+        slides = {0: make_slide(1), 6: make_slide(3), 12: make_slide(5), 18: make_slide(7), 24: make_slide(9)}
+        names, _ = self._extract(slides, max_frames=5, duration=30)
+        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_06.jpg", "frame_00_12.jpg",
+                                 "frame_00_18.jpg", "frame_00_24.jpg"])
+
+    def test_keeps_everything_when_dedupe_disabled(self):
+        same = make_slide(3)
+        names, _ = self._extract({0: same, 1: same}, dedupe_enabled=False)
+        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_01.jpg"])
+
+    def test_duplicate_frame_files_are_deleted(self):
+        same = make_slide(3)
+        names, frame_dir = self._extract({0: same, 1: same, 2: make_slide(6)})
+        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
+        self.assertFalse((frame_dir / "frame_00_01.jpg").exists())
+
+    def test_run_still_emits_grid_when_frames_are_fewer_than_cells(self):
+        """去重后只剩 2 张、网格是 2x2 时也要出图，否则模型一张截图都拿不到。"""
+        same = make_slide(3)
+        (urls, _) = self._run({0: same, 1: same, 2: make_slide(3, chart=True)},
+                              lambda r: r.run(), grid_size=(2, 2))
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(urls[0].startswith("data:image/jpeg;base64,"))
 
 
 if __name__ == "__main__":

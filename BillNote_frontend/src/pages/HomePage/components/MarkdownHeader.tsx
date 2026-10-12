@@ -1,9 +1,17 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Copy, Download, BrainCircuit, MessageSquare, Pencil } from 'lucide-react'
+import { Copy, Download, BrainCircuit, MessageSquare, Pencil, ChevronsDownUp, ChevronsUpDown, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Badge } from '@/components/ui/badge'
 
@@ -32,6 +40,12 @@ interface NoteHeaderProps {
   setShowChat?: (mode: false | 'half' | 'full') => void
   onEdit?: () => void
   editing?: boolean
+  /** 一键收起/展开全部章节（折叠状态在 MarkdownViewer 里用 DOM class 维护） */
+  foldAll?: boolean
+  onFoldAll?: () => void
+  /** 删除当前选中的版本（版本历史只存在浏览器本地） */
+  onDeleteVersion?: () => void
+  canDeleteVersion?: boolean
 }
 
 export function MarkdownHeader({
@@ -53,8 +67,13 @@ export function MarkdownHeader({
   setViewMode,
   onEdit,
   editing,
+  foldAll,
+  onFoldAll,
+  onDeleteVersion,
+  canDeleteVersion,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   useEffect(() => {
     let timer: NodeJS.Timeout
@@ -71,10 +90,6 @@ export function MarkdownHeader({
 
   const styleName = noteStyles.find(v => v.value === style)?.label || style
 
-  const reversedMarkdown: VersionNote[] = Array.isArray(currentTask?.markdown)
-    ? [...currentTask!.markdown].reverse()
-    : []
-
   const formatDate = (date: string | Date | undefined) => {
     if (!date) return ''
     const d = typeof date === 'string' ? new Date(date) : date
@@ -90,32 +105,93 @@ export function MarkdownHeader({
       .replace(/\//g, '-')
   }
 
+  // 版本按时间倒序排好，最新的在第 0 位
+  const versions: VersionNote[] = Array.isArray(currentTask?.markdown)
+    ? [...currentTask!.markdown].sort(
+        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
+      )
+    : []
+
+  // 版本号按时间正序编号：最早那版是 V1，最新那版是 V{n}
+  const versionLabel = (index: number) => {
+    const no = versions.length - index
+    const time = formatDate(versions[index]?.created_at).slice(5) // 去年份，下拉框放不下
+    const head = index === 0 ? `V${no}（最新）` : `V${no}`
+    return time ? `${head} · ${time}` : head
+  }
+
+  const currentVersionIndex = versions.findIndex(v => v.ver_id === currentVerId)
+
   return (
     <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-white/95 px-4 py-2 backdrop-blur-sm">
       {/* 左侧区域：版本 + 标签 + 创建时间 */}
       <div className="flex flex-wrap items-center gap-3">
         {isMultiVersion && (
           <Select value={currentVerId} onValueChange={setCurrentVerId}>
-            <SelectTrigger className="h-8 w-[160px] text-sm">
+            <SelectTrigger className="h-8 w-[210px] text-sm">
               <div className="flex items-center">
-                {(() => {
-                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
-                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
-                })()}
+                {currentVersionIndex === -1 ? '' : versionLabel(currentVersionIndex)}
               </div>
             </SelectTrigger>
 
             <SelectContent>
-              {(currentTask?.markdown || []).map((v, idx) => {
-                const shortId = v.ver_id.slice(-6)
-                return (
-                  <SelectItem key={v.ver_id} value={v.ver_id}>
-                    {`版本（${shortId}）`}
-                  </SelectItem>
-                )
-              })}
+              {versions.map((v, idx) => (
+                <SelectItem key={v.ver_id} value={v.ver_id}>
+                  {versionLabel(idx)}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
+        )}
+
+        {isMultiVersion && onDeleteVersion && (
+          <>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0 text-neutral-500 hover:bg-red-50 hover:text-red-600"
+                    disabled={!canDeleteVersion}
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {canDeleteVersion ? '删除当前选中的版本' : '只剩一个版本，不能删'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+              <DialogContent className="max-w-sm">
+                <DialogHeader>
+                  <DialogTitle>删除这个版本？</DialogTitle>
+                  <DialogDescription>
+                    {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
+                    　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <Button variant="outline" size="sm" onClick={() => setConfirmDelete(false)}>
+                    取消
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmDelete(false)
+                      onDeleteVersion()
+                    }}
+                  >
+                    删除
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </>
         )}
 
         <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200">
@@ -150,6 +226,23 @@ export function MarkdownHeader({
             <TooltipContent>思维导图</TooltipContent>
           </Tooltip>
         </TooltipProvider>
+        {onFoldAll && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button onClick={onFoldAll} variant="ghost" size="sm" className="h-8 px-2">
+                  {foldAll ? (
+                    <ChevronsUpDown className="mr-1.5 h-4 w-4" />
+                  ) : (
+                    <ChevronsDownUp className="mr-1.5 h-4 w-4" />
+                  )}
+                  <span className="text-sm">{foldAll ? '展开全部' : '收起全部'}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>一键收起/展开所有章节，方便快速定位</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>

@@ -15,13 +15,14 @@ import gfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeSlug from 'rehype-slug'
+import rehypeFold from '@/lib/rehypeFold'
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { useTaskStore } from '@/store/taskStore'
 import { update_note } from '@/services/note'
 import { normalizeMathDelimiters } from '@/utils/math'
-import { noteStyles } from '@/constant/note.ts'
+import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
@@ -43,14 +44,16 @@ interface MarkdownViewerProps {
 
 const steps = [
   { label: '解析链接', key: 'PARSING' },
-  { label: '下载音频', key: 'DOWNLOADING' },
+  { label: '下载音视频', key: 'DOWNLOADING' },
+  { label: '抽取画面', key: 'EXTRACTING' },
   { label: '转写文字', key: 'TRANSCRIBING' },
   { label: '总结内容', key: 'SUMMARIZING' },
   { label: '保存完成', key: 'SUCCESS' },
 ]
 
 const remarkPlugins = [gfm, remarkMath]
-const rehypePlugins = [rehypeKatex, rehypeSlug]
+// rehypeFold 必须排在 rehypeSlug 之后：它要复用 slug 已经写到标题上的 id
+const rehypePlugins = [rehypeKatex, rehypeSlug, rehypeFold]
 
 /**
  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
@@ -101,7 +104,7 @@ function createMarkdownComponents(baseURL: string) {
         (children[0] as string).startsWith('原片 @')
 
       if (isOriginLink) {
-        const timeMatch = (children[0] as string).match(/原片 @ (\d{2}:\d{2})/)
+        const timeMatch = (children[0] as string).match(/原片 @ (\d{1,3}:\d{2})/)
         const timeText = timeMatch ? timeMatch[1] : '原片'
 
         return (
@@ -147,6 +150,10 @@ function createMarkdownComponents(baseURL: string) {
           }
 
           if (target) {
+            // 目标可能藏在折叠起来的章节里，先把祖先全部展开，否则滚过去是一片空白
+            for (let sec = target.closest('.md-section'); sec; sec = sec.parentElement?.closest('.md-section') || null) {
+              sec.classList.remove('md-collapsed')
+            }
             target.scrollIntoView({ behavior: 'smooth', block: 'start' })
           } else {
             toast.error('未找到对应章节')
@@ -371,6 +378,56 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setSelectedContent(currentVer.content)
     }
   }, [currentVerId, currentTask?.id])
+  // ---- 章节折叠 ----
+  // 折叠状态用 DOM class 存（不用 React state）：一节一节展开/收起是纯视觉状态，
+  // 走事件委托改 class 既不用给每个标题挂状态，也不会和 React 的重渲染打架
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [foldAll, setFoldAll] = useState(false)
+
+  const handleFoldClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const toggle = (e.target as HTMLElement).closest('.md-fold-toggle')
+    if (!toggle) return
+    e.preventDefault()
+    toggle.closest('.md-section')?.classList.toggle('md-collapsed')
+  }
+
+  const handleToggleFoldAll = () => {
+    const root = bodyRef.current
+    if (!root) return
+    const sections = [...root.querySelectorAll('.md-section')].filter(
+      // 一级标题是笔记总标题，收起来整篇就没了
+      section => section.getAttribute('data-level') !== '1',
+    )
+    // 从 DOM 实际状态推导：目录跳转会自动展开祖先、切换版本会整棵重建，
+    // 只靠 foldAll 这个 state 记的话按钮文案会和真实状态脱节
+    const collapse = sections.some(section => !section.classList.contains('md-collapsed'))
+    sections.forEach(section => section.classList.toggle('md-collapsed', collapse))
+    setFoldAll(collapse)
+  }
+
+  // 换版本/重新渲染后 DOM 是全新展开的，按钮文案要跟着复位
+  useEffect(() => {
+    setFoldAll(false)
+  }, [selectedContent])
+
+  const handleDeleteVersion = () => {
+    if (!currentTask || !currentVerId) return
+    const versions = Array.isArray(currentTask.markdown) ? currentTask.markdown : []
+    if (versions.length <= 1) {
+      toast.error('只剩一个版本了，不能删')
+      return
+    }
+    useTaskStore.getState().removeVersion(currentTask.id, currentVerId)
+    const rest = [...((useTaskStore.getState().getCurrentTask()?.markdown as typeof versions) || [])].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    )
+    // 删的正是当前在看的版本时切到剩下的最新版，否则界面会停在已删除的内容上
+    if (!rest.some(v => v.ver_id === currentVerId)) {
+      setCurrentVerId(rest[0]?.ver_id || '')
+    }
+    toast.success('已删除该版本')
+  }
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
@@ -433,6 +490,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       toast.error('笔记内容不能为空')
       return
     }
+    if (draft === selectedContent) {
+      toast('内容没有变化，已退出编辑')
+      setEditing(false)
+      return
+    }
     setSaving(true)
     try {
       await update_note(currentTask.id, draft)
@@ -489,8 +551,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
-          <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
-          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
+          <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
+          <p className="mt-2 text-xs text-neutral-500">
+            长视频要抽帧并分批送给模型，可能需要几分钟；按钮已锁定，无需重复点击
+          </p>
         </div>
       </div>
     )
@@ -543,6 +607,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setShowChat={setShowChat}
         viewMode={viewMode}
         setViewMode={setViewMode}
+        foldAll={foldAll}
+        onFoldAll={handleToggleFoldAll}
+        onDeleteVersion={handleDeleteVersion}
+        canDeleteVersion={isMultiVersion && (currentTask?.markdown as unknown[])?.length > 1}
         onEdit={handleStartEdit}
         editing={editing}
       />
@@ -626,7 +694,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     videoUrl={currentTask?.formData?.video_url}
                   />
                 </div>
-                <div className={'markdown-body w-full px-2'}>
+                <div className={'markdown-body w-full px-2'} ref={bodyRef} onClick={handleFoldClick}>
                   <ReactMarkdown
                     remarkPlugins={remarkPlugins}
                     rehypePlugins={rehypePlugins}
