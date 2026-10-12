@@ -1,716 +1,3956 @@
-diff --git a/feature-custom-patches.patch b/feature-custom-patches.patch
-index b6d5849..e69de29 100644
---- a/feature-custom-patches.patch
-+++ b/feature-custom-patches.patch
-@@ -1,711 +0,0 @@
--diff --git a/.dockerignore b/.dockerignore
--index 179b969..2a36425 100644
----- a/.dockerignore
--+++ b/.dockerignore
--@@ -33,3 +33,6 @@ build/
-- .env.local
-- .env.*.local
-- !.env.example
--+
--+# 文档图片（不参与构建）
--+doc
--diff --git a/BillNote_frontend/src/lib/markmap.ts b/BillNote_frontend/src/lib/markmap.ts
--index 54a4b3b..3cb101a 100644
----- a/BillNote_frontend/src/lib/markmap.ts
--+++ b/BillNote_frontend/src/lib/markmap.ts
--@@ -1,8 +1,15 @@
-- import { loadCSS, loadJS } from 'markmap-common'
-- import { Transformer } from 'markmap-lib'
-- import * as markmap from 'markmap-view'
--+import * as katex from 'katex'
--+
--+// markmap 浏览器版的公式渲染依赖 window.katex：没有它时会去 jsdelivr CDN
--+// 异步加载 katex（国内基本加载失败），期间公式会显示为原始 LaTeX 源码。
--+// 应用本身已打包了 katex（rehype-katex 同款依赖），直接挂到 window 即可让
--+// 思维导图同步渲染公式。
--+;(window as any).katex = katex
-- 
-- export const transformer = new Transformer()
-- const { scripts, styles } = transformer.getAssets()
-- loadCSS(styles)
---loadJS(scripts, { getMarkmap: () => markmap })
--+loadJS(scripts, { getMarkmap: () => markmap })
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
--index c81c06f..ce13f87 100644
----- a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
--+++ b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
--@@ -1,17 +1,22 @@
---import { useState, useEffect, useCallback, useMemo } from 'react'
--+import { useState, useEffect, useCallback, useMemo, type ClipboardEvent } from 'react'
-- import { Bubble, Sender } from '@ant-design/x'
-- import ReactMarkdown from 'react-markdown'
-- import remarkGfm from 'remark-gfm'
--+import remarkMath from 'remark-math'
--+import rehypeKatex from 'rehype-katex'
-- import { Button } from '@/components/ui/button'
-- import { Badge } from '@/components/ui/badge'
---import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2 } from 'lucide-react'
--+import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2, X } from 'lucide-react'
-- import { toast } from 'react-hot-toast'
-- import { useChatStore } from '@/store/chatStore'
-- import { useTaskStore } from '@/store/taskStore'
-- import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatus } from '@/services/chat'
--+import { normalizeMathDelimiters } from '@/utils/math'
-- 
-- type ChatMode = 'half' | 'full'
-- 
--+const MAX_IMAGES = 4
--+
-- interface ChatPanelProps {
--   taskId: string
--   mode: ChatMode
--@@ -48,8 +53,30 @@ function SourceBadges({ sources }: { sources: ChatSource[] }) {
--   )
-- }
-- 
--+function UserContent({ content, images }: { content: string; images?: string[] }) {
--+  if (!images || images.length === 0) {
--+    return <div className="whitespace-pre-wrap">{content}</div>
--+  }
--+  return (
--+    <div className="flex flex-col gap-1.5">
--+      <div className="flex flex-wrap justify-end gap-1.5">
--+        {images.map((src, i) => (
--+          <img
--+            key={i}
--+            src={src}
--+            alt={`图片${i + 1}`}
--+            className="max-h-40 max-w-[160px] rounded border border-white/20 object-cover"
--+          />
--+        ))}
--+      </div>
--+      {content ? <div className="whitespace-pre-wrap">{content}</div> : null}
--+    </div>
--+  )
--+}
--+
-- export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
--   const [input, setInput] = useState('')
--+  const [images, setImages] = useState<string[]>([])
--   const [loading, setLoading] = useState(false)
--   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
-- 
--@@ -98,10 +125,39 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--     }
--   }, [taskId])
-- 
--+  // 支持把剪贴板里的图片直接粘贴进来（Ctrl+V）
--+  const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
--+    const items = e.clipboardData?.items
--+    if (!items) return
--+    const files: File[] = []
--+    for (const item of Array.from(items)) {
--+      if (item.kind === 'file' && item.type.startsWith('image/')) {
--+        const f = item.getAsFile()
--+        if (f) files.push(f)
--+      }
--+    }
--+    if (files.length === 0) return
--+    e.preventDefault()
--+    files.forEach(file => {
--+      const reader = new FileReader()
--+      reader.onload = () => {
--+        setImages(prev => {
--+          const next = [...prev, reader.result as string]
--+          if (next.length > MAX_IMAGES) {
--+            toast(`最多支持 ${MAX_IMAGES} 张图片`)
--+            return next.slice(0, MAX_IMAGES)
--+          }
--+          return next
--+        })
--+      }
--+      reader.readAsDataURL(file)
--+    })
--+  }, [])
--+
--   const handleSend = useCallback(
--     async (value: string) => {
--       const question = value.trim()
---      if (!question || loading) return
--+      if ((!question && images.length === 0) || loading) return
-- 
--       const providerId = currentTask?.formData?.provider_id
--       const modelName = currentTask?.formData?.model_name
--@@ -110,8 +166,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--         return
--       }
-- 
---      addMessage(taskId, { role: 'user', content: question })
--+      const sentImages = [...images]
--+      addMessage(taskId, {
--+        role: 'user',
--+        content: question,
--+        images: sentImages.length > 0 ? sentImages : undefined,
--+      })
--       setInput('')
--+      setImages([])
--       setLoading(true)
-- 
--       try {
--@@ -122,6 +184,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--           history,
--           provider_id: providerId,
--           model_name: modelName,
--+          images: sentImages.length > 0 ? sentImages : undefined,
--         })
--         addMessage(taskId, {
--           role: 'assistant',
--@@ -134,7 +197,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--         setLoading(false)
--       }
--     },
---    [loading, taskId, currentTask, messages, addMessage],
--+    [loading, taskId, currentTask, messages, addMessage, images],
--   )
-- 
--   // 转换为 Bubble.List 的数据格式
--@@ -142,7 +205,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--     const items = messages.map((msg, i) => ({
--       key: `msg-${i}`,
--       role: msg.role === 'user' ? ('user' as const) : ('ai' as const),
---      content: msg.content,
--+      content:
--+        msg.role === 'user' ? (
--+          <UserContent content={msg.content} images={msg.images} />
--+        ) : (
--+          msg.content
--+        ),
--       footer:
--         msg.role === 'assistant' && msg.sources ? (
--           <SourceBadges sources={msg.sources} />
--@@ -184,8 +252,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--         variant: 'outlined' as const,
--         contentRender: (content: any) => (
--           <div className="markdown-body prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:my-2">
---            <ReactMarkdown remarkPlugins={[remarkGfm]}>
---              {typeof content === 'string' ? content : String(content)}
--+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
--+              {typeof content === 'string' ? normalizeMathDelimiters(content) : String(content)}
--             </ReactMarkdown>
--           </div>
--         ),
--@@ -268,6 +336,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--             <div>
--               <p>针对笔记内容提问</p>
--               <p className="mt-1 text-xs">例如：这个视频的核心观点是什么？</p>
--+              <p className="mt-1 text-xs">也可以直接粘贴题目截图（Ctrl+V）让 AI 读图回答</p>
--             </div>
--           </div>
--         ) : (
--@@ -280,15 +349,31 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
--       </div>
-- 
--       {/* 输入区域 */}
---      <div className="border-t px-3 py-2">
--+      <div className="border-t px-3 py-2" onPaste={handlePaste}>
--+        {images.length > 0 && (
--+          <div className="mb-2 flex flex-wrap gap-2">
--+            {images.map((src, i) => (
--+              <div key={i} className="relative">
--+                <img src={src} alt={`预览${i + 1}`} className="h-16 w-16 rounded border object-cover" />
--+                <button
--+                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-600 text-white hover:bg-red-500"
--+                  onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}
--+                  title="移除"
--+                >
--+                  <X className="h-3 w-3" />
--+                </button>
--+              </div>
--+            ))}
--+          </div>
--+        )}
--         <Sender
--           value={input}
--           onChange={setInput}
--           onSubmit={handleSend}
--           loading={loading}
---          placeholder="输入你的问题..."
--+          placeholder="输入你的问题...（可直接 Ctrl+V 粘贴图片）"
--         />
--       </div>
--     </div>
--   )
---}
--+}
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
--index 89934b5..2f1e692 100644
----- a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
--+++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
--@@ -1,7 +1,7 @@
-- 'use client'
-- 
-- import { useEffect, useState } from 'react'
---import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
--+import { Copy, Download, BrainCircuit, MessageSquare, Pencil } from 'lucide-react'
-- import { Button } from '@/components/ui/button'
-- import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
-- import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
--@@ -30,6 +30,8 @@ interface NoteHeaderProps {
--   setShowTranscribe: (show: boolean) => void
--   showChat?: false | 'half' | 'full'
--   setShowChat?: (mode: false | 'half' | 'full') => void
--+  onEdit?: () => void
--+  editing?: boolean
-- }
-- 
-- export function MarkdownHeader({
--@@ -49,6 +51,8 @@ export function MarkdownHeader({
--   setShowChat,
--   viewMode,
--   setViewMode,
--+  onEdit,
--+  editing,
-- }: NoteHeaderProps) {
--   const [copied, setCopied] = useState(false)
-- 
--@@ -169,6 +173,25 @@ export function MarkdownHeader({
--             <TooltipContent>下载为 Markdown 文件</TooltipContent>
--           </Tooltip>
--         </TooltipProvider>
--+        {onEdit && (
--+          <TooltipProvider>
--+            <Tooltip>
--+              <TooltipTrigger asChild>
--+                <Button
--+                  onClick={onEdit}
--+                  variant={editing ? 'default' : 'ghost'}
--+                  size="sm"
--+                  className="h-8 px-2"
--+                  disabled={editing}
--+                >
--+                  <Pencil className="mr-1.5 h-4 w-4" />
--+                  <span className="text-sm">{editing ? '编辑中' : '编辑'}</span>
--+                </Button>
--+              </TooltipTrigger>
--+              <TooltipContent>编辑笔记内容（可删除重复的图片行）</TooltipContent>
--+            </Tooltip>
--+          </TooltipProvider>
--+        )}
--         <TooltipProvider>
--           <Tooltip>
--             <TooltipTrigger asChild>
--@@ -208,4 +231,4 @@ export function MarkdownHeader({
--       </div>
--     </div>
--   )
---}
--+}
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
--index c34a0e5..b963306 100644
----- a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
--+++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
--@@ -1,7 +1,7 @@
-- import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
-- import ReactMarkdown from 'react-markdown'
-- import { Button } from '@/components/ui/button.tsx'
---import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
--+import { Copy, Download, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
-- import { toast } from 'react-hot-toast'
-- import Error from '@/components/Lottie/error.tsx'
-- import Loading from '@/components/Lottie/Loading.tsx'
--@@ -19,6 +19,8 @@ import 'katex/dist/katex.min.css'
-- import 'github-markdown-css/github-markdown-light.css'
-- import { ScrollArea } from '@/components/ui/scroll-area.tsx'
-- import { useTaskStore } from '@/store/taskStore'
--+import { update_note } from '@/services/note'
--+import { normalizeMathDelimiters } from '@/utils/math'
-- import { noteStyles } from '@/constant/note.ts'
-- import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
-- import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
--@@ -330,6 +332,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
--   const [showTranscribe, setShowTranscribe] = useState(false)
--   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
--   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
--+  const [editing, setEditing] = useState(false)
--+  const [draft, setDraft] = useState('')
--+  const [saving, setSaving] = useState(false)
--   const svgRef = useRef<SVGSVGElement>(null)
-- 
--   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
--@@ -415,6 +420,69 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
--     document.body.removeChild(link)
--   }
-- 
--+  const handleStartEdit = () => {
--+    if (!selectedContent || selectedContent === 'loading' || selectedContent === 'empty') return
--+    setDraft(selectedContent)
--+    setViewMode('preview')
--+    setEditing(true)
--+  }
--+
--+  const handleSaveEdit = async () => {
--+    if (!currentTask) return
--+    if (!draft.trim()) {
--+      toast.error('笔记内容不能为空')
--+      return
--+    }
--+    setSaving(true)
--+    try {
--+      await update_note(currentTask.id, draft)
--+      // 保存为本地新版本（旧版本仍可在版本下拉中查看）
--+      useTaskStore.getState().updateTaskContent(currentTask.id, { markdown: draft })
--+      // 自动切换到新版本
--+      const updated = useTaskStore.getState().getCurrentTask()
--+      if (updated && Array.isArray(updated.markdown)) {
--+        const latest = [...updated.markdown].sort(
--+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
--+        )[0]
--+        if (latest) setCurrentVerId(latest.ver_id)
--+      }
--+      setEditing(false)
--+      toast.success('已保存（旧版本可在版本下拉中查看）')
--+    } catch (e) {
--+      // 失败提示由请求拦截器统一处理
--+    } finally {
--+      setSaving(false)
--+    }
--+  }
--+
--+  // 编辑模式：解析草稿里的图片引用，生成缩略图列表（便于直观识别重复图片并删除）
--+  const draftImages = useMemo(() => {
--+    const out: { alt: string; url: string; line: number; start: number; end: number }[] = []
--+    const re = /!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
--+    let m: RegExpExecArray | null
--+    while ((m = re.exec(draft)) !== null) {
--+      const line = draft.slice(0, m.index).split('\n').length
--+      out.push({ alt: m[1] || '', url: m[2], line, start: m.index, end: m.index + m[0].length })
--+    }
--+    return out
--+  }, [draft])
--+
--+  const removeDraftImage = (start: number, end: number) => {
--+    setDraft(prev => {
--+      // 若该行去掉所有图片引用后为空，则整行删除；否则只删除这一处引用
--+      const lineStart = prev.lastIndexOf('\n', start - 1) + 1
--+      const nl = prev.indexOf('\n', end)
--+      const lineEnd = nl === -1 ? prev.length : nl
--+      const lineContent = prev.slice(lineStart, lineEnd)
--+      const imgRe = /!\[[^\]]*\]\(\s*[^)\s]+(?:\s+"[^"]*")?\s*\)/g
--+      const remainder = lineContent.replace(imgRe, '').trim()
--+      if (!remainder) {
--+        return prev.slice(0, lineStart) + prev.slice(Math.min(lineEnd + 1, prev.length))
--+      }
--+      return prev.slice(0, start) + prev.slice(end)
--+    })
--+  }
--+
--   if (status === 'loading') {
--     return (
--       <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
--@@ -475,6 +543,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
--         setShowChat={setShowChat}
--         viewMode={viewMode}
--         setViewMode={setViewMode}
--+        onEdit={handleStartEdit}
--+        editing={editing}
--       />
-- 
--       {viewMode === 'map' ? (
--@@ -488,6 +558,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
--             />
--           </div>
--         </div>
--+      ) : editing ? (
--+        <div className="flex flex-1 flex-col overflow-hidden bg-white px-3 py-2">
--+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
--+            <span className="text-muted-foreground text-sm">
--+              编辑 Markdown：可在下方缩略图里点 × 删除图片，或直接修改文字，保存后生成新版本
--+            </span>
--+            <div className="flex items-center gap-2">
--+              <Button size="sm" variant="outline" onClick={() => setEditing(false)} disabled={saving}>
--+                取消
--+              </Button>
--+              <Button size="sm" onClick={handleSaveEdit} disabled={saving}>
--+                {saving ? '保存中…' : '保存'}
--+              </Button>
--+            </div>
--+          </div>
--+          {draftImages.length > 0 && (
--+            <div className="mb-2 shrink-0 rounded-md border bg-neutral-50 p-2">
--+              <div className="text-muted-foreground mb-1.5 text-xs">
--+                共 {draftImages.length} 张图片 —— 重复的图片缩略图会完全相同，点右上角 × 删除对应那一处（序号·行号见图片角标）
--+              </div>
--+              <div className="flex max-h-36 flex-wrap gap-2 overflow-y-auto">
--+                {draftImages.map((img, i) => (
--+                  <div key={`${img.start}-${img.end}`} className="relative">
--+                    <img
--+                      src={img.url.startsWith('/') ? baseURL + img.url : img.url}
--+                      alt={img.alt || `图${i + 1}`}
--+                      title={`图 ${i + 1} · 第 ${img.line} 行\n${img.url}`}
--+                      className="h-20 w-28 cursor-help rounded border object-cover"
--+                    />
--+                    <span className="absolute bottom-0 left-0 rounded-tr bg-black/60 px-1 text-[10px] leading-4 text-white">
--+                      图{i + 1} · 行{img.line}
--+                    </span>
--+                    <button
--+                      onClick={() => removeDraftImage(img.start, img.end)}
--+                      title="删除这张图片"
--+                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-600 text-white hover:bg-red-500"
--+                    >
--+                      <X className="h-3 w-3" />
--+                    </button>
--+                  </div>
--+                ))}
--+              </div>
--+            </div>
--+          )}
--+          <textarea
--+            value={draft}
--+            onChange={e => setDraft(e.target.value)}
--+            spellCheck={false}
--+            className="min-h-0 w-full flex-1 resize-none rounded-md border p-3 font-mono text-sm leading-6 focus:outline-none"
--+          />
--+        </div>
--       ) : (
--         <div className="flex flex-1 overflow-hidden bg-white py-2">
--           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
--@@ -511,7 +632,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
--                     rehypePlugins={rehypePlugins}
--                     components={markdownComponents}
--                   >
---                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
--+                    {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
--                   </ReactMarkdown>
--                 </div>
--               </ScrollArea>
--diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
--index 21a7e8d..e5268d3 100644
----- a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
--+++ b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
--@@ -1,6 +1,7 @@
-- import { useEffect, useRef, useState } from 'react'
-- import { Markmap } from 'markmap-view'
-- import { transformer } from '@/lib/markmap.ts'
--+import { normalizeMathDelimiters } from '@/utils/math'
-- import { Toolbar } from 'markmap-toolbar'
-- import 'markmap-toolbar/dist/style.css'
-- import JSZip from 'jszip'
--@@ -93,7 +94,7 @@ function stripMindmapImages(markdown: string) {
-- }
-- 
-- function transformMindmap(markdown: string) {
---  return transformer.transform(stripMindmapImages(markdown))
--+  return transformer.transform(normalizeMathDelimiters(stripMindmapImages(markdown)))
-- }
-- 
-- function createExportSvg(svgEl: SVGSVGElement) {
--diff --git a/BillNote_frontend/src/services/chat.ts b/BillNote_frontend/src/services/chat.ts
--index 32f541f..3ef58d0 100644
----- a/BillNote_frontend/src/services/chat.ts
--+++ b/BillNote_frontend/src/services/chat.ts
--@@ -35,10 +35,12 @@ export const askQuestion = async (data: {
--   history: ChatMessage[]
--   provider_id: string
--   model_name: string
--+  /** 可选：data:image/...;base64,... 形式的多模态图片（最多 4 张） */
--+  images?: string[]
-- }): Promise<AskResponse> => {
---  return await request.post('/chat/ask', data, { timeout: 60000 })
--+  return await request.post('/chat/ask', data, { timeout: 180000 })
-- }
-- 
-- export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {
--   return await request.get(`/chat/status?task_id=${taskId}`)
---}
--+}
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/services/note.ts b/BillNote_frontend/src/services/note.ts
--index 722bd92..fd72928 100644
----- a/BillNote_frontend/src/services/note.ts
--+++ b/BillNote_frontend/src/services/note.ts
--@@ -70,6 +70,11 @@ export const get_task_status = async (task_id: string) => {
--     // 错误提示
--     toast.error('笔记生成失败，请稍后重试')
-- 
---    throw e // 抛出错误以便调用方处理
--+    throw e
--   }
-- }
--+
--+/** 保存手动编辑后的笔记（同步更新后端文件与 AI 问答索引） */
--+export const update_note = async (task_id: string, markdown: string) => {
--+  return await request.post('/update_note', { task_id, markdown })
--+}
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/store/chatStore/index.ts b/BillNote_frontend/src/store/chatStore/index.ts
--index 51baa57..12a03bb 100644
----- a/BillNote_frontend/src/store/chatStore/index.ts
--+++ b/BillNote_frontend/src/store/chatStore/index.ts
--@@ -6,6 +6,8 @@ export interface ChatMessage {
--   role: 'user' | 'assistant'
--   content: string
--   sources?: ChatSource[]
--+  /** 用户粘贴的图片（data:image/...;base64,...），仅用于界面展示 */
--+  images?: string[]
-- }
-- 
-- interface ChatState {
--@@ -38,6 +40,15 @@ export const useChatStore = create<ChatState>()(
--     }),
--     {
--       name: 'bilinote-chat-storage',
--+      // 图片 base64 体积大，不写入 localStorage（避免超出配额），仅保留文字
--+      partialize: state => ({
--+        chatHistory: Object.fromEntries(
--+          Object.entries(state.chatHistory).map(([k, msgs]) => [
--+            k,
--+            msgs.map(m => (m.images ? { ...m, images: undefined } : m)),
--+          ]),
--+        ),
--+      }),
--     },
--   ),
---)
--+)
--\ No newline at end of file
--diff --git a/BillNote_frontend/src/utils/math.ts b/BillNote_frontend/src/utils/math.ts
--new file mode 100644
--index 0000000..b4fd56a
----- /dev/null
--+++ b/BillNote_frontend/src/utils/math.ts
--@@ -0,0 +1,14 @@
--+/**
--+ * 把 \[...\] / \(...\) 形式的公式归一化为 $ / $$ 分隔符。
--+ * remark-math（笔记/问答）和 markmap（思维导图）都只识别 $ 分隔符；
--+ * 笔记模型输出的 \[...\] 会被当成普通文本显示成原始 LaTeX。
--+ *
--+ * 块级公式额外用换行包裹并 trim：保证 $$ 永远处于行首（remark-math 的
--+ * 块级公式要求行首标记），即使原文里 \[ 跟在文字后面也不会解析失败。
--+ */
--+export function normalizeMathDelimiters(markdown: string): string {
--+  if (!markdown) return markdown
--+  return markdown
--+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
--+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
--+}
--\ No newline at end of file
--diff --git a/backend/app/routers/chat.py b/backend/app/routers/chat.py
--index a5633c9..e358fdb 100644
----- a/backend/app/routers/chat.py
--+++ b/backend/app/routers/chat.py
--@@ -29,6 +29,7 @@ class AskRequest(BaseModel):
--     history: list[ChatMessage] = []
--     provider_id: str
--     model_name: str
--+    images: list[str] = []  # data:image/...;base64,...（最多取前 4 张）
-- 
-- 
-- def _do_index(task_id: str):
--@@ -92,6 +93,7 @@ def ask_question(data: AskRequest):
--             history=history,
--             provider_id=data.provider_id,
--             model_name=data.model_name,
--+            images=data.images,
--         )
--         return R.success(data=result)
--     except ValueError as e:
--diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
--index f433e46..8174e14 100644
----- a/backend/app/routers/note.py
--+++ b/backend/app/routers/note.py
--@@ -174,6 +174,47 @@ def delete_task(data: RecordRequest):
--         return R.error(msg=e)
-- 
-- 
--+class UpdateNoteRequest(BaseModel):
--+    task_id: str
--+    markdown: str
--+
--+
--+def _reindex_note(task_id: str):
--+    try:
--+        from app.services.vector_store import VectorStoreManager
--+        VectorStoreManager().index_task(task_id)
--+        logger.info(f"编辑后重新索引完成: {task_id}")
--+    except Exception as e:
--+        logger.warning(f"编辑后重新索引失败（不影响笔记）: {e}")
--+
--+
--+@router.post('/update_note')
--+def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
--+    """保存用户手动编辑后的笔记内容（同步更新索引，供 AI 问答使用）。"""
--+    if not data.markdown.strip():
--+        return R.error(msg='笔记内容不能为空')
--+    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
--+    if not os.path.exists(note_path):
--+        return R.error(msg='笔记文件不存在，无法保存')
--+    try:
--+        with open(note_path, 'r', encoding='utf-8') as f:
--+            note_data = json.load(f)
--+        note_data['markdown'] = data.markdown
--+        with open(note_path, 'w', encoding='utf-8') as f:
--+            json.dump(note_data, f, ensure_ascii=False, indent=2)
--+
--+        md_cache = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
--+        with open(md_cache, 'w', encoding='utf-8') as f:
--+            f.write(data.markdown)
--+
--+        background_tasks.add_task(_reindex_note, data.task_id)
--+        logger.info(f"笔记已手动编辑保存: {data.task_id}")
--+        return R.success(msg='保存成功')
--+    except Exception as e:
--+        logger.error(f"保存笔记失败: {e}")
--+        return R.error(msg=f'保存失败: {e}')
--+
--+
-- @router.post("/upload")
-- async def upload(file: UploadFile = File(...)):
--     os.makedirs(UPLOAD_DIR, exist_ok=True)
--diff --git a/backend/app/services/chat_service.py b/backend/app/services/chat_service.py
--index e7239cf..d15aced 100644
----- a/backend/app/services/chat_service.py
--+++ b/backend/app/services/chat_service.py
--@@ -26,7 +26,8 @@ SYSTEM_PROMPT = """你是一个视频笔记问答助手。你拥有以下能力
-- - 如果初始检索内容不足以回答问题，请主动调用工具获取更多信息
-- - 回答关于视频具体原话、细节时，用 lookup_transcript 查询原文
-- - 回答关于作者、标题等基本信息时，用 get_video_info 查询
---- 请用中文回答，保持简洁准确"""
--+- 请用中文回答，保持简洁准确
--+- 如果用户消息中附带了图片（题目截图、图表等），请优先结合图片内容回答"""
-- 
-- 
-- def _build_context(chunks: list[dict]) -> str:
--@@ -72,6 +73,7 @@ def chat(
--     history: list[dict],
--     provider_id: str,
--     model_name: str,
--+    images: Optional[list[str]] = None,
-- ) -> dict:
--     """
--     RAG + Tool Calling 问答。
--@@ -83,7 +85,8 @@ def chat(
--     vector_store = VectorStoreManager()
-- 
--     # 1. 检索初始上下文
---    chunks = vector_store.query(task_id, question, n_results=6)
--+    query_text = question.strip() or "请结合图片内容回答问题"
--+    chunks = vector_store.query(task_id, query_text, n_results=6)
--     context = _build_context(chunks) if chunks else "（未检索到相关内容，请使用工具查询）"
--     sources = _build_sources(chunks) if chunks else []
-- 
--@@ -94,7 +97,16 @@ def chat(
--     for msg in history[-20:]:
--         messages.append({"role": msg["role"], "content": msg["content"]})
-- 
---    messages.append({"role": "user", "content": question})
--+    if images:
--+        content = [{"type": "text", "text": query_text}]
--+        for img in images[:4]:
--+            content.append({
--+                "type": "image_url",
--+                "image_url": {"url": img, "detail": "auto"},
--+            })
--+        messages.append({"role": "user", "content": content})
--+    else:
--+        messages.append({"role": "user", "content": question})
-- 
--     # 3. 获取 LLM client
--     provider = ProviderService.get_provider_by_id(provider_id)
+diff --git a/.dockerignore b/.dockerignore
+index 179b969..2a36425 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -33,3 +33,6 @@ build/
+ .env.local
+ .env.*.local
+ !.env.example
++
++# 文档图片（不参与构建）
++doc
+diff --git a/BillNote_extension/src/logic/types.ts b/BillNote_extension/src/logic/types.ts
+index b729ae8..26236ff 100644
+--- a/BillNote_extension/src/logic/types.ts
++++ b/BillNote_extension/src/logic/types.ts
+@@ -86,6 +86,7 @@ export interface TaskRecord {
+ // 与 backend/app/gpt/prompt_builder.py note_styles 一一对齐
+ export type NoteStyle =
+   | 'minimal' | 'detailed' | 'academic' | 'tutorial'
++  | 'xingce_course' | 'shenlun_course' | 'xingce_cheatsheet'
+   | 'xiaohongshu' | 'life_journal' | 'task_oriented'
+   | 'business' | 'meeting_minutes'
+ 
+@@ -96,6 +97,9 @@ export const NOTE_STYLES: Array<{ value: NoteStyle, label: string }> = [
+   { value: 'minimal', label: '精简' },
+   { value: 'detailed', label: '详细' },
+   { value: 'tutorial', label: '教程' },
++  { value: 'xingce_course', label: '行测课程' },
++  { value: 'shenlun_course', label: '申论课程' },
++  { value: 'xingce_cheatsheet', label: '行测速查卡' },
+   { value: 'academic', label: '学术' },
+   { value: 'xiaohongshu', label: '小红书' },
+   { value: 'life_journal', label: '生活向' },
+diff --git a/BillNote_frontend/src/constant/note.ts b/BillNote_frontend/src/constant/note.ts
+index d27ba62..cb8a455 100644
+--- a/BillNote_frontend/src/constant/note.ts
++++ b/BillNote_frontend/src/constant/note.ts
+@@ -18,6 +18,9 @@ export const noteStyles = [
+   { label: '精简', value: 'minimal' },
+   { label: '详细', value: 'detailed' },
+   { label: '教程', value: 'tutorial' },
++  { label: '行测课程', value: 'xingce_course' },
++  { label: '申论课程', value: 'shenlun_course' },
++  { label: '行测速查卡', value: 'xingce_cheatsheet' },
+   { label: '学术', value: 'academic' },
+   { label: '小红书', value: 'xiaohongshu' },
+   { label: '生活向', value: 'life_journal' },
+@@ -33,3 +36,21 @@ export const videoPlatforms = [
+   { label: '快手', value: 'kuaishou', logo: KuaishouLogo },
+   { label: '本地视频', value: 'local', logo: LocalLogo },
+ ] as const
++
++/** 后端 TaskStatus 的中文文案，按钮和进度条共用 */
++export const taskStatusLabels: Record<string, string> = {
++  PENDING: '排队中',
++  PARSING: '解析链接',
++  DOWNLOADING: '下载音视频',
++  EXTRACTING: '抽取视频画面',
++  TRANSCRIBING: '语音转写',
++  SUMMARIZING: 'AI 生成笔记',
++  FORMATTING: '插入截图与链接',
++  SAVING: '保存笔记',
++  SUCCESS: '已完成',
++  FAILED: '生成失败',
++}
++
++/** 除终态以外都算「正在生成」，用来禁用提交按钮、拦截重复点击 */
++export const isTaskRunning = (status?: string) =>
++  !!status && status !== 'SUCCESS' && status !== 'FAILED'
+diff --git a/BillNote_frontend/src/index.css b/BillNote_frontend/src/index.css
+index 0fc8f14..800556b 100644
+--- a/BillNote_frontend/src/index.css
++++ b/BillNote_frontend/src/index.css
+@@ -146,3 +146,100 @@ html, body, #root {
+     @apply bg-background text-foreground;
+   }
+ }
++
++/* ---------- 笔记章节折叠（src/lib/rehypeFold.ts + MarkdownViewer 的事件委托） ---------- */
++/* 标题行做成 flex，箭头在左、标题在右；标题自身的 margin / 下划线移到行容器上，
++   否则 github-markdown-css 的 h2 底边框在 flex 里只会跟文字一样宽 */
++.md-section-head {
++  display: flex;
++  align-items: center;
++  gap: 0.5rem;
++}
++.md-section-head > h1,
++.md-section-head > h2,
++.md-section-head > h3,
++.md-section-head > h4 {
++  flex: 1 1 auto;
++  min-width: 0;
++  margin-top: 0 !important;
++  margin-bottom: 0 !important;
++  border-bottom: none !important;
++}
++.md-section {
++  margin-top: 1.1em;
++}
++.md-section[data-level='1'] {
++  margin-top: 0.2em;
++}
++.md-section[data-level='1'] > .md-section-head,
++.md-section[data-level='2'] > .md-section-head {
++  border-bottom: 1px solid #d8dee4;
++  padding-bottom: 0.3em;
++}
++.md-section-body {
++  margin-top: 0.5em;
++}
++.md-collapsed > .md-section-body {
++  display: none;
++}
++/* 子章节缩进一条浅色竖线，层级一眼能看出来 */
++.md-section-body > .md-section {
++  margin-top: 0.7em;
++  padding-left: 1rem;
++  border-left: 2px solid #eaecef;
++}
++
++.md-fold-toggle {
++  flex: 0 0 auto;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 1.5rem;
++  height: 1.5rem;
++  padding: 0;
++  border: 1px solid #d0d7de;
++  border-radius: 6px;
++  background: #f6f8fa;
++  color: #57606a;
++  cursor: pointer;
++  line-height: 1;
++  transition:
++    background 0.15s ease,
++    color 0.15s ease,
++    border-color 0.15s ease;
++}
++.md-fold-toggle:hover {
++  background: #ddf4ff;
++  border-color: #0969da;
++  color: #0969da;
++}
++.md-fold-toggle:focus-visible {
++  outline: 2px solid #0969da;
++  outline-offset: 1px;
++}
++.md-fold-toggle::before {
++  content: '▸';
++  font-size: 15px;
++  font-weight: 700;
++  display: inline-block;
++  transition: transform 0.15s ease;
++}
++.md-section:not(.md-collapsed) > .md-section-head > .md-fold-toggle::before {
++  transform: rotate(90deg);
++}
++/* 收起状态用实心蓝底，一眼能看出"这里还有内容没展开" */
++.md-section.md-collapsed > .md-section-head > .md-fold-toggle {
++  background: #0969da;
++  border-color: #0969da;
++  color: #fff;
++}
++/* 一二级箭头更大，三四级也要看得出是标题行 */
++.md-section[data-level='1'] > .md-section-head > .md-fold-toggle,
++.md-section[data-level='2'] > .md-section-head > .md-fold-toggle {
++  width: 1.75rem;
++  height: 1.75rem;
++}
++.md-section[data-level='1'] > .md-section-head > .md-fold-toggle::before,
++.md-section[data-level='2'] > .md-section-head > .md-fold-toggle::before {
++  font-size: 18px;
++}
+diff --git a/BillNote_frontend/src/lib/markmap.ts b/BillNote_frontend/src/lib/markmap.ts
+index 54a4b3b..3cb101a 100644
+--- a/BillNote_frontend/src/lib/markmap.ts
++++ b/BillNote_frontend/src/lib/markmap.ts
+@@ -1,8 +1,15 @@
+ import { loadCSS, loadJS } from 'markmap-common'
+ import { Transformer } from 'markmap-lib'
+ import * as markmap from 'markmap-view'
++import * as katex from 'katex'
++
++// markmap 浏览器版的公式渲染依赖 window.katex：没有它时会去 jsdelivr CDN
++// 异步加载 katex（国内基本加载失败），期间公式会显示为原始 LaTeX 源码。
++// 应用本身已打包了 katex（rehype-katex 同款依赖），直接挂到 window 即可让
++// 思维导图同步渲染公式。
++;(window as any).katex = katex
+ 
+ export const transformer = new Transformer()
+ const { scripts, styles } = transformer.getAssets()
+ loadCSS(styles)
+-loadJS(scripts, { getMarkmap: () => markmap })
++loadJS(scripts, { getMarkmap: () => markmap })
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/lib/rehypeFold.ts b/BillNote_frontend/src/lib/rehypeFold.ts
+new file mode 100644
+index 0000000..9bfd0e6
+--- /dev/null
++++ b/BillNote_frontend/src/lib/rehypeFold.ts
+@@ -0,0 +1,105 @@
++/**
++ * 把笔记按标题包成可折叠的 section（rehype/hast 层插件）。
++ *
++ * 每个 h1~h4 连同它下面「直到下一个同级或更高级标题之前」的内容，被包成：
++ *   <div class="md-section" data-level="N">
++ *     <div class="md-section-head"><button class="md-fold-toggle"/><hN id="…">标题</hN></div>
++ *     <div class="md-section-body">…该节内容（可嵌套子 section）…</div>
++ *   </div>
++ *
++ * 为什么在 hast 层做：
++ * - react-markdown 把 root 的 children 渲染成扁平兄弟节点，自定义 components.h2 拿不到「后面的内容」
++ * - 渲染完再用 useEffect 改 DOM 会和 React 的 reconciliation 打架，还会让图片 Zoom 的定位错位
++ * 必须排在 rehypeSlug 之后，标题上已生成的 id 要原样保留（目录锚点跳转依赖它）。
++ */
++
++const MAX_FOLD_LEVEL = 4
++const HEADING_RE = /^h([1-6])$/
++// 与后端 app/utils/markdown_toc.py 的 TOC_TITLES 保持一致：目录本身不折叠
++const TOC_TITLES = ['目录', '大纲', 'contents', 'table of contents', 'toc']
++
++type HastNode = {
++  type: string
++  tagName?: string
++  properties?: Record<string, unknown>
++  children?: HastNode[]
++  value?: string
++}
++
++function textOf(node: HastNode): string {
++  if (node.type === 'text') return node.value || ''
++  return (node.children || []).map(textOf).join('')
++}
++
++function isTocHeading(node: HastNode): boolean {
++  const text = textOf(node).trim().toLowerCase()
++  return TOC_TITLES.includes(text) || text.startsWith('目录')
++}
++
++function makeToggle(level: number): HastNode {
++  return {
++    type: 'element',
++    tagName: 'button',
++    properties: {
++      className: ['md-fold-toggle'],
++      type: 'button',
++      ariaExpanded: true,
++      ariaLabel: '展开或收起本节',
++      dataLevel: level,
++    },
++    children: [],
++  }
++}
++
++export default function rehypeFold() {
++  return (tree: { children: HastNode[] }) => {
++    const stack: { body: HastNode; level: number }[] = []
++    const out: HastNode[] = []
++
++    const place = (node: HastNode) => {
++      if (stack.length) stack[stack.length - 1].body.children!.push(node)
++      else out.push(node)
++    }
++
++    for (const node of tree.children) {
++      const match = node.type === 'element' && node.tagName ? HEADING_RE.exec(node.tagName) : null
++      if (!match) {
++        place(node)
++        continue
++      }
++
++      const level = Number(match[1])
++      // h5/h6 和「目录」章节不折叠，当普通内容留在当前层
++      if (level > MAX_FOLD_LEVEL || isTocHeading(node)) {
++        place(node)
++        continue
++      }
++
++      // 关掉所有层级不比它浅的 section，这样同级标题会并列、子标题会嵌进去
++      while (stack.length && stack[stack.length - 1].level >= level) stack.pop()
++
++      const body: HastNode = {
++        type: 'element',
++        tagName: 'div',
++        properties: { className: ['md-section-body'] },
++        children: [],
++      }
++      const head: HastNode = {
++        type: 'element',
++        tagName: 'div',
++        properties: { className: ['md-section-head'] },
++        children: [makeToggle(level), node],
++      }
++      const section: HastNode = {
++        type: 'element',
++        tagName: 'div',
++        properties: { className: ['md-section'], dataLevel: level },
++        children: [head, body],
++      }
++      place(section)
++      stack.push({ body, level })
++    }
++
++    tree.children = out
++  }
++}
+diff --git a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
+index c81c06f..ce13f87 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
++++ b/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
+@@ -1,17 +1,22 @@
+-import { useState, useEffect, useCallback, useMemo } from 'react'
++import { useState, useEffect, useCallback, useMemo, type ClipboardEvent } from 'react'
+ import { Bubble, Sender } from '@ant-design/x'
+ import ReactMarkdown from 'react-markdown'
+ import remarkGfm from 'remark-gfm'
++import remarkMath from 'remark-math'
++import rehypeKatex from 'rehype-katex'
+ import { Button } from '@/components/ui/button'
+ import { Badge } from '@/components/ui/badge'
+-import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2 } from 'lucide-react'
++import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2, X } from 'lucide-react'
+ import { toast } from 'react-hot-toast'
+ import { useChatStore } from '@/store/chatStore'
+ import { useTaskStore } from '@/store/taskStore'
+ import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatus } from '@/services/chat'
++import { normalizeMathDelimiters } from '@/utils/math'
+ 
+ type ChatMode = 'half' | 'full'
+ 
++const MAX_IMAGES = 4
++
+ interface ChatPanelProps {
+   taskId: string
+   mode: ChatMode
+@@ -48,8 +53,30 @@ function SourceBadges({ sources }: { sources: ChatSource[] }) {
+   )
+ }
+ 
++function UserContent({ content, images }: { content: string; images?: string[] }) {
++  if (!images || images.length === 0) {
++    return <div className="whitespace-pre-wrap">{content}</div>
++  }
++  return (
++    <div className="flex flex-col gap-1.5">
++      <div className="flex flex-wrap justify-end gap-1.5">
++        {images.map((src, i) => (
++          <img
++            key={i}
++            src={src}
++            alt={`图片${i + 1}`}
++            className="max-h-40 max-w-[160px] rounded border border-white/20 object-cover"
++          />
++        ))}
++      </div>
++      {content ? <div className="whitespace-pre-wrap">{content}</div> : null}
++    </div>
++  )
++}
++
+ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
+   const [input, setInput] = useState('')
++  const [images, setImages] = useState<string[]>([])
+   const [loading, setLoading] = useState(false)
+   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
+ 
+@@ -98,10 +125,39 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+     }
+   }, [taskId])
+ 
++  // 支持把剪贴板里的图片直接粘贴进来（Ctrl+V）
++  const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
++    const items = e.clipboardData?.items
++    if (!items) return
++    const files: File[] = []
++    for (const item of Array.from(items)) {
++      if (item.kind === 'file' && item.type.startsWith('image/')) {
++        const f = item.getAsFile()
++        if (f) files.push(f)
++      }
++    }
++    if (files.length === 0) return
++    e.preventDefault()
++    files.forEach(file => {
++      const reader = new FileReader()
++      reader.onload = () => {
++        setImages(prev => {
++          const next = [...prev, reader.result as string]
++          if (next.length > MAX_IMAGES) {
++            toast(`最多支持 ${MAX_IMAGES} 张图片`)
++            return next.slice(0, MAX_IMAGES)
++          }
++          return next
++        })
++      }
++      reader.readAsDataURL(file)
++    })
++  }, [])
++
+   const handleSend = useCallback(
+     async (value: string) => {
+       const question = value.trim()
+-      if (!question || loading) return
++      if ((!question && images.length === 0) || loading) return
+ 
+       const providerId = currentTask?.formData?.provider_id
+       const modelName = currentTask?.formData?.model_name
+@@ -110,8 +166,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+         return
+       }
+ 
+-      addMessage(taskId, { role: 'user', content: question })
++      const sentImages = [...images]
++      addMessage(taskId, {
++        role: 'user',
++        content: question,
++        images: sentImages.length > 0 ? sentImages : undefined,
++      })
+       setInput('')
++      setImages([])
+       setLoading(true)
+ 
+       try {
+@@ -122,6 +184,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+           history,
+           provider_id: providerId,
+           model_name: modelName,
++          images: sentImages.length > 0 ? sentImages : undefined,
+         })
+         addMessage(taskId, {
+           role: 'assistant',
+@@ -134,7 +197,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+         setLoading(false)
+       }
+     },
+-    [loading, taskId, currentTask, messages, addMessage],
++    [loading, taskId, currentTask, messages, addMessage, images],
+   )
+ 
+   // 转换为 Bubble.List 的数据格式
+@@ -142,7 +205,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+     const items = messages.map((msg, i) => ({
+       key: `msg-${i}`,
+       role: msg.role === 'user' ? ('user' as const) : ('ai' as const),
+-      content: msg.content,
++      content:
++        msg.role === 'user' ? (
++          <UserContent content={msg.content} images={msg.images} />
++        ) : (
++          msg.content
++        ),
+       footer:
+         msg.role === 'assistant' && msg.sources ? (
+           <SourceBadges sources={msg.sources} />
+@@ -184,8 +252,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+         variant: 'outlined' as const,
+         contentRender: (content: any) => (
+           <div className="markdown-body prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:my-2">
+-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+-              {typeof content === 'string' ? content : String(content)}
++            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
++              {typeof content === 'string' ? normalizeMathDelimiters(content) : String(content)}
+             </ReactMarkdown>
+           </div>
+         ),
+@@ -268,6 +336,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+             <div>
+               <p>针对笔记内容提问</p>
+               <p className="mt-1 text-xs">例如：这个视频的核心观点是什么？</p>
++              <p className="mt-1 text-xs">也可以直接粘贴题目截图（Ctrl+V）让 AI 读图回答</p>
+             </div>
+           </div>
+         ) : (
+@@ -280,15 +349,31 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+       </div>
+ 
+       {/* 输入区域 */}
+-      <div className="border-t px-3 py-2">
++      <div className="border-t px-3 py-2" onPaste={handlePaste}>
++        {images.length > 0 && (
++          <div className="mb-2 flex flex-wrap gap-2">
++            {images.map((src, i) => (
++              <div key={i} className="relative">
++                <img src={src} alt={`预览${i + 1}`} className="h-16 w-16 rounded border object-cover" />
++                <button
++                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-600 text-white hover:bg-red-500"
++                  onClick={() => setImages(prev => prev.filter((_, j) => j !== i))}
++                  title="移除"
++                >
++                  <X className="h-3 w-3" />
++                </button>
++              </div>
++            ))}
++          </div>
++        )}
+         <Sender
+           value={input}
+           onChange={setInput}
+           onSubmit={handleSend}
+           loading={loading}
+-          placeholder="输入你的问题..."
++          placeholder="输入你的问题...（可直接 Ctrl+V 粘贴图片）"
+         />
+       </div>
+     </div>
+   )
+-}
++}
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
+index 89934b5..13fb3cf 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
++++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownHeader.tsx
+@@ -1,9 +1,17 @@
+ 'use client'
+ 
+ import { useEffect, useState } from 'react'
+-import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
++import { Copy, Download, BrainCircuit, MessageSquare, Pencil, ChevronsDownUp, ChevronsUpDown, Trash2 } from 'lucide-react'
+ import { Button } from '@/components/ui/button'
+ import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
+ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+ import { Badge } from '@/components/ui/badge'
+ 
+@@ -30,6 +38,14 @@ interface NoteHeaderProps {
+   setShowTranscribe: (show: boolean) => void
+   showChat?: false | 'half' | 'full'
+   setShowChat?: (mode: false | 'half' | 'full') => void
++  onEdit?: () => void
++  editing?: boolean
++  /** 一键收起/展开全部章节（折叠状态在 MarkdownViewer 里用 DOM class 维护） */
++  foldAll?: boolean
++  onFoldAll?: () => void
++  /** 删除当前选中的版本（版本历史只存在浏览器本地） */
++  onDeleteVersion?: () => void
++  canDeleteVersion?: boolean
+ }
+ 
+ export function MarkdownHeader({
+@@ -49,8 +65,15 @@ export function MarkdownHeader({
+   setShowChat,
+   viewMode,
+   setViewMode,
++  onEdit,
++  editing,
++  foldAll,
++  onFoldAll,
++  onDeleteVersion,
++  canDeleteVersion,
+ }: NoteHeaderProps) {
+   const [copied, setCopied] = useState(false)
++  const [confirmDelete, setConfirmDelete] = useState(false)
+ 
+   useEffect(() => {
+     let timer: NodeJS.Timeout
+@@ -67,10 +90,6 @@ export function MarkdownHeader({
+ 
+   const styleName = noteStyles.find(v => v.value === style)?.label || style
+ 
+-  const reversedMarkdown: VersionNote[] = Array.isArray(currentTask?.markdown)
+-    ? [...currentTask!.markdown].reverse()
+-    : []
+-
+   const formatDate = (date: string | Date | undefined) => {
+     if (!date) return ''
+     const d = typeof date === 'string' ? new Date(date) : date
+@@ -86,34 +105,95 @@ export function MarkdownHeader({
+       .replace(/\//g, '-')
+   }
+ 
++  // 版本按时间倒序排好，最新的在第 0 位
++  const versions: VersionNote[] = Array.isArray(currentTask?.markdown)
++    ? [...currentTask!.markdown].sort(
++        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
++      )
++    : []
++
++  // 版本号按时间正序编号：最早那版是 V1，最新那版是 V{n}
++  const versionLabel = (index: number) => {
++    const no = versions.length - index
++    const time = formatDate(versions[index]?.created_at).slice(5) // 去年份，下拉框放不下
++    const head = index === 0 ? `V${no}（最新）` : `V${no}`
++    return time ? `${head} · ${time}` : head
++  }
++
++  const currentVersionIndex = versions.findIndex(v => v.ver_id === currentVerId)
++
+   return (
+     <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-white/95 px-4 py-2 backdrop-blur-sm">
+       {/* 左侧区域：版本 + 标签 + 创建时间 */}
+       <div className="flex flex-wrap items-center gap-3">
+         {isMultiVersion && (
+           <Select value={currentVerId} onValueChange={setCurrentVerId}>
+-            <SelectTrigger className="h-8 w-[160px] text-sm">
++            <SelectTrigger className="h-8 w-[210px] text-sm">
+               <div className="flex items-center">
+-                {(() => {
+-                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
+-                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
+-                })()}
++                {currentVersionIndex === -1 ? '' : versionLabel(currentVersionIndex)}
+               </div>
+             </SelectTrigger>
+ 
+             <SelectContent>
+-              {(currentTask?.markdown || []).map((v, idx) => {
+-                const shortId = v.ver_id.slice(-6)
+-                return (
+-                  <SelectItem key={v.ver_id} value={v.ver_id}>
+-                    {`版本（${shortId}）`}
+-                  </SelectItem>
+-                )
+-              })}
++              {versions.map((v, idx) => (
++                <SelectItem key={v.ver_id} value={v.ver_id}>
++                  {versionLabel(idx)}
++                </SelectItem>
++              ))}
+             </SelectContent>
+           </Select>
+         )}
+ 
++        {isMultiVersion && onDeleteVersion && (
++          <>
++            <TooltipProvider>
++              <Tooltip>
++                <TooltipTrigger asChild>
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    className="h-8 w-8 p-0 text-neutral-500 hover:bg-red-50 hover:text-red-600"
++                    disabled={!canDeleteVersion}
++                    onClick={() => setConfirmDelete(true)}
++                  >
++                    <Trash2 className="h-4 w-4" />
++                  </Button>
++                </TooltipTrigger>
++                <TooltipContent>
++                  {canDeleteVersion ? '删除当前选中的版本' : '只剩一个版本，不能删'}
++                </TooltipContent>
++              </Tooltip>
++            </TooltipProvider>
++
++            <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
++              <DialogContent className="max-w-sm">
++                <DialogHeader>
++                  <DialogTitle>删除这个版本？</DialogTitle>
++                  <DialogDescription>
++                    {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
++                    　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
++                  </DialogDescription>
++                </DialogHeader>
++                <DialogFooter>
++                  <Button variant="outline" size="sm" onClick={() => setConfirmDelete(false)}>
++                    取消
++                  </Button>
++                  <Button
++                    variant="destructive"
++                    size="sm"
++                    onClick={() => {
++                      setConfirmDelete(false)
++                      onDeleteVersion()
++                    }}
++                  >
++                    删除
++                  </Button>
++                </DialogFooter>
++              </DialogContent>
++            </Dialog>
++          </>
++        )}
++
+         <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200">
+           {modelName}
+         </Badge>
+@@ -146,6 +226,23 @@ export function MarkdownHeader({
+             <TooltipContent>思维导图</TooltipContent>
+           </Tooltip>
+         </TooltipProvider>
++        {onFoldAll && (
++          <TooltipProvider>
++            <Tooltip>
++              <TooltipTrigger asChild>
++                <Button onClick={onFoldAll} variant="ghost" size="sm" className="h-8 px-2">
++                  {foldAll ? (
++                    <ChevronsUpDown className="mr-1.5 h-4 w-4" />
++                  ) : (
++                    <ChevronsDownUp className="mr-1.5 h-4 w-4" />
++                  )}
++                  <span className="text-sm">{foldAll ? '展开全部' : '收起全部'}</span>
++                </Button>
++              </TooltipTrigger>
++              <TooltipContent>一键收起/展开所有章节，方便快速定位</TooltipContent>
++            </Tooltip>
++          </TooltipProvider>
++        )}
+         <TooltipProvider>
+           <Tooltip>
+             <TooltipTrigger asChild>
+@@ -169,6 +266,25 @@ export function MarkdownHeader({
+             <TooltipContent>下载为 Markdown 文件</TooltipContent>
+           </Tooltip>
+         </TooltipProvider>
++        {onEdit && (
++          <TooltipProvider>
++            <Tooltip>
++              <TooltipTrigger asChild>
++                <Button
++                  onClick={onEdit}
++                  variant={editing ? 'default' : 'ghost'}
++                  size="sm"
++                  className="h-8 px-2"
++                  disabled={editing}
++                >
++                  <Pencil className="mr-1.5 h-4 w-4" />
++                  <span className="text-sm">{editing ? '编辑中' : '编辑'}</span>
++                </Button>
++              </TooltipTrigger>
++              <TooltipContent>编辑笔记内容（可删除重复的图片行）</TooltipContent>
++            </Tooltip>
++          </TooltipProvider>
++        )}
+         <TooltipProvider>
+           <Tooltip>
+             <TooltipTrigger asChild>
+@@ -208,4 +324,4 @@ export function MarkdownHeader({
+       </div>
+     </div>
+   )
+-}
++}
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
+index c34a0e5..856348c 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
++++ b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
+@@ -1,7 +1,7 @@
+ import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+ import ReactMarkdown from 'react-markdown'
+ import { Button } from '@/components/ui/button.tsx'
+-import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
++import { Copy, Download, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
+ import { toast } from 'react-hot-toast'
+ import Error from '@/components/Lottie/error.tsx'
+ import Loading from '@/components/Lottie/Loading.tsx'
+@@ -15,11 +15,14 @@ import gfm from 'remark-gfm'
+ import remarkMath from 'remark-math'
+ import rehypeKatex from 'rehype-katex'
+ import rehypeSlug from 'rehype-slug'
++import rehypeFold from '@/lib/rehypeFold'
+ import 'katex/dist/katex.min.css'
+ import 'github-markdown-css/github-markdown-light.css'
+ import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+ import { useTaskStore } from '@/store/taskStore'
+-import { noteStyles } from '@/constant/note.ts'
++import { update_note } from '@/services/note'
++import { normalizeMathDelimiters } from '@/utils/math'
++import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
+ import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
+ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
+ import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
+@@ -41,14 +44,16 @@ interface MarkdownViewerProps {
+ 
+ const steps = [
+   { label: '解析链接', key: 'PARSING' },
+-  { label: '下载音频', key: 'DOWNLOADING' },
++  { label: '下载音视频', key: 'DOWNLOADING' },
++  { label: '抽取画面', key: 'EXTRACTING' },
+   { label: '转写文字', key: 'TRANSCRIBING' },
+   { label: '总结内容', key: 'SUMMARIZING' },
+   { label: '保存完成', key: 'SUCCESS' },
+ ]
+ 
+ const remarkPlugins = [gfm, remarkMath]
+-const rehypePlugins = [rehypeKatex, rehypeSlug]
++// rehypeFold 必须排在 rehypeSlug 之后：它要复用 slug 已经写到标题上的 id
++const rehypePlugins = [rehypeKatex, rehypeSlug, rehypeFold]
+ 
+ /**
+  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
+@@ -99,7 +104,7 @@ function createMarkdownComponents(baseURL: string) {
+         (children[0] as string).startsWith('原片 @')
+ 
+       if (isOriginLink) {
+-        const timeMatch = (children[0] as string).match(/原片 @ (\d{2}:\d{2})/)
++        const timeMatch = (children[0] as string).match(/原片 @ (\d{1,3}:\d{2})/)
+         const timeText = timeMatch ? timeMatch[1] : '原片'
+ 
+         return (
+@@ -145,6 +150,10 @@ function createMarkdownComponents(baseURL: string) {
+           }
+ 
+           if (target) {
++            // 目标可能藏在折叠起来的章节里，先把祖先全部展开，否则滚过去是一片空白
++            for (let sec = target.closest('.md-section'); sec; sec = sec.parentElement?.closest('.md-section') || null) {
++              sec.classList.remove('md-collapsed')
++            }
+             target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+           } else {
+             toast.error('未找到对应章节')
+@@ -330,6 +339,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+   const [showTranscribe, setShowTranscribe] = useState(false)
+   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
+   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
++  const [editing, setEditing] = useState(false)
++  const [draft, setDraft] = useState('')
++  const [saving, setSaving] = useState(false)
+   const svgRef = useRef<SVGSVGElement>(null)
+ 
+   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
+@@ -366,6 +378,56 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+       setSelectedContent(currentVer.content)
+     }
+   }, [currentVerId, currentTask?.id])
++  // ---- 章节折叠 ----
++  // 折叠状态用 DOM class 存（不用 React state）：一节一节展开/收起是纯视觉状态，
++  // 走事件委托改 class 既不用给每个标题挂状态，也不会和 React 的重渲染打架
++  const bodyRef = useRef<HTMLDivElement>(null)
++  const [foldAll, setFoldAll] = useState(false)
++
++  const handleFoldClick = (e: React.MouseEvent<HTMLDivElement>) => {
++    const toggle = (e.target as HTMLElement).closest('.md-fold-toggle')
++    if (!toggle) return
++    e.preventDefault()
++    toggle.closest('.md-section')?.classList.toggle('md-collapsed')
++  }
++
++  const handleToggleFoldAll = () => {
++    const root = bodyRef.current
++    if (!root) return
++    const sections = [...root.querySelectorAll('.md-section')].filter(
++      // 一级标题是笔记总标题，收起来整篇就没了
++      section => section.getAttribute('data-level') !== '1',
++    )
++    // 从 DOM 实际状态推导：目录跳转会自动展开祖先、切换版本会整棵重建，
++    // 只靠 foldAll 这个 state 记的话按钮文案会和真实状态脱节
++    const collapse = sections.some(section => !section.classList.contains('md-collapsed'))
++    sections.forEach(section => section.classList.toggle('md-collapsed', collapse))
++    setFoldAll(collapse)
++  }
++
++  // 换版本/重新渲染后 DOM 是全新展开的，按钮文案要跟着复位
++  useEffect(() => {
++    setFoldAll(false)
++  }, [selectedContent])
++
++  const handleDeleteVersion = () => {
++    if (!currentTask || !currentVerId) return
++    const versions = Array.isArray(currentTask.markdown) ? currentTask.markdown : []
++    if (versions.length <= 1) {
++      toast.error('只剩一个版本了，不能删')
++      return
++    }
++    useTaskStore.getState().removeVersion(currentTask.id, currentVerId)
++    const rest = [...((useTaskStore.getState().getCurrentTask()?.markdown as typeof versions) || [])].sort(
++      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
++    )
++    // 删的正是当前在看的版本时切到剩下的最新版，否则界面会停在已删除的内容上
++    if (!rest.some(v => v.ver_id === currentVerId)) {
++      setCurrentVerId(rest[0]?.ver_id || '')
++    }
++    toast.success('已删除该版本')
++  }
++
+   const handleCopy = async () => {
+     try {
+       await navigator.clipboard.writeText(selectedContent)
+@@ -415,14 +477,84 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+     document.body.removeChild(link)
+   }
+ 
++  const handleStartEdit = () => {
++    if (!selectedContent || selectedContent === 'loading' || selectedContent === 'empty') return
++    setDraft(selectedContent)
++    setViewMode('preview')
++    setEditing(true)
++  }
++
++  const handleSaveEdit = async () => {
++    if (!currentTask) return
++    if (!draft.trim()) {
++      toast.error('笔记内容不能为空')
++      return
++    }
++    if (draft === selectedContent) {
++      toast('内容没有变化，已退出编辑')
++      setEditing(false)
++      return
++    }
++    setSaving(true)
++    try {
++      await update_note(currentTask.id, draft)
++      // 保存为本地新版本（旧版本仍可在版本下拉中查看）
++      useTaskStore.getState().updateTaskContent(currentTask.id, { markdown: draft })
++      // 自动切换到新版本
++      const updated = useTaskStore.getState().getCurrentTask()
++      if (updated && Array.isArray(updated.markdown)) {
++        const latest = [...updated.markdown].sort(
++          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
++        )[0]
++        if (latest) setCurrentVerId(latest.ver_id)
++      }
++      setEditing(false)
++      toast.success('已保存（旧版本可在版本下拉中查看）')
++    } catch (e) {
++      // 失败提示由请求拦截器统一处理
++    } finally {
++      setSaving(false)
++    }
++  }
++
++  // 编辑模式：解析草稿里的图片引用，生成缩略图列表（便于直观识别重复图片并删除）
++  const draftImages = useMemo(() => {
++    const out: { alt: string; url: string; line: number; start: number; end: number }[] = []
++    const re = /!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g
++    let m: RegExpExecArray | null
++    while ((m = re.exec(draft)) !== null) {
++      const line = draft.slice(0, m.index).split('\n').length
++      out.push({ alt: m[1] || '', url: m[2], line, start: m.index, end: m.index + m[0].length })
++    }
++    return out
++  }, [draft])
++
++  const removeDraftImage = (start: number, end: number) => {
++    setDraft(prev => {
++      // 若该行去掉所有图片引用后为空，则整行删除；否则只删除这一处引用
++      const lineStart = prev.lastIndexOf('\n', start - 1) + 1
++      const nl = prev.indexOf('\n', end)
++      const lineEnd = nl === -1 ? prev.length : nl
++      const lineContent = prev.slice(lineStart, lineEnd)
++      const imgRe = /!\[[^\]]*\]\(\s*[^)\s]+(?:\s+"[^"]*")?\s*\)/g
++      const remainder = lineContent.replace(imgRe, '').trim()
++      if (!remainder) {
++        return prev.slice(0, lineStart) + prev.slice(Math.min(lineEnd + 1, prev.length))
++      }
++      return prev.slice(0, start) + prev.slice(end)
++    })
++  }
++
+   if (status === 'loading') {
+     return (
+       <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+         <StepBar steps={steps} currentStep={taskStatus} />
+         <Loading className="h-5 w-5" />
+         <div className="text-center text-sm">
+-          <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
+-          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
++          <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
++          <p className="mt-2 text-xs text-neutral-500">
++            长视频要抽帧并分批送给模型，可能需要几分钟；按钮已锁定，无需重复点击
++          </p>
+         </div>
+       </div>
+     )
+@@ -475,6 +607,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+         setShowChat={setShowChat}
+         viewMode={viewMode}
+         setViewMode={setViewMode}
++        foldAll={foldAll}
++        onFoldAll={handleToggleFoldAll}
++        onDeleteVersion={handleDeleteVersion}
++        canDeleteVersion={isMultiVersion && (currentTask?.markdown as unknown[])?.length > 1}
++        onEdit={handleStartEdit}
++        editing={editing}
+       />
+ 
+       {viewMode === 'map' ? (
+@@ -488,6 +626,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+             />
+           </div>
+         </div>
++      ) : editing ? (
++        <div className="flex flex-1 flex-col overflow-hidden bg-white px-3 py-2">
++          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
++            <span className="text-muted-foreground text-sm">
++              编辑 Markdown：可在下方缩略图里点 × 删除图片，或直接修改文字，保存后生成新版本
++            </span>
++            <div className="flex items-center gap-2">
++              <Button size="sm" variant="outline" onClick={() => setEditing(false)} disabled={saving}>
++                取消
++              </Button>
++              <Button size="sm" onClick={handleSaveEdit} disabled={saving}>
++                {saving ? '保存中…' : '保存'}
++              </Button>
++            </div>
++          </div>
++          {draftImages.length > 0 && (
++            <div className="mb-2 shrink-0 rounded-md border bg-neutral-50 p-2">
++              <div className="text-muted-foreground mb-1.5 text-xs">
++                共 {draftImages.length} 张图片 —— 重复的图片缩略图会完全相同，点右上角 × 删除对应那一处（序号·行号见图片角标）
++              </div>
++              <div className="flex max-h-36 flex-wrap gap-2 overflow-y-auto">
++                {draftImages.map((img, i) => (
++                  <div key={`${img.start}-${img.end}`} className="relative">
++                    <img
++                      src={img.url.startsWith('/') ? baseURL + img.url : img.url}
++                      alt={img.alt || `图${i + 1}`}
++                      title={`图 ${i + 1} · 第 ${img.line} 行\n${img.url}`}
++                      className="h-20 w-28 cursor-help rounded border object-cover"
++                    />
++                    <span className="absolute bottom-0 left-0 rounded-tr bg-black/60 px-1 text-[10px] leading-4 text-white">
++                      图{i + 1} · 行{img.line}
++                    </span>
++                    <button
++                      onClick={() => removeDraftImage(img.start, img.end)}
++                      title="删除这张图片"
++                      className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-neutral-600 text-white hover:bg-red-500"
++                    >
++                      <X className="h-3 w-3" />
++                    </button>
++                  </div>
++                ))}
++              </div>
++            </div>
++          )}
++          <textarea
++            value={draft}
++            onChange={e => setDraft(e.target.value)}
++            spellCheck={false}
++            className="min-h-0 w-full flex-1 resize-none rounded-md border p-3 font-mono text-sm leading-6 focus:outline-none"
++          />
++        </div>
+       ) : (
+         <div className="flex flex-1 overflow-hidden bg-white py-2">
+           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
+@@ -505,13 +694,13 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+                     videoUrl={currentTask?.formData?.video_url}
+                   />
+                 </div>
+-                <div className={'markdown-body w-full px-2'}>
++                <div className={'markdown-body w-full px-2'} ref={bodyRef} onClick={handleFoldClick}>
+                   <ReactMarkdown
+                     remarkPlugins={remarkPlugins}
+                     rehypePlugins={rehypePlugins}
+                     components={markdownComponents}
+                   >
+-                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
++                    {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
+                   </ReactMarkdown>
+                 </div>
+               </ScrollArea>
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
+index 21a7e8d..e5268d3 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
++++ b/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
+@@ -1,6 +1,7 @@
+ import { useEffect, useRef, useState } from 'react'
+ import { Markmap } from 'markmap-view'
+ import { transformer } from '@/lib/markmap.ts'
++import { normalizeMathDelimiters } from '@/utils/math'
+ import { Toolbar } from 'markmap-toolbar'
+ import 'markmap-toolbar/dist/style.css'
+ import JSZip from 'jszip'
+@@ -93,7 +94,7 @@ function stripMindmapImages(markdown: string) {
+ }
+ 
+ function transformMindmap(markdown: string) {
+-  return transformer.transform(stripMindmapImages(markdown))
++  return transformer.transform(normalizeMathDelimiters(stripMindmapImages(markdown)))
+ }
+ 
+ function createExportSvg(svgEl: SVGSVGElement) {
+diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx b/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
+index 8a04b7c..4a9f44c 100644
+--- a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
++++ b/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
+@@ -36,7 +36,7 @@ import {
+ } from '@/components/ui/select.tsx'
+ import { Input } from '@/components/ui/input.tsx'
+ import { Textarea } from '@/components/ui/textarea.tsx'
+-import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
++import { noteStyles, noteFormats, videoPlatforms, isTaskRunning, taskStatusLabels } from '@/constant/note.ts'
+ import { fetchModels } from '@/services/model.ts'
+ import { useNavigate } from 'react-router-dom'
+ import toast from 'react-hot-toast'
+@@ -199,8 +199,11 @@ const NoteForm = () => {
+   ])
+ 
+   /* ---- 帮助函数 ---- */
+-  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
+-  const generating = isGenerating()
++  const taskStatus = getCurrentTask()?.status
++  const generating = isTaskRunning(taskStatus)
++  // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
++  const [submitting, setSubmitting] = useState(false)
++  const busy = generating || submitting
+   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
+     const formData = new FormData()
+     formData.append('file', file)
+@@ -221,21 +224,25 @@ const NoteForm = () => {
+   }
+ 
+   const onSubmit = async (values: NoteFormValues) => {
+-    console.log('Not even go here')
+-    const payload: NoteFormValues = {
+-      ...values,
+-      video_url:
+-        values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
+-      provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+-      task_id: currentTaskId || '',
+-    }
+-    if (currentTaskId) {
+-      retryTask(currentTaskId, payload)
++    if (busy) {
++      toast(`正在${taskStatusLabels[taskStatus ?? ''] || '生成'}，请勿重复点击`, { icon: '⏳' })
+       return
+     }
+-
+-    // message.success('已提交任务')
++    setSubmitting(true)
+     try {
++      const payload: NoteFormValues = {
++        ...values,
++        video_url:
++          values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
++        provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
++        task_id: currentTaskId || '',
++      }
++      if (currentTaskId) {
++        // 必须 await：retryTask 内部会先把状态置成 PENDING，锁才接得上
++        await retryTask(currentTaskId, payload)
++        return
++      }
++
+       const data = await generateNote(payload)
+       addPendingTask(data.task_id, values.platform, payload)
+     } catch (e: any) {
+@@ -253,6 +260,8 @@ const NoteForm = () => {
+       }
+       // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
+       console.error('提交任务失败：', e)
++    } finally {
++      setSubmitting(false)
+     }
+   }
+   const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
+@@ -265,16 +274,20 @@ const NoteForm = () => {
+     setCurrentTask(null)
+   }
+   const FormButton = () => {
+-    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
++    const label = busy
++      ? `正在${taskStatusLabels[taskStatus ?? ''] || '生成'}…`
++      : editing
++        ? '重新生成'
++        : '生成笔记'
+ 
+     return (
+       <div className="flex gap-2">
+         <Button
+           type="submit"
+           className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
+-          disabled={generating}
++          disabled={busy}
+         >
+-          {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
++          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+           {label}
+         </Button>
+ 
+diff --git a/BillNote_frontend/src/services/chat.ts b/BillNote_frontend/src/services/chat.ts
+index 32f541f..3ef58d0 100644
+--- a/BillNote_frontend/src/services/chat.ts
++++ b/BillNote_frontend/src/services/chat.ts
+@@ -35,10 +35,12 @@ export const askQuestion = async (data: {
+   history: ChatMessage[]
+   provider_id: string
+   model_name: string
++  /** 可选：data:image/...;base64,... 形式的多模态图片（最多 4 张） */
++  images?: string[]
+ }): Promise<AskResponse> => {
+-  return await request.post('/chat/ask', data, { timeout: 60000 })
++  return await request.post('/chat/ask', data, { timeout: 180000 })
+ }
+ 
+ export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {
+   return await request.get(`/chat/status?task_id=${taskId}`)
+-}
++}
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/services/note.ts b/BillNote_frontend/src/services/note.ts
+index 722bd92..fd72928 100644
+--- a/BillNote_frontend/src/services/note.ts
++++ b/BillNote_frontend/src/services/note.ts
+@@ -70,6 +70,11 @@ export const get_task_status = async (task_id: string) => {
+     // 错误提示
+     toast.error('笔记生成失败，请稍后重试')
+ 
+-    throw e // 抛出错误以便调用方处理
++    throw e
+   }
+ }
++
++/** 保存手动编辑后的笔记（同步更新后端文件与 AI 问答索引） */
++export const update_note = async (task_id: string, markdown: string) => {
++  return await request.post('/update_note', { task_id, markdown })
++}
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/store/chatStore/index.ts b/BillNote_frontend/src/store/chatStore/index.ts
+index 51baa57..12a03bb 100644
+--- a/BillNote_frontend/src/store/chatStore/index.ts
++++ b/BillNote_frontend/src/store/chatStore/index.ts
+@@ -6,6 +6,8 @@ export interface ChatMessage {
+   role: 'user' | 'assistant'
+   content: string
+   sources?: ChatSource[]
++  /** 用户粘贴的图片（data:image/...;base64,...），仅用于界面展示 */
++  images?: string[]
+ }
+ 
+ interface ChatState {
+@@ -38,6 +40,15 @@ export const useChatStore = create<ChatState>()(
+     }),
+     {
+       name: 'bilinote-chat-storage',
++      // 图片 base64 体积大，不写入 localStorage（避免超出配额），仅保留文字
++      partialize: state => ({
++        chatHistory: Object.fromEntries(
++          Object.entries(state.chatHistory).map(([k, msgs]) => [
++            k,
++            msgs.map(m => (m.images ? { ...m, images: undefined } : m)),
++          ]),
++        ),
++      }),
+     },
+   ),
+-)
++)
+\ No newline at end of file
+diff --git a/BillNote_frontend/src/store/taskStore/index.ts b/BillNote_frontend/src/store/taskStore/index.ts
+index f511f78..8811874 100644
+--- a/BillNote_frontend/src/store/taskStore/index.ts
++++ b/BillNote_frontend/src/store/taskStore/index.ts
+@@ -4,6 +4,7 @@ import { delete_task, generateNote } from '@/services/note.ts'
+ import { v4 as uuidv4 } from 'uuid'
+ import toast from 'react-hot-toast'
+ import { get, set, del } from 'idb-keyval'
++import { isTaskRunning, taskStatusLabels } from '@/constant/note'
+ 
+ 
+ export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
+@@ -62,10 +63,11 @@ interface TaskStore {
+   addPendingTask: (taskId: string, platform: string) => void
+   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
+   removeTask: (id: string) => void
++  removeVersion: (taskId: string, verId: string) => void
+   clearTasks: () => void
+   setCurrentTask: (taskId: string | null) => void
+   getCurrentTask: () => Task | null
+-  retryTask: (id: string) => void
++  retryTask: (id: string, payload?: any) => Promise<boolean>
+ }
+ 
+ export const useTaskStore = create<TaskStore>()(
+@@ -116,6 +118,12 @@ export const useTaskStore = create<TaskStore>()(
+               // 如果是 markdown 字符串，封装为版本
+               if (typeof data.markdown === 'string') {
+                 const prev = task.markdown
++                // 内容一模一样就不新增版本：重复点保存、或轮询重复收到同一份结果时，
++                // 版本下拉里会堆出好几个相同的版本，切来切去看着像没反应
++                const latestContent = Array.isArray(prev) ? prev[0]?.content : prev
++                if (typeof latestContent === 'string' && latestContent === data.markdown) {
++                  return { ...task, ...data, markdown: prev }
++                }
+                 const newVersion: Markdown = {
+                   ver_id: `${task.id}-${uuidv4()}`,
+                   content: data.markdown,
+@@ -159,50 +167,65 @@ export const useTaskStore = create<TaskStore>()(
+         return get().tasks.find(task => task.id === currentTaskId) || null
+       },
+       retryTask: async (id: string, payload?: any) => {
+-
+-        if (!id){
++        if (!id) {
+           toast.error('任务不存在')
+-          return
++          return false
+         }
+         const task = get().tasks.find(task => task.id === id)
+-        console.log('retry',task)
+-        if (!task) return
++        if (!task) return false
++
++        // 生成中的任务直接拦掉：连点会让后端并发跑同一个 task_id，白烧一遍额度
++        if (isTaskRunning(task.status)) {
++          toast(`正在${taskStatusLabels[task.status] || '生成'}，请勿重复点击`, { icon: '⏳' })
++          return false
++        }
+ 
+         const newFormData = payload || task.formData
++        const previousStatus = task.status
++        // 先同步置为 PENDING，让按钮立刻进入禁用态，堵住网络往返这段空窗
++        set(state => ({
++          tasks: state.tasks.map(t =>
++            t.id === id ? { ...t, formData: newFormData, status: 'PENDING' } : t
++          ),
++        }))
++
+         try {
+           await generateNote({
+             ...newFormData,
+             task_id: id,
+           })
++          return true
+         } catch (e: any) {
+-          // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
+-          // 给提示让用户先去下载。
++          // 提交失败要把状态还回去，否则按钮会一直转圈
++          set(state => ({
++            tasks: state.tasks.map(t => (t.id === id ? { ...t, status: previousStatus } : t)),
++          }))
++          // 就绪门禁：转写模型未下载好，给提示让用户先去下载
+           if (e?.data?.reason === 'transcriber_model_not_ready') {
+             toast.error(
+               e?.data?.downloading
+                 ? '转写模型正在下载中，请稍候再重试'
+                 : '转写模型尚未下载，请先去「设置 → 音频转写配置」页下载',
+             )
+-            return
++            return false
+           }
+           console.error('重试任务失败：', e)
+-          return
++          return false
+         }
+-
+-        set(state => ({
+-          tasks: state.tasks.map(t =>
+-              t.id === id
+-                  ? {
+-                    ...t,
+-                    formData: newFormData, // ✅ 显式更新 formData
+-                    status: 'PENDING',
+-                  }
+-                  : t
+-          ),
+-        }))
+       },
+ 
+ 
++      removeVersion: (taskId, verId) =>
++        set(state => ({
++          tasks: state.tasks.map(task => {
++            if (task.id !== taskId || !Array.isArray(task.markdown)) return task
++            const rest = task.markdown.filter(v => v.ver_id !== verId)
++            // 至少留一个版本：删空了就没有内容可显示，按钮那边也会先拦住
++            if (!rest.length) return task
++            return { ...task, markdown: rest }
++          }),
++        })),
++
+       removeTask: async id => {
+         const task = get().tasks.find(t => t.id === id)
+ 
+diff --git a/BillNote_frontend/src/utils/math.ts b/BillNote_frontend/src/utils/math.ts
+new file mode 100644
+index 0000000..b4fd56a
+--- /dev/null
++++ b/BillNote_frontend/src/utils/math.ts
+@@ -0,0 +1,14 @@
++/**
++ * 把 \[...\] / \(...\) 形式的公式归一化为 $ / $$ 分隔符。
++ * remark-math（笔记/问答）和 markmap（思维导图）都只识别 $ 分隔符；
++ * 笔记模型输出的 \[...\] 会被当成普通文本显示成原始 LaTeX。
++ *
++ * 块级公式额外用换行包裹并 trim：保证 $$ 永远处于行首（remark-math 的
++ * 块级公式要求行首标记），即使原文里 \[ 跟在文字后面也不会解析失败。
++ */
++export function normalizeMathDelimiters(markdown: string): string {
++  if (!markdown) return markdown
++  return markdown
++    .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
++    .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
++}
+\ No newline at end of file
+diff --git a/Dockerfile.gpu-base b/Dockerfile.gpu-base
+new file mode 100644
+index 0000000..6b3e4dc
+--- /dev/null
++++ b/Dockerfile.gpu-base
+@@ -0,0 +1,16 @@
++FROM ghcr.io/jefferyhcool/bilinote:latest
++
++# CUDA-enabled torch from Tsinghua mirror (also pulls nvidia-cublas/cudnn/cudart wheels that ctranslate2 needs)
++RUN /usr/local/bin/pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple torch
++
++# faster-whisper 底层的 CTranslate2 是按 CUDA 12 编的，只认 libcublas.so.12 / libcudart.so.12。
++# 上面那个 torch 现在拉的是 CUDA 13 轮子（装在 nvidia/cu13/lib/libcublas.so.13），
++# 本地转写会报 "Library libcublas.so.12 is not found or cannot be loaded"，所以单独补一份 CUDA 12 运行库。
++# 这两个轮子正好装进下面 LD_LIBRARY_PATH 已经写好的 nvidia/cublas/lib 与 nvidia/cuda_runtime/lib。
++RUN /usr/local/bin/pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
++    nvidia-cublas-cu12 nvidia-cuda-runtime-cu12
++
++# Make NVIDIA pip wheels' shared libraries discoverable at runtime
++RUN for d in /usr/local/lib/python3.11/site-packages/nvidia/*/lib; do echo "$d"; done > /etc/ld.so.conf.d/nvidia-pip.conf && ldconfig || true
++
++ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/cufft/lib
+\ No newline at end of file
+diff --git a/Dockerfile.patch b/Dockerfile.patch
+new file mode 100644
+index 0000000..a86c25c
+--- /dev/null
++++ b/Dockerfile.patch
+@@ -0,0 +1,40 @@
++# 构建前端（与官方 Dockerfile.complete 一致的 node:20 + pnpm 9.15 环境，走国内镜像）
++FROM docker.m.daocloud.io/library/node:20-alpine AS ui
++ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
++RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
++WORKDIR /app
++COPY BillNote_frontend/package.json BillNote_frontend/pnpm-lock.yaml ./
++RUN pnpm install --frozen-lockfile
++COPY BillNote_frontend/ ./
++ENV DOCKER_BUILD=1
++RUN pnpm run build
++
++# 在 GPU 基础镜像上叠加：新前端构建产物 + 修补后的后端
++# （chat 贴图问答 / 公式渲染 / 笔记编辑保存 / Whisper 下载 / 截图相似去重 / 目录锚点与长视频时间戳修复）
++# 基础镜像 bilinote-gpu-base:local 由本仓库的 Dockerfile.gpu-base 构建（上游镜像 + CUDA torch + CUDA12 运行库）；
++# 两者必须是不同的 tag：以前 patch 直接 FROM bilinote-gpu:local 又打回同一个 tag，每次构建都往上叠一层，
++# 叠到第 5 次就撞上 Docker 的 127 层上限（docker run 报 "max depth exceeded"）。
++FROM bilinote-gpu-base:local
++# 禁用 HF 的 xet 传输协议（国内镜像/代理链路下经典 HTTP 下载更稳）
++ENV HF_HUB_DISABLE_XET=1
++# hub 0.30 实际只看 hf_xet 包是否存在（不读环境变量），必须卸载才能真正禁用
++RUN /usr/local/bin/pip uninstall -y hf-xet || true
++RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
++COPY --from=ui /app/dist/ /usr/share/nginx/html/
++COPY backend/app/routers/chat.py /app/backend/app/routers/chat.py
++COPY backend/app/services/chat_service.py /app/backend/app/services/chat_service.py
++COPY backend/app/routers/note.py /app/backend/app/routers/note.py
++COPY backend/app/routers/config.py /app/backend/app/routers/config.py
++COPY backend/app/utils/image_dedup.py /app/backend/app/utils/image_dedup.py
++COPY backend/app/utils/video_reader.py /app/backend/app/utils/video_reader.py
++COPY backend/app/utils/screenshot_marker.py /app/backend/app/utils/screenshot_marker.py
++COPY backend/app/utils/note_helper.py /app/backend/app/utils/note_helper.py
++COPY backend/app/utils/markdown_toc.py /app/backend/app/utils/markdown_toc.py
++COPY backend/app/services/note.py /app/backend/app/services/note.py
++COPY backend/app/gpt/prompt_builder.py /app/backend/app/gpt/prompt_builder.py
++COPY backend/app/gpt/prompt.py /app/backend/app/gpt/prompt.py
++COPY backend/app/enmus/task_status_enums.py /app/backend/app/enmus/task_status_enums.py
++COPY backend/app/transcriber/whisper.py /app/backend/app/transcriber/whisper.py
++COPY backend/app/transcriber/transcriber_provider.py /app/backend/app/transcriber/transcriber_provider.py
++# 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
++COPY backend/tests/ /app/backend/tests/
+\ No newline at end of file
+diff --git a/backend/app/enmus/task_status_enums.py b/backend/app/enmus/task_status_enums.py
+index f83daa1..b945467 100644
+--- a/backend/app/enmus/task_status_enums.py
++++ b/backend/app/enmus/task_status_enums.py
+@@ -5,6 +5,7 @@ class TaskStatus(str, enum.Enum):
+     PENDING = "PENDING"
+     PARSING = "PARSING"
+     DOWNLOADING = "DOWNLOADING"
++    EXTRACTING = "EXTRACTING"
+     TRANSCRIBING = "TRANSCRIBING"
+     SUMMARIZING = "SUMMARIZING"
+     FORMATTING = "FORMATTING"
+@@ -18,6 +19,7 @@ class TaskStatus(str, enum.Enum):
+             cls.PENDING: "排队中",
+             cls.PARSING: "解析链接",
+             cls.DOWNLOADING: "下载中",
++            cls.EXTRACTING: "抽取画面",
+             cls.TRANSCRIBING: "转录中",
+             cls.SUMMARIZING: "总结中",
+             cls.FORMATTING: "格式化中",
+diff --git a/backend/app/gpt/prompt.py b/backend/app/gpt/prompt.py
+index f09d25d..9321c64 100644
+--- a/backend/app/gpt/prompt.py
++++ b/backend/app/gpt/prompt.py
+@@ -72,6 +72,8 @@ MERGE_PROMPT = '''
+ 你将收到多个来自同一视频的 Markdown 笔记片段，请合并成一份完整笔记：
+ - 只做合并与去重，不要发明新内容
+ - 保持原有标题层级与 Markdown 结构
++- **保持每个片段原有的写作风格和区块结构**：像「考点定位 / 核心方法与公式 / 解题步骤 / 例题精讲 / 易错点 / 自测清单」这类小节要原样保留，不要把正文压缩改写成一段话，也不要替换老师的原话与公式
++- **例题的 `*Screenshot-[mm:ss]` 标记必须仍然紧跟在它所属例题的题干与解析之间**，不要挪到章节末尾，也不要把多张截图合并堆放在一起
+ - 保留所有 *Content-[mm:ss] 与 *Screenshot-[mm:ss] 标记
+ - 保持中文输出，专有名词保留英文
+ - 不要使用代码块包裹输出
+diff --git a/backend/app/gpt/prompt_builder.py b/backend/app/gpt/prompt_builder.py
+index 7860630..5bd2bb3 100644
+--- a/backend/app/gpt/prompt_builder.py
++++ b/backend/app/gpt/prompt_builder.py
+@@ -12,6 +12,9 @@ note_styles = [
+     {'label': '详细', 'value': 'detailed'},
+     {'label': '学术', 'value': 'academic'},
+     {"label": '教程',"value": 'tutorial', },
++    {'label': '行测课程', 'value': 'xingce_course'},
++    {'label': '申论课程', 'value': 'shenlun_course'},
++    {'label': '行测速查卡', 'value': 'xingce_cheatsheet'},
+     {'label': '小红书', 'value': 'xiaohongshu'},
+     {'label': '生活向', 'value': 'life_journal'},
+     {'label': '任务导向', 'value': 'task_oriented'},
+@@ -54,6 +57,67 @@ def get_format_function(format_type):
+     return format_map.get(format_type, lambda: '')()
+ 
+ 
++# ---- 课程类风格（行测/申论）共用的规则片段 ----
++
++# 硬性要求，放在风格提示词最前面：轻量模型对靠前的指令遵循度更高，
++# 而且上一版把"截图要有节制"写在后面，模型理解成"整体都要精简"，直接把例题全删了
++_COURSE_MUST_RULES = '''
++硬性要求（优先级最高，与后面的模板冲突时以这里为准）：
++1. **正文不许省略**：老师讲过的每一道题都要写全（完整题干 + 分步解析 + 答案）。有上限的只是截图数量，正文没有上限；**绝不许为了少插图而删掉例题、也不要压缩解析**
++2. **例题小节顺序固定**：`### 标题` → 截图 → 题干 → 分步解析 → 答案（截图紧跟标题，方便先看图再读题）
++3. **只有真题才算例题**：老师当题目讲的（说了年份/地区/出处，或明说"这道题""我们做一题"）才写成 `### 例题N`；老师为讲方法临时编的演示（"比如小张…""假设…"）属于方法讲解，写在对应解法下面、标题用 `### 方法演示｜xxx`，不编号成例题，也不许给它编造年份出处
++4. **方法与它的例题必须挨在一起**，绝不允许写成"方法集中一章、例题集中一章"
++'''
++
++# 主轴自适应：不写死"题型"，让模型先看老师这节课是怎么组织的
++_COURSE_AXIS_RULE = '''
++主轴怎么选（先看老师这节课是怎么组织的，再决定每个 `##` 是什么）：
++- 老师按题型讲（如「基期倍比」「归纳概括」）→ 每个题型一个 `##`
++- 老师按小专题/方法族讲（一节课串起多个相关考点）→ 每个小专题一个 `##`
++- 老师拿一套真题或一则材料串讲 → 每道题、每则材料一个 `##`
++- 老师只讲一个题型的若干变体 → 每个变体一个 `##`
++
++不论主轴是什么，**每个 `##` 内部的顺序固定**：识别信号 → 核心公式/方法（配板书截图）→ 解法A/B/C（各写适用条件与步骤）→ 紧跟这个解法自己的例题 → 本类易错点。
++'''
++
++# 行测例题小节模板
++_XINGCE_EXAMPLE_RULE = '''
++例题小节的写法（每道真题一个 `###`，顺序不许变）：
++- 标题：`### 例题N｜出处或题型（mm:ss）`。出处只写老师明确说过的（如「2024年国考」），没说就只写题型，**不要编造年份**
++- 标题下面单独一行写 `*Screenshot-[mm:ss]`，时间取老师展示这道题的时刻
++- **题干**：完整抄录，包括材料数据、问题和 A/B/C/D 四个选项原文，不省略、不改写
++- **分步解析**：按所属解法的步骤逐步展开，每一步给算式（LaTeX）和老师口述的理由
++- **答案**：正确选项 + 判定依据　**用时建议**：老师说的秒数，没提到就写「未提及」
++- 老师讲过的题一道都不要漏；同一道题讲了两遍只记一次
++
++老师为讲方法临时编的演示案例，写在所属解法下面：
++- 标题：`### 方法演示｜xxx（mm:ss）`，同样先插图、再写案例内容和推导过程，**不编号成例题**
++'''
++
++# 申论真题小节模板
++_SHENLUN_EXAMPLE_RULE = '''
++真题小节的写法（每道真题一个 `###`，顺序不许变）：
++- 标题：`### 例题N｜出处或题型（mm:ss）`。出处只写老师明确说过的，没说就只写题型，**不要编造年份**
++- 标题下面单独一行写 `*Screenshot-[mm:ss]`，时间取老师展示题目或材料的时刻
++- **题干**：完整抄录题目要求（作答任务、身份、范围、字数）和老师给出的材料段落要点
++- **分步解析**：审题 → 回材料找点（标明第几段、哪句话）→ 加工合并同类项 → 组织成答案
++- **参考答案**：老师给的答案原文，并标出采分点
++- **字数与失分点**：老师指出的常见扣分原因
++
++老师为讲方法临时编的演示（假想材料、示范段落），写在所属思路下面，标题用 `### 方法演示｜xxx（mm:ss）`，**不编号成例题**
++'''
++
++# 课程类风格共用附加规则（截图密度、多解法、标记使用条件、禁止编造）
++_COURSE_RULES = '''
++本风格附加规则：
++- **截图**：讲解处（公式推导、思路图、答题框架的板书）和例题处都要配图，但每道例题最多 2 张、每个方法或公式最多 1 张，挑信息量最大的那一帧；**两张图之间必须有解释文字，禁止连续插图**；整篇 30 张上下。**截图有上限不代表正文可以缩短**
++- 同一考点有多个解法时全部并列写出，每个解法标明「适用条件 + 速度」，并给一张 `解法 | 适用条件 | 速度 | 老师是否推荐` 的小表说明考场首选哪个；**只有老师明确说过推荐才写推荐**，不许自己猜
++- 只有本次任务要求「原片截图」时才写 `*Screenshot-[mm:ss]`；只有要求「原片跳转」时才在 `##` 标题后写 `*Content-[mm:ss]`。没要求就不要写，否则笔记里会留下无法解析的原始文本
++- 时间戳的分钟位可以超过 59（例如 `102:47`）；只能使用截图网格左上角真实存在的时间
++- 老师没讲的内容一律写「本节未涉及」，**不要编造题目、数据、公式、答案、年份**
++'''
++
++
+ # 风格描述的处理
+ def get_style_format(style):
+     style_map = {
+@@ -82,7 +146,93 @@ def get_style_format(style):
+         'task_oriented': '6. **任务导向**: 强调任务、目标，适合工作和待办事项。',
+         'business': '7. **商业风格**: 适合商业报告、会议纪要，正式且精准。',
+         'meeting_minutes': '8. **会议纪要**: 适合商业报告、会议纪要，正式且精准。',
+-        "tutorial":"9.**教程笔记**:尽可能详细的记录教程,特别是关键点和一些重要的结论步骤"
++        "tutorial":"9.**教程笔记**:尽可能详细的记录教程,特别是关键点和一些重要的结论步骤",
++        'xingce_course': r'''**行测课程（本次笔记风格）**: 这是公务员考试《行政职业能力测验》的培训课，笔记要能直接当复习资料用。**以题型为主线**组织：每个题型下面紧跟着它的公式、解法和例题，看完一个题型就能直接做题。
++''' + _COURSE_MUST_RULES + r'''
++## 一、本节导读
++- 所属模块（常识判断 / 言语理解与表达 / 数量关系 / 判断推理 / 资料分析）
++- 本节覆盖哪几个题型、考频与难度、老师建议的时间分配
++''' + _COURSE_AXIS_RULE + r'''
++接下来每个题型一个 `##`，标题形如 `## 题型一：基期倍比`，内部按这个骨架写：
++- **识别信号**：题干里出现哪些词或数据特征，说明该用这个方法
++- 插图：老师推导公式或画思路的那一帧板书
++- **核心公式**：用 LaTeX（行内 \(...\)、独立公式 \[...\]），说明每个符号的含义与适用前提
++- **解法A｜名字**（适用条件、速度）→ 分步写清操作
++- 紧跟解法A 自己的例题
++- **解法B｜名字**（适用条件、速度）→ 紧跟解法B 自己的例题
++- **解法怎么选**：小表 + 一句话说明考场首选
++- **本题型易错点**：错误选项的典型特征、常见坑、避坑口诀
++''' + _XINGCE_EXAMPLE_RULE + r'''
++所有题型讲完后，依次输出下面几节：
++
++## 通用速算技巧（跨题型）
++- 只放确实跨题型通用的：截位直除、特征数字、化除为乘、选项排除等，写清适用条件
++
++## 全节速查表
++| 题型 | 识别信号 | 核心公式 | 考场首选解法 | 易错点 | 建议用时 |
++|---|---|---|---|---|---|
++
++## 本节自测清单
++- 3-5 条一句话考点卡（要能直接背）+ 必须记住的公式清单
++''' + _COURSE_RULES,
++        'shenlun_course': r'''**申论课程（本次笔记风格）**: 这是公务员考试《申论》的培训课，笔记要能直接当答题模板和素材库用。**以题型为主线**组织：每个题型下面紧跟着它的审题方法、答题框架、规范表述和真题。
++''' + _COURSE_MUST_RULES + r'''
++## 一、本节导读
++- 本节覆盖哪些题型（归纳概括 / 综合分析 / 提出对策 / 贯彻执行·公文 / 大作文）
++- 各题型的分值、字数要求、建议作答时长
++''' + _COURSE_AXIS_RULE + r'''
++接下来每个题型一个 `##`，标题形如 `## 题型一：归纳概括`，内部按这个骨架写：
++- **审题要点**：题干怎么拆（作答对象、作答范围、身份、问数、特殊要求）
++- 插图：老师讲审题或画答题框架的那一帧板书
++- **材料找点方法**：信号词（高频词、关联词、政策表述、领导讲话、案例、数据）与标注习惯
++- **答题框架**：标准结构（总括句 + 分条要点 / 是什么-为什么-怎么办 / 公文格式要素）、建议分条数量与字数分配
++- **规范表述对照**：材料原句（口语、具体）→ 规范表述（书面、概括），逐条列出，标出高频采分词
++- **思路A｜名字**（适用的材料特征）→ 紧跟它自己的真题
++- **思路B｜名字**（若有第二种作答思路）→ 紧跟它自己的真题
++- **思路怎么选**：小表 `思路 | 适用材料特征 | 风险 | 老师是否推荐`
++- **本题型易错点**：照抄材料不加工、要点交叉重复、漏答问数、超字数、公文格式缺失
++''' + _SHENLUN_EXAMPLE_RULE + r'''
++所有题型讲完后，依次输出下面几节：
++
++## 大作文素材（本节讲到才写）
++- 立意与分论点结构、可用的名言/案例/政策表述素材、开头与结尾写法
++
++## 全节速查表
++| 题型 | 审题关键 | 答题框架 | 字数 | 高频采分词 | 易错点 |
++|---|---|---|---|---|---|
++
++## 本节自测清单
++- 3-5 条一句话考点卡 + 需要背下来的规范表述或模板
++''' + _COURSE_RULES,
++        'xingce_cheatsheet': r'''**行测速查卡（本次笔记风格）**: 输出考前 5 分钟能扫完的速查卡，**不要写例题正文、不要复述讲课过程**，全部用表格和一句话短句。
++
++## 一、题型速查表
++| 题型 | 识别信号 | 核心公式 | 考场首选解法 | 建议用时 |
++|---|---|---|---|---|
++（公式列用行内 LaTeX `\(...\)`；本节没讲的题型不要列进去）
++
++## 二、解法选择
++| 题干出现什么特征 | 用哪个解法 | 一句话步骤 |
++|---|---|---|
++
++## 三、公式卡
++- 必须背的公式逐条列出（LaTeX）+ 每个符号含义 + 适用前提
++
++## 四、易错点清单
++- 按题型分组，每条一行：`坑 → 正确做法`
++
++## 五、秒杀技巧
++- 口诀 + 适用条件 + 风险提示，每条一行
++
++## 六、自测卡
++- 5 条一句话考点卡，正面一句话，要能直接背
++
++本风格附加规则：
++- 不写例题、不写长段落；任何超过两行的内容都改成表格或短句
++- 只有老师明确讲过的才写，**不要编造公式、口诀、年份或"老师推荐"**；本节没讲的区块写「本节未涉及」
++- 速查卡一般不插图；只有老师给过总览性的公式表或思维导图时才插一张，并且必须放在对应表格的上方
++- 只有本次任务要求「原片截图」时才写 `*Screenshot-[mm:ss]`；只有要求「原片跳转」时才在 `##` 标题后写 `*Content-[mm:ss]`
++- 时间戳的分钟位可以超过 59（例如 `102:47`）；只能使用截图网格左上角真实存在的时间''',
+     }
+     return style_map.get(style, '')
+ 
+diff --git a/backend/app/gpt/universal_gpt.py b/backend/app/gpt/universal_gpt.py
+index 514bf4a..e0d82c4 100644
+--- a/backend/app/gpt/universal_gpt.py
++++ b/backend/app/gpt/universal_gpt.py
+@@ -100,10 +100,21 @@ class UniversalGPT(GPT):
+         return self.checkpoint_dir / f"{safe_key}.gpt.checkpoint.json"
+ 
+     def _build_source_signature(self, source: GPTSource) -> str:
++        # 提示词正文也要进签名：否则改了 prompt.py / prompt_builder.py 之后，
++        # 上一次失败留下的 checkpoint 会被静默复用，新提示词根本不生效
++        prompt_text = generate_base_prompt(
++            title=source.title,
++            segment_text="",
++            tags=source.tags,
++            _format=source._format,
++            style=source.style,
++            extras=source.extras,
++        ) + MERGE_PROMPT
+         payload = {
+             "model": self.model,
+             "temperature": self.temperature,
+             "max_request_bytes": self.max_request_bytes,
++            "prompt_fingerprint": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+             "title": source.title,
+             "tags": source.tags,
+             "format": source._format,
+diff --git a/backend/app/routers/chat.py b/backend/app/routers/chat.py
+index a5633c9..e358fdb 100644
+--- a/backend/app/routers/chat.py
++++ b/backend/app/routers/chat.py
+@@ -29,6 +29,7 @@ class AskRequest(BaseModel):
+     history: list[ChatMessage] = []
+     provider_id: str
+     model_name: str
++    images: list[str] = []  # data:image/...;base64,...（最多取前 4 张）
+ 
+ 
+ def _do_index(task_id: str):
+@@ -92,6 +93,7 @@ def ask_question(data: AskRequest):
+             history=history,
+             provider_id=data.provider_id,
+             model_name=data.model_name,
++            images=data.images,
+         )
+         return R.success(data=result)
+     except ValueError as e:
+diff --git a/backend/app/routers/config.py b/backend/app/routers/config.py
+index 1e08c22..16deb4b 100644
+--- a/backend/app/routers/config.py
++++ b/backend/app/routers/config.py
+@@ -312,9 +312,13 @@ def _do_download_whisper(model_size: str):
+         logger.info(f"开始下载 whisper 模型: {model_size} ← {target}")
+         # 跟 faster-whisper utils.py 用同样的 allow_patterns，避免多下无关文件；
+         # 不传 local_dir 让它走 HF 默认 cache 布局（与加载逻辑对齐）
++        # 有代理时显式走官方端点：hf-mirror 对部分文件仅做 308 跳转且不带
++        # X-Repo-Commit 头，新版 huggingface_hub 会判定 "Distant resource does not
++        # seem to be on huggingface.co" 而拒绝；官方端点响应头完整（配合代理可用）。
+         snapshot_download(
+             target,
+             cache_dir=model_dir,
++            endpoint="https://huggingface.co" if proxy else None,
+             allow_patterns=[
+                 "config.json",
+                 "preprocessor_config.json",
+diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
+index f433e46..4d22fca 100644
+--- a/backend/app/routers/note.py
++++ b/backend/app/routers/note.py
+@@ -1,6 +1,7 @@
+ # app/routers/note.py
+ import json
+ import os
++import threading
+ import uuid
+ from pathlib import Path
+ from typing import Optional
+@@ -121,6 +122,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
+ 
+ 
++# 同一个 task_id 在跑时忽略重复提交：抽帧加生成要几分钟，界面上看着像卡住，用户很容易再点一次「重试」；
++# 而任务执行器其实是并发线程池（ConcurrentTaskExecutor），两次同时跑会互相删掉对方的中间帧文件
++_running_tasks: set[str] = set()
++_running_tasks_lock = threading.Lock()
++
++
+ def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
+                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
+                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
+@@ -130,6 +137,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+     if not model_name or not provider_id:
+         raise HTTPException(status_code=400, detail="请选择模型和提供者")
+ 
++    with _running_tasks_lock:
++        if task_id in _running_tasks:
++            logger.warning(f"任务 {task_id} 正在执行中，忽略重复提交")
++            return
++        _running_tasks.add(task_id)
++
++    try:
++        _run_note_task_inner(task_id, video_url, platform, quality, link, screenshot, model_name, provider_id,
++                             _format, style, extras, video_understanding, video_interval, grid_size)
++    finally:
++        with _running_tasks_lock:
++            _running_tasks.discard(task_id)
++
++
++def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
++                         link: bool, screenshot: bool, model_name: str, provider_id: str,
++                         _format: list, style: str, extras: str, video_understanding: bool,
++                         video_interval, grid_size):
++
+     def _execute_note_task():
+         return NoteGenerator().generate(
+             video_url=video_url,
+@@ -174,6 +200,47 @@ def delete_task(data: RecordRequest):
+         return R.error(msg=e)
+ 
+ 
++class UpdateNoteRequest(BaseModel):
++    task_id: str
++    markdown: str
++
++
++def _reindex_note(task_id: str):
++    try:
++        from app.services.vector_store import VectorStoreManager
++        VectorStoreManager().index_task(task_id)
++        logger.info(f"编辑后重新索引完成: {task_id}")
++    except Exception as e:
++        logger.warning(f"编辑后重新索引失败（不影响笔记）: {e}")
++
++
++@router.post('/update_note')
++def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
++    """保存用户手动编辑后的笔记内容（同步更新索引，供 AI 问答使用）。"""
++    if not data.markdown.strip():
++        return R.error(msg='笔记内容不能为空')
++    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
++    if not os.path.exists(note_path):
++        return R.error(msg='笔记文件不存在，无法保存')
++    try:
++        with open(note_path, 'r', encoding='utf-8') as f:
++            note_data = json.load(f)
++        note_data['markdown'] = data.markdown
++        with open(note_path, 'w', encoding='utf-8') as f:
++            json.dump(note_data, f, ensure_ascii=False, indent=2)
++
++        md_cache = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
++        with open(md_cache, 'w', encoding='utf-8') as f:
++            f.write(data.markdown)
++
++        background_tasks.add_task(_reindex_note, data.task_id)
++        logger.info(f"笔记已手动编辑保存: {data.task_id}")
++        return R.success(msg='保存成功')
++    except Exception as e:
++        logger.error(f"保存笔记失败: {e}")
++        return R.error(msg=f'保存失败: {e}')
++
++
+ @router.post("/upload")
+ async def upload(file: UploadFile = File(...)):
+     os.makedirs(UPLOAD_DIR, exist_ok=True)
+diff --git a/backend/app/services/chat_service.py b/backend/app/services/chat_service.py
+index e7239cf..d15aced 100644
+--- a/backend/app/services/chat_service.py
++++ b/backend/app/services/chat_service.py
+@@ -26,7 +26,8 @@ SYSTEM_PROMPT = """你是一个视频笔记问答助手。你拥有以下能力
+ - 如果初始检索内容不足以回答问题，请主动调用工具获取更多信息
+ - 回答关于视频具体原话、细节时，用 lookup_transcript 查询原文
+ - 回答关于作者、标题等基本信息时，用 get_video_info 查询
+-- 请用中文回答，保持简洁准确"""
++- 请用中文回答，保持简洁准确
++- 如果用户消息中附带了图片（题目截图、图表等），请优先结合图片内容回答"""
+ 
+ 
+ def _build_context(chunks: list[dict]) -> str:
+@@ -72,6 +73,7 @@ def chat(
+     history: list[dict],
+     provider_id: str,
+     model_name: str,
++    images: Optional[list[str]] = None,
+ ) -> dict:
+     """
+     RAG + Tool Calling 问答。
+@@ -83,7 +85,8 @@ def chat(
+     vector_store = VectorStoreManager()
+ 
+     # 1. 检索初始上下文
+-    chunks = vector_store.query(task_id, question, n_results=6)
++    query_text = question.strip() or "请结合图片内容回答问题"
++    chunks = vector_store.query(task_id, query_text, n_results=6)
+     context = _build_context(chunks) if chunks else "（未检索到相关内容，请使用工具查询）"
+     sources = _build_sources(chunks) if chunks else []
+ 
+@@ -94,7 +97,16 @@ def chat(
+     for msg in history[-20:]:
+         messages.append({"role": msg["role"], "content": msg["content"]})
+ 
+-    messages.append({"role": "user", "content": question})
++    if images:
++        content = [{"type": "text", "text": query_text}]
++        for img in images[:4]:
++            content.append({
++                "type": "image_url",
++                "image_url": {"url": img, "detail": "auto"},
++            })
++        messages.append({"role": "user", "content": content})
++    else:
++        messages.append({"role": "user", "content": question})
+ 
+     # 3. 获取 LLM client
+     provider = ProviderService.get_provider_by_id(provider_id)
+diff --git a/backend/app/services/note.py b/backend/app/services/note.py
+index f493c91..ae00458 100644
+--- a/backend/app/services/note.py
++++ b/backend/app/services/note.py
+@@ -1,6 +1,7 @@
+ import json
+-import logging
+ import os
++import shutil
++import uuid
+ from dataclasses import asdict
+ from pathlib import Path
+ from typing import List, Optional, Tuple, Union, Any
+@@ -31,8 +32,18 @@ from app.services.constant import SUPPORT_PLATFORM_MAP
+ from app.services.provider import ProviderService
+ from app.transcriber.base import Transcriber
+ from app.transcriber.transcriber_provider import get_transcriber, _transcribers
++from app.utils.image_dedup import ImageSignature, compute_signature, has_more_detail, is_similar
++from app.utils.logger import get_logger
++from app.utils.markdown_toc import linkify_toc, nest_example_headings
+ from app.utils.note_helper import replace_content_markers, prepend_source_link
+-from app.utils.screenshot_marker import extract_screenshot_timestamps
++from app.utils.path_helper import get_app_dir
++from app.utils.screenshot_marker import (
++    collapse_image_runs,
++    drop_screenshot_marker,
++    extract_screenshot_timestamps,
++    lift_markers_out_of_headings,
++    move_first_image_under_heading,
++)
+ from app.utils.status_code import StatusCode
+ from app.utils.video_helper import generate_screenshot
+ from app.utils.video_reader import VideoReader
+@@ -54,9 +65,10 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
+ # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
+ IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
+ 
+-# 日志配置
+-logger = logging.getLogger(__name__)
+-logger.setLevel(logging.INFO)
++# 日志：必须用 get_logger。项目里没有任何 basicConfig/dictConfig，裸 logging.getLogger 的 INFO
++# 会被 lastResort（只放 WARNING 及以上）吞掉——"检测到转写缓存""截图整理：N 个标记 → 保留 M 张"
++# "任务进入执行队列"这些关键节点在 backend.log 里全都看不到，排查时只能靠猜。
++logger = get_logger(__name__)
+ 
+ 
+ class NoteGenerator:
+@@ -396,14 +408,23 @@ class NoteGenerator:
+         task_id = audio_cache_file.stem.split("_")[0]
+         self._update_status(task_id, status_phase)
+ 
++        need_video = screenshot or video_understanding
++        if screenshot and not grid_size:
++            grid_size = [2, 2]
++
+         # 已有缓存，尝试加载
+         if audio_cache_file.exists():
+             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
++            audio = None
+             try:
+                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
+-                return AudioDownloadResult(**data)
++                audio = AudioDownloadResult(**data)
+             except Exception as e:
+                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
++            if audio is not None:
++                # 音频可以复用，但截图/视频理解还需要视频文件和网格图，不能一起跳过
++                self._prepare_video(downloader, video_url, need_video, grid_size, video_interval, task_id)
++                return audio
+ 
+         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
+         if skip_download:
+@@ -425,34 +446,7 @@ class NoteGenerator:
+             except Exception as exc:
+                 logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
+ 
+-        # 判断是否需要下载视频
+-        need_video = screenshot or video_understanding
+-        if screenshot and not grid_size:
+-            grid_size = [2, 2]
+-
+-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
+-        if need_video:
+-            try:
+-                logger.info("开始下载视频")
+-                video_path_str = downloader.download_video(video_url)
+-                self.video_path = Path(video_path_str)
+-                logger.info(f"视频下载完成：{self.video_path}")
+-
+-                if grid_size:
+-                    self.video_img_urls = VideoReader(
+-                        video_path=str(self.video_path),
+-                        grid_size=tuple(grid_size),
+-                        frame_interval=frame_interval,
+-                        unit_width=960,
+-                        unit_height=540,
+-                        save_quality=80,
+-                    ).run()
+-                else:
+-                    logger.info("未指定 grid_size，跳过缩略图生成")
+-            except Exception as exc:
+-                logger.error(f"视频下载失败：{exc}")
+-                self._handle_exception(task_id, exc)
+-                raise
++        self._prepare_video(downloader, video_url, need_video, grid_size, video_interval, task_id)
+ 
+         # 下载音频
+         try:
+@@ -471,6 +465,58 @@ class NoteGenerator:
+             self._handle_exception(task_id, exc)
+             raise
+ 
++    def _prepare_video(
++        self,
++        downloader: Downloader,
++        video_url: str,
++        need_video: bool,
++        grid_size: List[int],
++        video_interval: int,
++        task_id: str,
++    ) -> None:
++        """下载视频并按需生成网格缩略图，结果写入 self.video_path / self.video_img_urls。
++
++        截图插入与视频理解都依赖它，所以音频缓存命中时也必须走一遍（视频文件本身有缓存，不会重复下载）。
++        """
++        if not need_video:
++            return
++
++        frame_interval = video_interval if video_interval and video_interval > 0 else 6
++        # 每次运行用独立目录：任务是并发执行的（ConcurrentTaskExecutor），共用 output_frames 时
++        # 后一次 run() 的清空动作会把前一次正在用的帧删掉
++        run_dir = f"{task_id}-{uuid.uuid4().hex[:8]}"
++        frame_dir = Path(get_app_dir("output_frames")) / run_dir
++        grid_dir = Path(get_app_dir("grid_output")) / run_dir
++        try:
++            logger.info("开始下载视频")
++            video_path_str = downloader.download_video(video_url)
++            self.video_path = Path(video_path_str)
++            logger.info(f"视频下载完成：{self.video_path}")
++
++            if grid_size:
++                # 长视频抽帧要几分钟，单独报一个阶段，免得前端一直显示"下载中"像卡住了
++                self._update_status(task_id, TaskStatus.EXTRACTING)
++                self.video_img_urls = VideoReader(
++                    video_path=str(self.video_path),
++                    grid_size=tuple(grid_size),
++                    frame_interval=frame_interval,
++                    unit_width=960,
++                    unit_height=540,
++                    save_quality=80,
++                    frame_dir=str(frame_dir),
++                    grid_dir=str(grid_dir),
++                ).run()
++            else:
++                logger.info("未指定 grid_size，跳过缩略图生成")
++        except Exception as exc:
++            logger.error(f"视频下载失败：{exc}")
++            self._handle_exception(task_id, exc)
++            raise
++        finally:
++            # 网格图已经编码成 base64 存在 video_img_urls 里，中间文件可以删（一条长视频约 45MB）
++            shutil.rmtree(frame_dir, ignore_errors=True)
++            shutil.rmtree(grid_dir, ignore_errors=True)
++
+ 
+     def _get_transcript(
+         self,
+@@ -560,6 +606,10 @@ class NoteGenerator:
+         try:
+             logger.info("开始转写音频")
+             transcript = self.transcriber.transcript(file_path=audio_file)
++            if transcript is None:
++                # 转写器返回 None 时，下面 asdict() 会报"should be called on dataclass instances"，
++                # 把真正的原因盖掉，这里先拦下来给个能看懂的错
++                raise RuntimeError("转写器没有返回结果，请查看后端日志里的转写失败原因")
+             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
+             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
+             return transcript
+@@ -595,7 +645,10 @@ class NoteGenerator:
+         :param extras: GPT 额外参数
+         :return: 生成的 Markdown 字符串
+         """
+-        task_id = markdown_cache_file.stem
++        # 缓存文件名是 {task_id}_markdown.md，直接取 stem 会把状态写到
++        # {task_id}_markdown.status.json，前端轮询的是 {task_id}.status.json，
++        # 于是整个 AI 生成阶段界面都停在上一个阶段（看着像卡死）
++        task_id = markdown_cache_file.stem.split("_")[0]
+         self._update_status(task_id, TaskStatus.SUMMARIZING)
+ 
+         source = GPTSource(
+@@ -639,6 +692,9 @@ class NoteGenerator:
+         :param platform: 平台标识，用于链接替换
+         :return: 处理后的 Markdown 字符串
+         """
++        # 跳转/截图标记写在标题行里会毁掉目录锚点，先挪到标题下面一行
++        markdown = lift_markers_out_of_headings(markdown)
++
+         if "screenshot" in formats and video_path:
+             try:
+                 markdown = self._insert_screenshots(markdown, video_path)
+@@ -651,28 +707,79 @@ class NoteGenerator:
+             except Exception as e:
+                 logger.warning(f"链接插入失败，跳过该步骤：{e}")
+ 
++        # 模型总把截图写到小节末尾，搬回标题下面（要在链接替换之后，才能认出「原片跳转」那一行）
++        try:
++            markdown = move_first_image_under_heading(markdown)
++        except Exception as e:
++            logger.warning(f"截图位置调整失败，跳过该步骤：{e}")
++
++        # 模型常把解法和例题写成同级标题，先把例题压到上一级标题下面，再修目录锚点
++        try:
++            markdown = nest_example_headings(markdown)
++        except Exception as e:
++            logger.warning(f"标题层级调整失败，跳过该步骤：{e}")
++
++        try:
++            markdown = linkify_toc(markdown)
++        except Exception as e:
++            logger.warning(f"目录锚点修复失败，跳过该步骤：{e}")
++
+         return markdown
+ 
+-    def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
++    def _insert_screenshots(self, markdown: str, video_path: Path) -> str:
+         """
+         扫描 Markdown 文本中所有 Screenshot 标记，并替换为实际生成的截图链接。
++        同一页课件被标记多次时只保留一张：位置用第一次出现的标记，画面取信息量最全的那张。
+ 
+         :param markdown: 含有 *Screenshot-mm:ss 或 Screenshot-[mm:ss] 标记的 Markdown 文本
+         :param video_path: 本地视频文件路径
+         :return: 替换后的 Markdown 字符串
+         """
+         matches: List[Tuple[str, int]] = extract_screenshot_timestamps(markdown)
++        kept: List[Tuple[ImageSignature, str]] = []  # (画面签名, 已写进笔记的图片路径)
++        dropped = 0
+         for idx, (marker, ts) in enumerate(matches):
+             try:
+                 img_path = generate_screenshot(str(video_path), str(IMAGE_OUTPUT_DIR), ts, idx)
++                signature = compute_signature(img_path)
++            except Exception as exc:
++                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
++                markdown = drop_screenshot_marker(markdown, marker)
++                dropped += 1
++                continue
++
++            duplicate_at = next(
++                (i for i, (kept_sig, _) in enumerate(kept) if is_similar(signature, kept_sig)),
++                None,
++            )
++            if duplicate_at is None:
+                 filename = Path(img_path).name
+                 # 构建前端可访问的 URL，例如 /static/screenshots/{filename}
+                 img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
+                 markdown = markdown.replace(marker, f"![]({img_url})", 1)
+-            except Exception as exc:
+-                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
+-                # self._handle_exception(task_id, exc)
+-                return None
++                kept.append((signature, img_path))
++                continue
++
++            # 板书逐渐写满的场景：新截图内容更全时原位覆盖，笔记里的链接不变
++            kept_sig, kept_path = kept[duplicate_at]
++            if has_more_detail(signature, kept_sig):
++                os.replace(img_path, kept_path)
++                kept[duplicate_at] = (signature, kept_path)
++            else:
++                os.remove(img_path)
++            markdown = drop_screenshot_marker(markdown, marker)
++            dropped += 1
++
++        # 模型常给一道题连插好几帧板书：连续插图只留第一张，其余连文件一起删掉
++        markdown, run_dropped = collapse_image_runs(markdown)
++        for url in run_dropped:
++            (Path(IMAGE_OUTPUT_DIR) / url.rsplit("/", 1)[-1]).unlink(missing_ok=True)
++
++        if dropped or run_dropped:
++            logger.info(
++                f"截图整理：{len(matches)} 个标记 → 笔记保留 {len(kept) - len(run_dropped)} 张"
++                f"（相似合并 {dropped} 张、连续插图丢弃 {len(run_dropped)} 张）"
++            )
+         return markdown
+ 
+     @staticmethod
+diff --git a/backend/app/transcriber/transcriber_provider.py b/backend/app/transcriber/transcriber_provider.py
+index af29c17..f8249c9 100644
+--- a/backend/app/transcriber/transcriber_provider.py
++++ b/backend/app/transcriber/transcriber_provider.py
+@@ -1,6 +1,7 @@
+ import os
+ import platform
+ import threading
++import time
+ from enum import Enum
+ 
+ from app.transcriber.groq import GroqTranscriber
+@@ -45,6 +46,68 @@ _transcribers = {
+ _transcriber_configs = {key: None for key in _transcribers}
+ _transcriber_init_lock = threading.Lock()
+ 
++# ---- 显存回收 ----
++# Whisper large-v3-turbo 加载后常驻约 2.3GB 显存，不用也占着。这里记录每个转写器的
++# 最后使用时间，闲置超时后由守护线程卸载（下次使用重新加载，约 8 秒）。
++# WHISPER_IDLE_UNLOAD_SECONDS=0 可关闭。
++_last_used = {key: None for key in _transcribers}
++_idle_unloader_started = False
++IDLE_UNLOAD_SECONDS = float(os.getenv("WHISPER_IDLE_UNLOAD_SECONDS", "600"))
++IDLE_CHECK_SECONDS = float(os.getenv("WHISPER_IDLE_CHECK_SECONDS", "60"))
++
++
++def touch_transcriber(key: TranscriberType) -> None:
++    _last_used[key] = time.monotonic()
++
++
++def unload_idle_transcribers(idle_seconds: float, now: float | None = None) -> list:
++    """卸载闲置超过 idle_seconds 的转写器（释放显存），返回被卸载的类型列表。"""
++    now = time.monotonic() if now is None else now
++    unloaded = []
++    with _transcriber_init_lock:
++        for key, instance in list(_transcribers.items()):
++            if instance is None:
++                continue
++            last = _last_used.get(key)
++            if last is None or (now - last) < idle_seconds:
++                continue
++            closer = getattr(instance, "unload", None)
++            if callable(closer):
++                try:
++                    closer()
++                except Exception as e:
++                    logger.warning(f"卸载 {key.value} 失败：{e}")
++            _transcribers[key] = None
++            _transcriber_configs[key] = None
++            _last_used[key] = None
++            unloaded.append(key)
++    if unloaded:
++        logger.info(f"显存回收：转写器闲置超过 {idle_seconds:.0f} 秒，已卸载 {[k.value for k in unloaded]}")
++    return unloaded
++
++
++def _start_idle_unloader() -> None:
++    global _idle_unloader_started
++    with _transcriber_init_lock:
++        if _idle_unloader_started or IDLE_UNLOAD_SECONDS <= 0:
++            return
++        _idle_unloader_started = True
++
++    def _loop():
++        while True:
++            time.sleep(IDLE_CHECK_SECONDS)
++            try:
++                unload_idle_transcribers(IDLE_UNLOAD_SECONDS)
++            except Exception as e:  # 守护线程绝不能把进程带崩
++                logger.warning(f"闲置卸载检查失败：{e}")
++
++    threading.Thread(target=_loop, daemon=True, name="transcriber-idle-unload").start()
++    logger.info(
++        f"显存回收已启用：转写器闲置 {IDLE_UNLOAD_SECONDS:.0f} 秒后自动卸载"
++        "（环境变量 WHISPER_IDLE_UNLOAD_SECONDS=0 可关闭）"
++    )
++
++
+ # 公共实例初始化函数
+ def _init_transcriber(key: TranscriberType, cls, *args, **kwargs):
+     init_config = (args, tuple(sorted(kwargs.items())))
+@@ -61,7 +124,10 @@ def _init_transcriber(key: TranscriberType, cls, *args, **kwargs):
+             _transcribers[key] = new_instance
+             _transcriber_configs[key] = init_config
+             logger.info(f'{cls.__name__} 创建成功')
+-        return _transcribers[key]
++        instance = _transcribers[key]
++    touch_transcriber(key)
++    _start_idle_unloader()   # 必须在锁外调用：它会再拿一次锁
++    return instance
+ 
+ # 各类型获取方法
+ def get_groq_transcriber():
+diff --git a/backend/app/transcriber/whisper.py b/backend/app/transcriber/whisper.py
+index 3d254a2..1bbe7e5 100644
+--- a/backend/app/transcriber/whisper.py
++++ b/backend/app/transcriber/whisper.py
+@@ -14,6 +14,7 @@ from app.utils.path_helper import get_model_dir
+ 
+ from events import transcription_finished
+ from pathlib import Path
++import gc
+ import os
+ import shutil
+ 
+@@ -141,12 +142,30 @@ class WhisperTranscriber(Transcriber):
+                 language=info.language,
+                 full_text=full_text.strip(),
+                 segments=segments,
+-                raw=info
++                # info 是 faster-whisper 的 TranscriptionInfo 对象而不是 dict，
++                # 原样塞进 raw 会让上层写缓存的 asdict()+json.dumps 直接炸掉
++                raw=transcription_info_to_dict(info)
+             )
+             # self.on_finish(file_path, result)
+             return result
+         except Exception as e:
+-            print(f"转写失败：{e}")
++            # 原来这里只 print 不抛、隐式返回 None，上层 asdict(None) 报的是
++            # "asdict() should be called on dataclass instances"，真正的错因（比如缺 libcublas.so.12）被埋掉
++            logger.error(f"转写失败：{e}")
++            raise
++
++
++    def unload(self) -> None:
++        """释放显存：丢掉 CTranslate2 模型对象，下次 get_transcriber 会重新加载（约 8 秒）。
++
++        由 transcriber_provider 的闲置回收线程调用；正在跑的任务自己还持有实例引用，
++        所以卸载不会影响进行中的转写。
++        """
++        model, self.model = self.model, None
++        if model is not None:
++            del model
++        gc.collect()
++        logger.info("Whisper 模型已从显存卸载")
+ 
+ 
+     def on_finish(self,video_path:str,result: TranscriptResult)->None:
+@@ -155,3 +174,9 @@ class WhisperTranscriber(Transcriber):
+             "file_path": video_path,
+         })
+ 
++
++def transcription_info_to_dict(info) -> dict:
++    """把 faster-whisper 的 TranscriptionInfo 转成可 JSON 序列化的 dict。"""
++    fields = ("language", "language_probability", "duration", "model_id", "device", "compute_type")
++    return {name: getattr(info, name, None) for name in fields}
++
+diff --git a/backend/app/utils/image_dedup.py b/backend/app/utils/image_dedup.py
+new file mode 100644
+index 0000000..9847515
+--- /dev/null
++++ b/backend/app/utils/image_dedup.py
+@@ -0,0 +1,72 @@
++"""判断两张截图是否"看起来一样"，用于笔记截图与抽帧的相似图去重。
++
++只依赖 Pillow + numpy，两个指标同时达标才判为相似：
++1. dHash（32x32，1024 位）汉明距离——整体结构指纹；
++2. 缩略灰度图上"明显变化的像素占比"——补充结构指纹分辨不出的局部改动。
++
++阈值由合成课件标定：同页多写一行/鼠标光标/压缩噪声 → 相似；同模板换页/多出一张图/换主题 → 不同。
++宁可漏判（多留一张重复图）也不误判（把两页不同课件合成一张）。
++"""
++from typing import NamedTuple
++
++import numpy as np
++from PIL import Image
++
++HASH_SIZE = 32
++GRAY_SIZE = (160, 90)
++# 1024 位中允许不同的位数上限。
++# 定 60 是实测调出来的：真实课件视频里"板书逐笔写出来"的相邻帧，像素只变了 1.0-1.5%，
++# 但压缩噪声会让 dHash 抖到 43-50，原先的 40 拦不住（一条 103 分钟的课 154 张图一张没合并）。
++# 真正区分"同页多写一行"和"换了一页"的是下面的变化像素占比，所以这里放宽是安全的：
++# 合成标定集里换页=2.31%、多出一张图表=2.10%，都过不了 1.6% 这道闸。
++DHASH_MAX_DISTANCE = 60
++# 灰度差超过这个值才算"这个像素变了"（0-255 量纲）
++CHANGED_PIXEL_THRESHOLD = 30
++# 变化像素占比上限
++MAX_CHANGED_RATIO = 0.016
++# 同组相似图里，细节分高出这个比例才认为"内容更全"，用它替换已保留的那张
++DETAIL_MARGIN = 1.1
++
++
++class ImageSignature(NamedTuple):
++    dhash: int
++    gray: np.ndarray
++    detail: float
++
++
++def compute_signature(image_path: str) -> ImageSignature:
++    with Image.open(image_path) as img:
++        gray_img = img.convert("L")
++        small = gray_img.resize((HASH_SIZE + 1, HASH_SIZE), Image.Resampling.LANCZOS)
++        thumb = gray_img.resize(GRAY_SIZE, Image.Resampling.LANCZOS)
++    small_arr = np.asarray(small, dtype=np.uint8)
++    gray_arr = np.asarray(thumb, dtype=np.float32)
++
++    dhash = 0
++    for bit in (small_arr[:, 1:] > small_arr[:, :-1]).flatten():
++        dhash = (dhash << 1) | int(bit)
++
++    # 细节分 = 横竖两方向的平均梯度强度，板书写得越满这个值越大
++    detail = float(
++        np.abs(np.diff(gray_arr, axis=1)).mean() + np.abs(np.diff(gray_arr, axis=0)).mean()
++    )
++    return ImageSignature(dhash=dhash, gray=gray_arr, detail=detail)
++
++
++def hamming_distance(hash_a: int, hash_b: int) -> int:
++    return bin(hash_a ^ hash_b).count("1")
++
++
++def changed_ratio(sig_a: ImageSignature, sig_b: ImageSignature) -> float:
++    diff = np.abs(sig_a.gray - sig_b.gray)
++    return float((diff > CHANGED_PIXEL_THRESHOLD).mean())
++
++
++def is_similar(sig_a: ImageSignature, sig_b: ImageSignature) -> bool:
++    if hamming_distance(sig_a.dhash, sig_b.dhash) > DHASH_MAX_DISTANCE:
++        return False
++    return changed_ratio(sig_a, sig_b) <= MAX_CHANGED_RATIO
++
++
++def has_more_detail(sig: ImageSignature, other: ImageSignature) -> bool:
++    return sig.detail > other.detail * DETAIL_MARGIN
+diff --git a/backend/app/utils/markdown_toc.py b/backend/app/utils/markdown_toc.py
+new file mode 100644
+index 0000000..9900f9f
+--- /dev/null
++++ b/backend/app/utils/markdown_toc.py
+@@ -0,0 +1,218 @@
++"""把笔记里的「目录」条目补成能点击的锚点链接。
++
++前端用 rehype-slug（github-slugger）给标题生成 id，规则是：转小写 → 删掉所有标点/符号/控制符
++（`-` 和 `_` 保留）→ 空格换成 `-`，同名标题依次加 `-1`、`-2` 后缀。模型自己写的锚点经常对不上
++（甚至只写纯文本列表），所以这里按同一套规则重算，保证目录点了能跳。
++"""
++import re
++import unicodedata
++from typing import Dict, List, Optional, Tuple
++
++HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
++LIST_ITEM_PATTERN = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
++# 目录条目里可能嵌着（甚至多层嵌套的）链接，逐层剥成纯文本
++INNER_LINK_PATTERN = re.compile(r"\[([^\[\]]*)\]\([^)]*\)")
++# 模型有时把「原片 @ mm:ss」胶囊文字也抄进目录标签里
++ORIGIN_PILL_PATTERN = re.compile(r"原片\s*@?\s*\d{1,3}:\d{2}")
++EXAMPLE_HEADING_PATTERN = re.compile(r"^例题\s*\d")
++TOC_TITLES = ("目录", "大纲", "contents", "table of contents", "toc")
++# 目录都写在开头，限制搜索范围，避免把正文里叫「目录结构」的章节误认成目录
++TOC_SEARCH_LINES = 40
++
++# 下面两张表是把 github-slugger 1.5.0 的删除规则在 BMP 全量码点上逐一对拍后得到的差异修正：
++# Unicode 类别规则漏掉的部分——各类空白（不换行/全角/窄空格）、带圈数字 ①②③、上标下标与
++# 分数字符等要额外删除；下划线类连接符（含全角）要额外保留。加上这两张表后 BMP 内零差异。
++_EXTRA_REMOVED_RE = re.compile(
++    "[\u00a0\u00b2-\u00b3\u00b9\u00bc-\u00be\u0870-\u0887\u0889-\u088e\u0898-\u089f\u08b5"
++    "\u08c8-\u08d2\u09f4-\u09f9\u0b72-\u0b77\u0bf0-\u0bf2\u0c3c\u0c5d\u0c78-\u0c7e\u0cdd\u0cf3"
++    "\u0d58-\u0d5e\u0d70-\u0d78\u0ece\u0f2a-\u0f33\u1369-\u137c\u1680\u170d\u1715\u171f"
++    "\u17f0-\u17f9\u180f\u19da\u1ac1-\u1ace\u1b4c\u1dfa\u2000-\u200a\u2028-\u2029\u202f\u205f"
++    "\u2070\u2074-\u2079\u2080-\u2089\u2150-\u215f\u2189\u2460-\u249b\u24ea-\u24ff"
++    "\u2776-\u2793\u2c2f\u2c5f\u2cfd\u3000\u3192-\u3195\u3220-\u3229\u3248-\u324f\u3251-\u325f"
++    "\u3280-\u3289\u32b1-\u32bf\u9ffd-\u9fff\ua7c0-\ua7c1\ua7d0-\ua7d1\ua7d3\ua7d5-\ua7d9"
++    "\ua7f2-\ua7f4\ua830-\ua835]"
++)
++_EXTRA_KEPT_RE = re.compile("[\u203f-\u2040\u2054\u24b6-\u24e9\ua7cb\ua7dc\ufe33-\ufe34\ufe4d-\ufe4f\uff3f]")
++
++
++def github_slug(text: str) -> str:
++    """复刻 github-slugger 的 slug 规则，结果与前端 rehype-slug 生成的标题 id 一致。"""
++    kept: List[str] = []
++    for char in text.lower():
++        if char == " ":
++            kept.append("-")
++        elif _is_removed(char):
++            continue
++        else:
++            kept.append(char)
++    return "".join(kept)
++
++
++def _is_removed(char: str) -> bool:
++    if char in "-_" or _EXTRA_KEPT_RE.match(char):
++        return False
++    if _EXTRA_REMOVED_RE.match(char):
++        return True
++    # 标点(P)、符号(S)、控制符与未分配码点(C) 一律删除
++    return unicodedata.category(char)[0] in "PSC"
++
++
++def collect_heading_slugs(markdown: str) -> List[Tuple[int, str, str]]:
++    """按文档顺序返回 [(层级, 标题文本, 前端会生成的 id)]。"""
++    occurrences: Dict[str, int] = {}
++    headings: List[Tuple[int, str, str]] = []
++    in_code_block = False
++    for line in markdown.split("\n"):
++        if line.lstrip().startswith("```"):
++            in_code_block = not in_code_block
++            continue
++        if in_code_block:
++            continue
++        match = HEADING_PATTERN.match(line)
++        if not match:
++            continue
++        text = match.group(2).strip()
++        base = github_slug(text)
++        slug = base
++        while slug in occurrences:
++            occurrences[base] = occurrences.get(base, 0) + 1
++            slug = f"{base}-{occurrences[base]}"
++        occurrences[slug] = 0
++        headings.append((len(match.group(1)), text, slug))
++    return headings
++
++
++def linkify_toc(markdown: str) -> str:
++    """把目录里的条目改写成干净的单行 `- [标题](#锚点)`。
++
++    模型经常把目录条目写坏：标签里嵌着原片跳转链接、标签跨多行、锚点算错。
++    这里一律剥成纯文本后按标题重新匹配，并用**标题自己的文字**重写条目，
++    匹配不上的条目原样保留。
++    """
++    lines = markdown.split("\n")
++    headings = collect_heading_slugs(markdown)
++    toc_start, toc_level = _find_toc_heading(lines)
++    if toc_start is None:
++        return markdown
++
++    out: List[str] = lines[: toc_start + 1]
++    changed = False
++    i = toc_start + 1
++    while i < len(lines):
++        line = lines[i]
++        heading = HEADING_PATTERN.match(line)
++        if heading and len(heading.group(1)) <= toc_level:
++            out.extend(lines[i:])
++            break
++        item = LIST_ITEM_PATTERN.match(line)
++        if not item:
++            out.append(line)
++            i += 1
++            continue
++        indent, bullet, content = item.groups()
++        raw, i = _read_list_item(lines, i)
++        # 只拿列表项内容去匹配（带上 "- " 会让 slug 多出一个横线，匹配不上）
++        joined = " ".join([content.strip()] + [x.strip() for x in raw[1:]])
++        matched = _match_heading(_plain_label(joined), headings)
++        if matched:
++            text, slug = matched
++            new_line = f"{indent}{bullet} [{text}](#{slug})"
++            out.append(new_line)
++            changed = changed or new_line != " ".join(raw)
++        else:
++            out.extend(raw)
++
++    return "\n".join(out) if changed else markdown
++
++
++def nest_example_headings(markdown: str) -> str:
++    """把「例题N」压到它前面那个标题的下一级（解法/题型都行），连续的例题保持同级。
++
++    模型常把解法和例题写成同级标题，折叠时例题就不在解法里面，目录里也看不出从属关系。
++    """
++    out: List[str] = []
++    in_code_block = False
++    prev_level = 0
++    prev_is_example = False
++    for line in markdown.split("\n"):
++        if line.lstrip().startswith("```"):
++            in_code_block = not in_code_block
++            out.append(line)
++            continue
++        match = None if in_code_block else HEADING_PATTERN.match(line)
++        if not match:
++            out.append(line)
++            continue
++        level = len(match.group(1))
++        text = match.group(2).strip()
++        if EXAMPLE_HEADING_PATTERN.match(text):
++            # 紧跟上一道例题 → 同级（同一个解法下的兄弟）；否则压到前一个标题下面一级
++            level = prev_level if prev_is_example else min(6, prev_level + 1)
++        out.append("#" * level + " " + text)
++        prev_level = level
++        prev_is_example = bool(EXAMPLE_HEADING_PATTERN.match(text))
++    return "\n".join(out)
++
++
++def _read_list_item(lines: List[str], start: int) -> Tuple[List[str], int]:
++    """列表项可能跨多行（模型把链接标签写成多行），按括号配平把整项收回来。"""
++    raw = [lines[start]]
++    j = start + 1
++    while j < len(lines) and _is_unbalanced(" ".join(raw)):
++        raw.append(lines[j])
++        j += 1
++    return raw, j
++
++
++def _is_unbalanced(text: str) -> bool:
++    return text.count("[") > text.count("]") or text.count("(") > text.count(")")
++
++
++def _plain_label(content: str) -> str:
++    """把目录条目剥成纯文本：去掉（可能嵌套的）链接语法和原片时间胶囊文字。"""
++    text = content
++    for _ in range(3):
++        stripped = INNER_LINK_PATTERN.sub(r"\1", text)
++        if stripped == text:
++            break
++        text = stripped
++    text = ORIGIN_PILL_PATTERN.sub("", text)
++    return re.sub(r"\s+", " ", text).strip()
++
++
++def _find_toc_heading(lines: List[str]) -> Tuple[Optional[int], int]:
++    in_code_block = False
++    for i, line in enumerate(lines[:TOC_SEARCH_LINES]):
++        if line.lstrip().startswith("```"):
++            in_code_block = not in_code_block
++            continue
++        if in_code_block:
++            continue
++        match = HEADING_PATTERN.match(line)
++        if not match:
++            continue
++        text = match.group(2).strip().lower()
++        if text not in TOC_TITLES and not text.startswith("目录"):
++            continue
++        # 还得紧跟一个列表，才算真的是目录
++        for follow in lines[i + 1:i + 4]:
++            if follow.strip():
++                if LIST_ITEM_PATTERN.match(follow):
++                    return i, len(match.group(1))
++                break
++    return None, 0
++
++
++def _match_heading(
++    label: str, headings: List[Tuple[int, str, str]]
++) -> Optional[Tuple[str, str]]:
++    """按目录条目的纯文本找到对应标题，返回 (标题文字, 锚点)；找不到返回 None。"""
++    key = github_slug(label)
++    if not key:
++        return None
++    for _, text, slug in headings:
++        if slug == key:
++            return text, slug
++    # 目录条目常被模型简写（或标题带了 "1." 这类编号），退一步做唯一包含匹配
++    candidates = [(text, slug) for _, text, slug in headings if key in slug or slug in key]
++    return candidates[0] if len(candidates) == 1 else None
+diff --git a/backend/app/utils/note_helper.py b/backend/app/utils/note_helper.py
+index 2e368d1..fe411b8 100644
+--- a/backend/app/utils/note_helper.py
++++ b/backend/app/utils/note_helper.py
+@@ -35,10 +35,12 @@ def replace_content_markers(markdown: str, video_id: str, platform: str = 'bilib
+     """
+     替换 *Content-04:16*、Content-04:16 或 Content-[04:16] 为超链接，跳转到对应平台视频的时间位置
+     """
+-    # 匹配三种形式：*Content-04:16*、Content-04:16、Content-[04:16]
+-    pattern = r"(?:\*?)Content-(?:\[(\d{2}):(\d{2})\]|(\d{2}):(\d{2}))"
++    # 匹配三种形式：*Content-04:16*、Content-04:16、Content-[04:16]（首尾的 * 都要吃掉，否则会留下孤立星号）
++    # 分钟位允许 1-3 位：长视频（≥100 分钟）模型会写成 *Content-[102:47]*
++    pattern = r"\*?Content-(?:\[(\d{1,3}):(\d{2})\]|(\d{1,3}):(\d{2})(?![:\d]))\*?"
+ 
+-    safe_video_id = video_id
++    # 分 P 视频的 id 形如 BV1xx_p2，要换成 ?p=2 才能拼时间戳
++    parsed_video_id = (video_id or "").replace("_p", "?p=")
+ 
+     def replacer(match):
+         mm = match.group(1) or match.group(3)
+@@ -46,17 +48,12 @@ def replace_content_markers(markdown: str, video_id: str, platform: str = 'bilib
+         total_seconds = int(mm) * 60 + int(ss)
+ 
+         if platform == 'bilibili':
+-            video_id = video_id.replace("_p", "?p=")
+-            url = f"https://www.bilibili.com/video/{video_id}&t={total_seconds}"
+-            parsed_video_id = safe_video_id.replace("_p", "?p=")
+-            url = f"https://www.bilibili.com/video/{parsed_video_id}&t={total_seconds}"
++            sep = "&" if "?" in parsed_video_id else "?"
++            url = f"https://www.bilibili.com/video/{parsed_video_id}{sep}t={total_seconds}"
+         elif platform == 'youtube':
+-            url = f"https://www.youtube.com/watch?v={video_id}&t={total_seconds}s"
+-            url = f"https://www.youtube.com/watch?v={safe_video_id}&t={total_seconds}s"
++            url = f"https://www.youtube.com/watch?v={parsed_video_id}&t={total_seconds}s"
+         elif platform == 'douyin':
+-            url = f"https://www.douyin.com/video/{video_id}"
+-            url = f"https://www.douyin.com/video/{safe_video_id}"
+-            return f"[原片 @ {mm}:{ss}]({url})"
++            url = f"https://www.douyin.com/video/{parsed_video_id}"
+         else:
+             return f"({mm}:{ss})"
+ 
+diff --git a/backend/app/utils/screenshot_marker.py b/backend/app/utils/screenshot_marker.py
+index 2e3b056..9fbb80f 100644
+--- a/backend/app/utils/screenshot_marker.py
++++ b/backend/app/utils/screenshot_marker.py
+@@ -1,9 +1,15 @@
+ import re
+ from typing import List, Tuple
+ 
++HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
++IMAGE_LINE_PATTERN = re.compile(r"^!\[[^\]]*\]\(([^)]+)\)\s*$")
++# 分钟位允许 1-3 位：长视频（≥100 分钟）模型会写成 *Content-[102:47]*
++MARKER_PATTERN = re.compile(r"\*?(?:Content|Screenshot)-(?:\[\d{1,3}:\d{2}\]|\d{1,3}:\d{2}(?![:\d]))\*?")
++
+ 
+ def extract_screenshot_timestamps(markdown: str) -> List[Tuple[str, int]]:
+-    pattern = r"(\*?Screenshot-(?:\[(\d{2}):(\d{2})\]|(\d{2}):(\d{2})))"
++    # 首尾的 * 都要一起吃掉：模型常写成 *Screenshot-[mm:ss]*，只匹配前半截会在笔记里留下孤立星号
++    pattern = r"(\*?Screenshot-(?:\[(\d{1,3}):(\d{2})\]|(\d{1,3}):(\d{2})(?![:\d]))\*?)"
+     results: List[Tuple[str, int]] = []
+     for match in re.finditer(pattern, markdown):
+         mm = match.group(2) or match.group(4)
+@@ -11,3 +17,135 @@ def extract_screenshot_timestamps(markdown: str) -> List[Tuple[str, int]]:
+         total_seconds = int(mm) * 60 + int(ss)
+         results.append((match.group(1), total_seconds))
+     return results
++
++
++def drop_screenshot_marker(markdown: str, marker: str) -> str:
++    """删掉一个截图标记；独占一行时连整行删除，免得笔记里留下空行。"""
++    lines = markdown.split("\n")
++    for i, line in enumerate(lines):
++        if marker not in line:
++            continue
++        if line.strip() == marker:
++            del lines[i]
++        else:
++            lines[i] = line.replace(marker, "", 1).rstrip()
++        break
++    return "\n".join(lines)
++
++
++def lift_markers_out_of_headings(markdown: str) -> str:
++    """把标题行里的 *Content-[mm:ss]* / *Screenshot-[mm:ss]* 标记挪到标题下面一行。
++
++    提示词要求模型把跳转标记写在标题行末尾，但这样前端 rehype-slug 生成的锚点会变成
++    "标题-content-0000"，目录里的 #标题 就对不上（点了不跳）；截图标记也会把图片塞进标题里。
++    """
++    out: List[str] = []
++    in_code_block = False
++    for line in markdown.split("\n"):
++        if line.lstrip().startswith("```"):
++            in_code_block = not in_code_block
++            out.append(line)
++            continue
++        if not in_code_block and HEADING_PATTERN.match(line):
++            markers = MARKER_PATTERN.findall(line)
++            if markers:
++                out.append(MARKER_PATTERN.sub("", line).rstrip())
++                out.extend(markers)
++                continue
++        out.append(line)
++    return "\n".join(out)
++
++
++ORIGIN_LINK_PATTERN = re.compile(r"^\[原片 @ \d{1,3}:\d{2}\]")
++
++
++def move_first_image_under_heading(markdown: str) -> str:
++    """把每个标题小节里的第一张图挪到标题正下方（紧随标题的「原片跳转」链接之后）。
++
++    轻量模型几乎总把 *Screenshot-* 标记写到小节末尾（实测一条笔记 43 个小节全部如此），
++    提示词约束不住；用户要的是「标题 → 图 → 题干 → 分步解析 → 答案」，所以在代码里搬。
++    只搬每节的第一张图，后面的图留在原处（它们解释的通常是后文内容）。
++    """
++    lines = markdown.split("\n")
++    out: List[str] = []
++    i = 0
++    in_code_block = False
++    while i < len(lines):
++        line = lines[i]
++        if line.lstrip().startswith("```"):
++            in_code_block = not in_code_block
++            out.append(line)
++            i += 1
++            continue
++        if in_code_block or not HEADING_PATTERN.match(line):
++            out.append(line)
++            i += 1
++            continue
++
++        out.append(line)
++        i += 1
++        # 收拢这个小节的内容：到下一个标题为止，代码块整体算内容
++        section: List[str] = []
++        code_flags: List[bool] = []
++        section_in_code = False
++        while i < len(lines):
++            current = lines[i]
++            if current.lstrip().startswith("```"):
++                section.append(current)
++                code_flags.append(True)  # 围栏行也标记成代码区，免得被当成图片行
++                section_in_code = not section_in_code
++                i += 1
++                continue
++            if not section_in_code and HEADING_PATTERN.match(current):
++                break
++            section.append(current)
++            code_flags.append(section_in_code)
++            i += 1
++
++        image_at = next(
++            (k for k, text in enumerate(section)
++             if not code_flags[k] and IMAGE_LINE_PATTERN.match(text.strip())),
++            None,
++        )
++        if image_at is not None:
++            first_content = next((k for k, text in enumerate(section) if text.strip()), None)
++            if first_content != image_at:
++                image_line = section.pop(image_at)
++                section.insert(_image_insert_position(section), image_line)
++        out.extend(section)
++    return "\n".join(out)
++
++
++def _image_insert_position(section: List[str]) -> int:
++    """插在小节开头，但让「原片跳转」链接继续紧贴标题。"""
++    pos = 0
++    while pos < len(section) and not section[pos].strip():
++        pos += 1
++    if pos < len(section) and ORIGIN_LINK_PATTERN.match(section[pos].strip()):
++        pos += 1
++    return pos
++
++
++def collapse_image_runs(markdown: str) -> Tuple[str, List[str]]:
++    """连续的插图（中间没有任何正文，标题也算正文）只保留第一张。
++
++    模型讲一道题时经常连着插好几帧板书：实测一条 103 分钟的课生成 154 张截图，
++    其中 105 张前面紧挨着另一张图、中间一个字都没有，笔记根本没法看。
++    返回 (处理后的 markdown, 被丢掉的图片 URL 列表)，调用方负责删掉对应文件。
++    """
++    out: List[str] = []
++    dropped: List[str] = []
++    previous_was_image = False
++    for line in markdown.split("\n"):
++        match = IMAGE_LINE_PATTERN.match(line.strip())
++        if match:
++            if previous_was_image:
++                dropped.append(match.group(1))
++                continue
++            previous_was_image = True
++            out.append(line)
++            continue
++        if line.strip():
++            previous_was_image = False
++        out.append(line)
++    return "\n".join(out), dropped
+diff --git a/backend/app/utils/video_reader.py b/backend/app/utils/video_reader.py
+index 100dbff..db6cc64 100644
+--- a/backend/app/utils/video_reader.py
++++ b/backend/app/utils/video_reader.py
+@@ -1,5 +1,5 @@
+ import base64
+-import hashlib
++import math
+ import os
+ import re
+ import subprocess
+@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
+ import ffmpeg
+ from PIL import Image, ImageDraw, ImageFont
+ 
++from app.utils.image_dedup import ImageSignature, compute_signature, has_more_detail, is_similar
+ from app.utils.logger import get_logger
+ from app.utils.path_helper import get_app_dir
+ 
+@@ -35,21 +36,14 @@ class VideoReader:
+         print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
+         self.font_path = font_path
+ 
+-    @staticmethod
+-    def _calculate_file_md5(file_path: str) -> str:
+-        hasher = hashlib.md5()
+-        with open(file_path, "rb") as f:
+-            for chunk in iter(lambda: f.read(8192), b""):
+-                hasher.update(chunk)
+-        return hasher.hexdigest()
+-
+     def format_time(self, seconds: float) -> str:
+         mm = int(seconds // 60)
+         ss = int(seconds % 60)
+         return f"{mm:02d}_{ss:02d}"
+ 
+     def extract_time_from_filename(self, filename: str) -> float:
+-        match = re.search(r"frame_(\d{2})_(\d{2})\.jpg", filename)
++        # 分钟位 2-3 位：长视频（≥100 分钟）的文件名形如 frame_102_47.jpg
++        match = re.search(r"frame_(\d{2,3})_(\d{2})\.jpg", filename)
+         if match:
+             mm, ss = map(int, match.groups())
+             return mm * 60 + ss
+@@ -72,7 +66,9 @@ class VideoReader:
+         try:
+             os.makedirs(self.frame_dir, exist_ok=True)
+             duration = float(ffmpeg.probe(self.video_path)["format"]["duration"])
+-            timestamps = [i for i in range(0, int(duration), self.frame_interval)][:max_frames]
++            # 帧数有上限：视频太长时自动放大步长，保证覆盖到片尾（否则 103 分钟的课只截前 100 分钟）
++            step = max(self.frame_interval, math.ceil(duration / max_frames)) if max_frames else self.frame_interval
++            timestamps = list(range(0, int(duration), step))[:max_frames]
+ 
+             # 并行提取帧
+             max_workers = min(os.cpu_count() or 4, 8, len(timestamps))
+@@ -83,22 +79,33 @@ class VideoReader:
+                     ts = futures[future]
+                     frame_results[ts] = future.result()
+ 
+-            # 按时间戳顺序整理结果，并进行去重
+-            image_paths = []
+-            last_hash = None
++            # 按时间戳顺序做相似去重：同一页课件只留一张，且留板书最全的那张
++            frames: list[tuple[int, str, ImageSignature | None]] = []
+             for ts in timestamps:
+                 output_path = frame_results.get(ts)
+                 if not output_path or not os.path.exists(output_path):
+                     continue
++                signature = compute_signature(output_path) if self.dedupe_enabled else None
++                frames.append((ts, output_path, signature))
+ 
+-                if self.dedupe_enabled:
+-                    frame_hash = self._calculate_file_md5(output_path)
+-                    if frame_hash == last_hash:
+-                        os.remove(output_path)
+-                        continue
+-                    last_hash = frame_hash
++            chosen: list[int] = []  # 每个相似组里最终保留的帧下标
++            for i, (_, _, signature) in enumerate(frames):
++                if signature is None:
++                    chosen.append(i)
++                    continue
++                pos = next((p for p, j in enumerate(chosen) if is_similar(signature, frames[j][2])), None)
++                if pos is None:
++                    chosen.append(i)
++                elif has_more_detail(signature, frames[chosen[pos]][2]):
++                    chosen[pos] = i
+ 
+-                image_paths.append(output_path)
++            keep = set(chosen)
++            image_paths = []
++            for i, (_, output_path, _) in enumerate(frames):
++                if i in keep:
++                    image_paths.append(output_path)
++                else:
++                    os.remove(output_path)
+             return image_paths
+         except Exception as e:
+             logger.error(f"分割帧发生错误：{str(e)}")
+@@ -118,7 +125,7 @@ class VideoReader:
+ 
+         for path in image_paths:
+             img = Image.open(path).convert("RGB").resize((self.unit_width, self.unit_height), Image.Resampling.LANCZOS)
+-            timestamp = re.search(r"frame_(\d{2})_(\d{2})\.jpg", os.path.basename(path))
++            timestamp = re.search(r"frame_(\d{2,3})_(\d{2})\.jpg", os.path.basename(path))
+             time_text = f"{timestamp.group(1)}:{timestamp.group(2)}" if timestamp else ""
+             draw = ImageDraw.Draw(img)
+             draw.text((10, 10), time_text, fill="yellow", font=font, stroke_width=1, stroke_fill="black")
+@@ -166,10 +173,11 @@ class VideoReader:
+             logger.info("开始拼接网格图...")
+             image_paths = []
+             groups = self.group_images()
++            cells = self.grid_size[0] * self.grid_size[1]
+             for idx, group in enumerate(groups, start=1):
+-                if len(group) < self.grid_size[0] * self.grid_size[1]:
+-                    logger.warning(f"⚠️ 跳过第 {idx} 组，图片不足 {self.grid_size[0] * self.grid_size[1]} 张")
+-                    continue
++                if len(group) < cells:
++                    # 去重后可能只剩几张不同的画面，不足一组也要出图，否则模型一张截图都拿不到
++                    logger.info(f"第 {idx} 组只有 {len(group)} 张（不足 {cells} 张），空白格补齐")
+                 out_path = self.concat_images(group, f"grid_{idx}")
+                 image_paths.append(out_path)
+ 
+diff --git a/backend/tests/test_image_dedup.py b/backend/tests/test_image_dedup.py
+new file mode 100644
+index 0000000..dfdeb48
+--- /dev/null
++++ b/backend/tests/test_image_dedup.py
+@@ -0,0 +1,77 @@
++import pathlib
++import sys
++import tempfile
++import unittest
++
++import numpy as np
++from PIL import Image, ImageDraw
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++from app.utils.image_dedup import compute_signature, hamming_distance, has_more_detail, is_similar
++
++
++def make_slide(lines: int, dark: bool = False, cursor: bool = False, noise: int = 0) -> Image.Image:
++    bg, fg = ((30, 30, 30), (240, 240, 240)) if dark else ((255, 255, 255), (20, 20, 20))
++    img = Image.new("RGB", (1280, 720), bg)
++    draw = ImageDraw.Draw(img)
++    draw.rectangle([80, 50, 1200, 95], fill=fg)
++    for i in range(lines):
++        y = 150 + i * 60
++        draw.rectangle([120, y, 1000 - i * 30, y + 26], fill=fg)
++    if cursor:
++        draw.polygon([(600, 360), (600, 400), (626, 384)], fill=bg, outline=fg)
++    if noise:
++        arr = np.asarray(img, dtype=np.int16)
++        arr = np.clip(arr + np.random.default_rng(11).integers(-noise, noise + 1, arr.shape), 0, 255)
++        img = Image.fromarray(arr.astype(np.uint8))
++    return img
++
++
++class TestImageDedup(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls._tmp = tempfile.TemporaryDirectory()
++        cls.dir = pathlib.Path(cls._tmp.name)
++
++    @classmethod
++    def tearDownClass(cls):
++        cls._tmp.cleanup()
++
++    def _save(self, name: str, img: Image.Image, quality: int = 92) -> str:
++        path = self.dir / f"{name}.jpg"
++        img.save(path, quality=quality)
++        return str(path)
++
++    def test_identical_frames_are_similar(self):
++        slide = make_slide(3)
++        a = compute_signature(self._save("same_a", slide))
++        b = compute_signature(self._save("same_b", slide))
++        self.assertEqual(hamming_distance(a.dhash, b.dhash), 0)
++        self.assertTrue(is_similar(a, b))
++
++    def test_cursor_and_noise_do_not_break_similarity(self):
++        base = compute_signature(self._save("base", make_slide(3)))
++        with_cursor = compute_signature(self._save("cursor", make_slide(3, cursor=True)))
++        noisy = compute_signature(self._save("noisy", make_slide(3, noise=6)))
++        recompressed = compute_signature(self._save("recompressed", make_slide(3), quality=55))
++        self.assertTrue(is_similar(base, with_cursor))
++        self.assertTrue(is_similar(base, noisy))
++        self.assertTrue(is_similar(base, recompressed))
++
++    def test_different_slides_are_not_similar(self):
++        base = compute_signature(self._save("slide3", make_slide(3)))
++        more_content = compute_signature(self._save("slide6", make_slide(6)))
++        dark_theme = compute_signature(self._save("dark", make_slide(3, dark=True)))
++        self.assertFalse(is_similar(base, more_content))
++        self.assertFalse(is_similar(base, dark_theme))
++
++    def test_fuller_board_has_more_detail(self):
++        partial = compute_signature(self._save("partial", make_slide(3)))
++        fuller = compute_signature(self._save("fuller", make_slide(4)))
++        self.assertTrue(has_more_detail(fuller, partial))
++        self.assertFalse(has_more_detail(partial, fuller))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/backend/tests/test_markdown_toc.py b/backend/tests/test_markdown_toc.py
+new file mode 100644
+index 0000000..90fdeda
+--- /dev/null
++++ b/backend/tests/test_markdown_toc.py
+@@ -0,0 +1,145 @@
++import importlib.util
++import pathlib
++import unittest
++
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++MODULE_PATH = ROOT / "app" / "utils" / "markdown_toc.py"
++spec = importlib.util.spec_from_file_location("markdown_toc", MODULE_PATH)
++if spec is None or spec.loader is None:
++    raise ImportError("markdown_toc module spec not found")
++markdown_toc = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(markdown_toc)
++github_slug = markdown_toc.github_slug
++collect_heading_slugs = markdown_toc.collect_heading_slugs
++linkify_toc = markdown_toc.linkify_toc
++nest_example_headings = markdown_toc.nest_example_headings
++
++
++class TestGithubSlug(unittest.TestCase):
++    def test_matches_github_slugger(self):
++        """期望值全部由 github-slugger 1.5.0（前端 rehype-slug 依赖的版本）实跑得到。"""
++        cases = {
++            "第一节：基期倍比与两期比重差问题": "第一节基期倍比与两期比重差问题",
++            "0. 引入与题型定位": "0-引入与题型定位",
++            "AI 总结": "ai-总结",
++            "第三节 年均增长量与年均增长率（含公式）": "第三节-年均增长量与年均增长率含公式",
++            "①②③ 编号项": "-编号项",
++            "　全角空格　": "全角空格",
++            "Video: Introduction & Setup!": "video-introduction--setup",
++            "标题_with_underscore": "标题_with_underscore",
++            "React Hooks（一）：useState 与 useEffect": "react-hooks一usestate-与-useeffect",
++        }
++        for text, expected in cases.items():
++            with self.subTest(text=text):
++                self.assertEqual(github_slug(text), expected)
++
++    def test_duplicate_headings_get_numeric_suffix(self):
++        slugs = [slug for _, _, slug in collect_heading_slugs("# 小结\n\n## 小结\n\n## 小结")]
++        self.assertEqual(slugs, ["小结", "小结-1", "小结-2"])
++
++    def test_headings_inside_code_blocks_are_ignored(self):
++        markdown = "## 真标题\n\n```\n## 代码里的假标题\n```\n"
++        self.assertEqual([text for _, text, _ in collect_heading_slugs(markdown)], ["真标题"])
++
++
++class TestLinkifyToc(unittest.TestCase):
++    def test_plain_items_become_anchor_links(self):
++        markdown = (
++            "## 目录\n"
++            "- 0. 引入与题型定位\n"
++            "- AI 总结\n\n"
++            "## 0. 引入与题型定位\n\n正文\n\n"
++            "## AI 总结\n\n结尾\n"
++        )
++        result = linkify_toc(markdown)
++        self.assertIn("- [0. 引入与题型定位](#0-引入与题型定位)", result)
++        self.assertIn("- [AI 总结](#ai-总结)", result)
++
++    def test_wrong_anchor_is_corrected_and_label_kept(self):
++        markdown = "## 目录\n- [第一节：基期倍比](#第一节)\n\n## 第一节：基期倍比\n\n正文\n"
++        result = linkify_toc(markdown)
++        self.assertIn("- [第一节：基期倍比](#第一节基期倍比)", result)
++
++    def test_toc_item_abbreviating_numbered_heading_still_matches(self):
++        markdown = "## 目录\n- 第一节：基期倍比与两期比重差问题\n\n## 1. 第一节：基期倍比与两期比重差问题\n\n正文\n"
++        result = linkify_toc(markdown)
++        self.assertIn("(#1-第一节基期倍比与两期比重差问题)", result)
++
++    def test_unmatched_item_is_left_alone(self):
++        markdown = "## 目录\n- 不存在的章节\n\n## 真标题\n\n正文\n"
++        self.assertEqual(linkify_toc(markdown), markdown)
++
++    def test_body_section_named_like_toc_is_not_treated_as_toc(self):
++        markdown = (
++            "# 笔记\n\n## 第一章\n\n正文\n\n"
++            "## 目录结构详解\n\n- 根目录\n- 子目录\n"
++        )
++        self.assertEqual(linkify_toc(markdown), markdown)
++
++    def test_nested_and_ordered_items_keep_their_bullet(self):
++        markdown = "## 目录\n1. 第一章\n   - 小节一\n\n## 第一章\n\n### 小节一\n"
++        result = linkify_toc(markdown)
++        self.assertIn("1. [第一章](#第一章)", result)
++        self.assertIn("   - [小节一](#小节一)", result)
++
++
++class TestLinkifyTocMessyItems(unittest.TestCase):
++    """真实笔记里模型把目录条目写坏的两种样子，都要修成干净的单行链接。"""
++
++    def test_label_containing_nested_origin_link_is_cleaned(self):
++        markdown = (
++            "## 目录\n"
++            "- [二、基础公式 [原片 @ 00:08](https://x?t=8)](#二基础公式-content-0008)\n\n"
++            "## 二、基础公式\n\n正文\n"
++        )
++        result = linkify_toc(markdown)
++        self.assertIn("- [二、基础公式](#二基础公式)", result)
++        self.assertNotIn("]](", result)
++        self.assertNotIn("原片", result.split("## 二、基础公式\n\n正文")[0])
++
++    def test_multiline_label_is_joined_into_one_line(self):
++        markdown = (
++            "## 目录\n"
++            "- [三、基期量的比较\n"
++            "原片（03:30）\n"
++            "](#三基期量的比较-content-0330)\n\n"
++            "## 三、基期量的比较\n\n正文\n"
++        )
++        result = linkify_toc(markdown)
++        self.assertIn("- [三、基期量的比较](#三基期量的比较)", result)
++        self.assertNotIn("原片（03:30）", result)
++        self.assertNotIn("](#三基期量的比较-content-0330)", result)
++
++
++class TestNestExampleHeadings(unittest.TestCase):
++    def test_examples_go_one_level_under_their_predecessor(self):
++        markdown = (
++            "## 三、基期量的比较\n### 解法A｜加减法\n正文\n"
++            "### 例题1｜2021青海（05:12）\n正文\n### 例题2｜x（08:08）\n"
++            "### 解法B｜乘除\n### 例题3｜y\n"
++        )
++        result = nest_example_headings(markdown)
++        self.assertIn("#### 例题1｜2021青海（05:12）", result)
++        self.assertIn("#### 例题2｜x（08:08）", result)  # 连续例题与上一道同级
++        self.assertIn("#### 例题3｜y", result)
++        self.assertIn("### 解法A｜加减法", result)
++        self.assertIn("### 解法B｜乘除", result)
++
++    def test_example_directly_under_section(self):
++        markdown = "## 题型一\n### 识别信号\nx\n### 例题1｜a\n"
++        self.assertIn("#### 例题1｜a", nest_example_headings(markdown))
++
++    def test_headings_in_code_blocks_untouched(self):
++        markdown = "```\n### 例题99\n```\n## 节\n### 解法A\n### 例题1\n"
++        result = nest_example_headings(markdown)
++        self.assertIn("### 例题99", result)   # 代码块里的不动
++        self.assertIn("#### 例题1", result)   # 解法下的例题压一级
++
++    def test_example_directly_under_section_stays_one_level_deeper(self):
++        markdown = "## 节\n### 例题1\n"
++        self.assertIn("### 例题1", nest_example_headings(markdown))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/backend/tests/test_note_helper.py b/backend/tests/test_note_helper.py
+index 7ad2cb0..80b52b8 100644
+--- a/backend/tests/test_note_helper.py
++++ b/backend/tests/test_note_helper.py
+@@ -31,5 +31,30 @@ class TestNoteHelper(unittest.TestCase):
+         self.assertEqual(result, markdown)
+ 
+ 
++class TestReplaceContentMarkers(unittest.TestCase):
++    def test_bilibili_single_part_uses_question_mark(self):
++        result = note_helper.replace_content_markers("看这里 *Content-[02:43]*", "BV1h8Ng6cEv4", "bilibili")
++        self.assertEqual(result, "看这里 [原片 @ 02:43](https://www.bilibili.com/video/BV1h8Ng6cEv4?t=163)")
++
++    def test_bilibili_multi_part_keeps_p_then_t(self):
++        result = note_helper.replace_content_markers("Content-01:00", "BV1xx_p2", "bilibili")
++        self.assertEqual(result, "[原片 @ 01:00](https://www.bilibili.com/video/BV1xx?p=2&t=60)")
++
++    def test_minutes_over_99_are_replaced(self):
++        """100 分钟以上的课，模型会写 *Content-[102:47]*。"""
++        result = note_helper.replace_content_markers("*Content-[102:47]*", "BV1h8Ng6cEv4", "bilibili")
++        self.assertEqual(result, "[原片 @ 102:47](https://www.bilibili.com/video/BV1h8Ng6cEv4?t=6167)")
++
++    def test_surrounding_asterisks_are_consumed(self):
++        self.assertNotIn("*", note_helper.replace_content_markers("*Content-00:30*", "BV1xx", "bilibili"))
++
++    def test_youtube_and_other_platforms(self):
++        self.assertEqual(
++            note_helper.replace_content_markers("Content-[00:30]", "abc123", "youtube"),
++            "[原片 @ 00:30](https://www.youtube.com/watch?v=abc123&t=30s)",
++        )
++        self.assertEqual(note_helper.replace_content_markers("Content-[00:30]", "x", "local"), "(00:30)")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/backend/tests/test_note_task_guard.py b/backend/tests/test_note_task_guard.py
+new file mode 100644
+index 0000000..df6c54c
+--- /dev/null
++++ b/backend/tests/test_note_task_guard.py
+@@ -0,0 +1,45 @@
++import pathlib
++import sys
++import threading
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++from app.routers import note as note_router
++
++
++class TestDuplicateSubmitGuard(unittest.TestCase):
++    def test_same_task_submitted_twice_runs_once(self):
++        """抽帧加生成要几分钟，用户重复点「重试」时第二次必须被忽略——
++        否则两次 VideoReader.run() 会互相删掉对方的中间帧文件。"""
++        entered = threading.Event()
++        release = threading.Event()
++        calls = []
++
++        class FakeGenerator:
++            def generate(self, **kwargs):
++                calls.append(kwargs["task_id"])
++                entered.set()
++                release.wait(5)
++                return None
++
++        args = ("task-guard", "https://www.bilibili.com/video/BV1xx", "bilibili", "medium")
++        kwargs = {"model_name": "m", "provider_id": "p"}
++
++        with patch.object(note_router, "NoteGenerator", FakeGenerator):
++            first = threading.Thread(target=note_router.run_note_task, args=args, kwargs=kwargs)
++            first.start()
++            try:
++                self.assertTrue(entered.wait(5), "第一个任务没有进入执行")
++                note_router.run_note_task(*args, **kwargs)  # 重复提交，应立即返回
++            finally:
++                release.set()
++                first.join(10)
++
++        self.assertEqual(calls, ["task-guard"])
++        self.assertNotIn("task-guard", note_router._running_tasks)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/backend/tests/test_prompt_styles.py b/backend/tests/test_prompt_styles.py
+new file mode 100644
+index 0000000..65ff891
+--- /dev/null
++++ b/backend/tests/test_prompt_styles.py
+@@ -0,0 +1,168 @@
++import pathlib
++import sys
++import unittest
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++try:
++    from app.gpt.prompt import MERGE_PROMPT
++    from app.gpt.prompt_builder import generate_base_prompt, get_style_format, note_styles
++    IMPORT_ERROR = None
++except Exception as exc:  # 宿主没装 fastapi 时跳过，容器内会真正跑
++    IMPORT_ERROR = exc
++
++COURSE_STYLES = ("xingce_course", "shenlun_course")
++CHEATSHEET_STYLE = "xingce_cheatsheet"
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要后端依赖：{IMPORT_ERROR}")
++class TestNoteStyleCatalog(unittest.TestCase):
++    def test_every_listed_style_has_a_prompt(self):
++        """风格清单在三处各存一份，这里守住后端这份：列出来的都必须有提示词。"""
++        for entry in note_styles:
++            with self.subTest(style=entry["value"]):
++                self.assertTrue(get_style_format(entry["value"]).strip(), f"{entry['value']} 没有提示词")
++
++    def test_course_styles_are_listed(self):
++        labels = {entry["value"]: entry["label"] for entry in note_styles}
++        for style in COURSE_STYLES + (CHEATSHEET_STYLE,):
++            self.assertIn(style, labels)
++        self.assertEqual(labels["xingce_course"], "行测课程")
++        self.assertEqual(labels["shenlun_course"], "申论课程")
++        self.assertEqual(labels[CHEATSHEET_STYLE], "行测速查卡")
++
++    def test_unknown_style_degrades_to_empty(self):
++        self.assertEqual(get_style_format("not_a_style"), "")
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要后端依赖：{IMPORT_ERROR}")
++class TestCourseStylePrompt(unittest.TestCase):
++    def test_hard_requirements_come_first(self):
++        """轻量模型对靠前的指令遵循度更高；上一版把"截图要节制"写在最后，
++        模型理解成整体都要精简，直接把 9 道例题全删了（33582 字 → 9861 字）。"""
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("硬性要求（优先级最高", prompt)
++                self.assertIn("正文不许省略", prompt)
++                self.assertIn("绝不许为了少插图而删掉例题", prompt)
++                self.assertIn("截图有上限不代表正文可以缩短", prompt)
++                self.assertLess(prompt.index("硬性要求"), prompt.index("本节导读"))
++
++    def test_only_real_exam_questions_count_as_examples(self):
++        """用户反馈：老师为讲方法编的演示案例被写成了「例题3」。"""
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("只有真题才算例题", prompt)
++                self.assertIn("方法演示", prompt)
++                self.assertIn("不编号成例题", prompt)
++                self.assertIn("不要编造年份", prompt)
++
++    def test_example_order_is_title_screenshot_then_content(self):
++        """用户要求：标题 → 图片 → 题干 + 分步解析 + 答案。"""
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("`### 标题` → 截图 → 题干 → 分步解析 → 答案", prompt)
++                self.assertIn("标题下面单独一行写 `*Screenshot-[mm:ss]`", prompt)
++                self.assertLess(prompt.index("标题下面单独一行写"), prompt.index("**题干**"))
++
++    def test_organized_by_question_type_with_method_next_to_examples(self):
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("以题型为主线", prompt)
++                self.assertIn("主轴怎么选", prompt)
++                self.assertIn("方法与它的例题必须挨在一起", prompt)
++
++    def test_multiple_solutions_listed_with_choice_table(self):
++        """同一题型老师讲了多种解法时，要并列写清各自适用条件与考场首选。"""
++        for style, word in (("xingce_course", "解法"), ("shenlun_course", "思路")):
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn(f"{word}A", prompt)
++                self.assertIn(f"{word}B", prompt)
++                self.assertIn("适用条件", prompt)
++                self.assertIn("老师是否推荐", prompt)
++                self.assertIn("不许自己猜", prompt)
++
++    def test_screenshots_cover_lecturing_but_are_capped(self):
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("讲解处", prompt)
++                self.assertIn("每道例题最多 2 张", prompt)
++                self.assertIn("禁止连续插图", prompt)
++                self.assertIn("30 张上下", prompt)
++
++    def test_forbids_inventing_content_and_covers_missing_sections(self):
++        for style in COURSE_STYLES:
++            prompt = get_style_format(style)
++            with self.subTest(style=style):
++                self.assertIn("本节未涉及", prompt)
++                self.assertIn("不要编造", prompt)
++
++    def test_markers_only_when_format_requested(self):
++        """没勾原片截图/跳转时写标记，会在笔记里留下无法解析的原始文本。"""
++        for style in COURSE_STYLES + (CHEATSHEET_STYLE,):
++            with self.subTest(style=style):
++                self.assertIn("只有本次任务要求「原片截图」时", get_style_format(style))
++
++    def test_allows_minutes_over_99(self):
++        for style in COURSE_STYLES + (CHEATSHEET_STYLE,):
++            with self.subTest(style=style):
++                self.assertIn("分钟位可以超过 59", get_style_format(style))
++
++    def test_xingce_ends_with_lookup_table_and_checklist(self):
++        prompt = get_style_format("xingce_course")
++        for keyword in ("本节导读", "识别信号", "核心公式", "本题型易错点",
++                        "通用速算技巧", "全节速查表", "本节自测清单", "LaTeX"):
++            self.assertIn(keyword, prompt)
++
++    def test_shenlun_covers_framework_and_wording(self):
++        prompt = get_style_format("shenlun_course")
++        for keyword in ("审题要点", "材料找点方法", "答题框架", "规范表述对照",
++                        "参考答案", "大作文素材", "全节速查表"):
++            self.assertIn(keyword, prompt)
++
++    def test_cheatsheet_is_tables_only(self):
++        prompt = get_style_format(CHEATSHEET_STYLE)
++        self.assertIn("不要写例题正文", prompt)
++        self.assertIn("题型速查表", prompt)
++        self.assertIn("公式卡", prompt)
++        self.assertIn("秒杀技巧", prompt)
++        self.assertIn("速查卡一般不插图", prompt)
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要后端依赖：{IMPORT_ERROR}")
++class TestPromptAssembly(unittest.TestCase):
++    def test_style_is_appended_after_formats_and_before_extras(self):
++        prompt = generate_base_prompt(
++            title="资料分析系统课",
++            segment_text="00:00 - 开场",
++            tags=[],
++            _format=["toc", "screenshot"],
++            style="xingce_course",
++            extras="请多记公式",
++        )
++        toc_at = prompt.index("**目录**")
++        shot_at = prompt.index("**原片截图**")
++        style_at = prompt.index("行测课程（本次笔记风格）")
++        extras_at = prompt.index("请多记公式")
++        self.assertLess(toc_at, shot_at)
++        self.assertLess(shot_at, style_at)
++        self.assertLess(style_at, extras_at)
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要后端依赖：{IMPORT_ERROR}")
++class TestMergePrompt(unittest.TestCase):
++    def test_merge_keeps_style_and_screenshot_position(self):
++        """长视频分块合并时不带 style，风格与例题截图位置只能靠合并提示词兜住。"""
++        self.assertIn("写作风格", MERGE_PROMPT)
++        self.assertIn("Screenshot", MERGE_PROMPT)
++        self.assertIn("题干与解析之间", MERGE_PROMPT)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/backend/tests/test_screenshot_marker.py b/backend/tests/test_screenshot_marker.py
+index f947ef8..98c6991 100644
+--- a/backend/tests/test_screenshot_marker.py
++++ b/backend/tests/test_screenshot_marker.py
+@@ -11,6 +11,10 @@ if spec is None or spec.loader is None:
+ screenshot_marker = importlib.util.module_from_spec(spec)
+ spec.loader.exec_module(screenshot_marker)
+ extract_screenshot_timestamps = screenshot_marker.extract_screenshot_timestamps
++drop_screenshot_marker = screenshot_marker.drop_screenshot_marker
++lift_markers_out_of_headings = screenshot_marker.lift_markers_out_of_headings
++collapse_image_runs = screenshot_marker.collapse_image_runs
++move_first_image_under_heading = screenshot_marker.move_first_image_under_heading
+ 
+ 
+ class TestScreenshotMarker(unittest.TestCase):
+@@ -31,5 +35,117 @@ class TestScreenshotMarker(unittest.TestCase):
+         )
+ 
+ 
++class TestDropScreenshotMarker(unittest.TestCase):
++    def test_removes_whole_line_when_marker_alone(self):
++        markdown = "## 小节\n*Screenshot-[01:02]\n正文"
++        self.assertEqual(drop_screenshot_marker(markdown, "*Screenshot-[01:02]"), "## 小节\n正文")
++
++    def test_removes_inline_marker_only(self):
++        markdown = "看图 *Screenshot-[01:02] 说明"
++        self.assertEqual(drop_screenshot_marker(markdown, "*Screenshot-[01:02]"), "看图  说明")
++
++    def test_noop_when_marker_absent(self):
++        markdown = "## 小节\n正文"
++        self.assertEqual(drop_screenshot_marker(markdown, "*Screenshot-[09:09]"), markdown)
++
++
++class TestLongVideoTimestamps(unittest.TestCase):
++    def test_minutes_over_99_are_parsed(self):
++        """100 分钟以上的课，模型会写 *Screenshot-[102:47]*。"""
++        matches = extract_screenshot_timestamps("*Screenshot-[102:47] 和 Screenshot-100:05")
++        self.assertEqual(matches, [("*Screenshot-[102:47]", 6167), ("Screenshot-100:05", 6005)])
++
++
++class TestLiftMarkersOutOfHeadings(unittest.TestCase):
++    def test_content_marker_moves_below_heading(self):
++        markdown = "## 4. 全课总结 *Content-[102:47]*\n\n正文"
++        self.assertEqual(
++            lift_markers_out_of_headings(markdown),
++            "## 4. 全课总结\n*Content-[102:47]*\n\n正文",
++        )
++
++    def test_screenshot_marker_moves_below_heading(self):
++        self.assertEqual(
++            lift_markers_out_of_headings("## 小节 *Screenshot-[01:02]*"),
++            "## 小节\n*Screenshot-[01:02]*",
++        )
++
++    def test_body_lines_and_code_blocks_are_untouched(self):
++        markdown = "正文里的 *Content-[00:05]*\n\n```\n## 代码块里的标题 *Content-[00:06]*\n```"
++        self.assertEqual(lift_markers_out_of_headings(markdown), markdown)
++
++
++class TestCollapseImageRuns(unittest.TestCase):
++    def test_consecutive_images_keep_only_the_first(self):
++        markdown = "![](a.jpg)\n![](b.jpg)\n\n![](c.jpg)\n正文\n![](d.jpg)"
++        result, dropped = collapse_image_runs(markdown)
++        self.assertEqual(result, "![](a.jpg)\n\n正文\n![](d.jpg)")
++        self.assertEqual(dropped, ["b.jpg", "c.jpg"])
++
++    def test_heading_between_images_breaks_the_run(self):
++        """两道例题各自的题干图之间隔着标题，不能当成连插删掉。"""
++        markdown = "![](a.jpg)\n\n### 例题2\n\n![](b.jpg)"
++        result, dropped = collapse_image_runs(markdown)
++        self.assertEqual(dropped, [])
++        self.assertEqual(result, markdown)
++
++    def test_explanation_between_images_keeps_both(self):
++        markdown = "![](a.jpg)\n这一步先列式\n![](b.jpg)"
++        _, dropped = collapse_image_runs(markdown)
++        self.assertEqual(dropped, [])
++
++    def test_indented_and_titled_images_are_still_detected(self):
++        markdown = "  ![](a.jpg)  \n![](b.jpg)"
++        _, dropped = collapse_image_runs(markdown)
++        self.assertEqual(dropped, ["b.jpg"])
++
++
++class TestMoveFirstImageUnderHeading(unittest.TestCase):
++    """轻量模型总把截图写到小节末尾（实测 43 个小节全部如此），必须在代码里搬回标题下。"""
++
++    def test_image_at_section_end_moves_under_heading(self):
++        markdown = "### 例题1｜2024浙江（06:18）\n**题干**：xxx\n**分步解析**：yyy\n**答案**：D\n![](a.jpg)"
++        self.assertEqual(
++            move_first_image_under_heading(markdown),
++            "### 例题1｜2024浙江（06:18）\n![](a.jpg)\n**题干**：xxx\n**分步解析**：yyy\n**答案**：D",
++        )
++
++    def test_image_goes_after_origin_link(self):
++        markdown = "## 题型一\n[原片 @ 01:00](https://x?t=60)\n识别信号\n![](a.jpg)"
++        lines = move_first_image_under_heading(markdown).split("\n")
++        self.assertEqual(lines[1], "[原片 @ 01:00](https://x?t=60)")
++        self.assertEqual(lines[2], "![](a.jpg)")
++        self.assertEqual(lines[3], "识别信号")
++
++    def test_image_already_in_place_is_untouched(self):
++        markdown = "## 小节\n![](a.jpg)\n正文"
++        self.assertEqual(move_first_image_under_heading(markdown), markdown)
++
++    def test_only_the_first_image_moves(self):
++        markdown = "## 小节\n开头\n![](a.jpg)\n中间\n![](b.jpg)\n结尾"
++        self.assertEqual(
++            move_first_image_under_heading(markdown),
++            "## 小节\n![](a.jpg)\n开头\n中间\n![](b.jpg)\n结尾",
++        )
++
++    def test_images_inside_code_blocks_are_ignored(self):
++        markdown = "## 小节\n```\n![](code.jpg)\n```\n正文\n![](real.jpg)"
++        self.assertEqual(
++            move_first_image_under_heading(markdown),
++            "## 小节\n![](real.jpg)\n```\n![](code.jpg)\n```\n正文",
++        )
++
++    def test_image_before_any_heading_stays(self):
++        markdown = "![](a.jpg)\n## 小节\n正文"
++        self.assertEqual(move_first_image_under_heading(markdown), markdown)
++
++    def test_each_section_moves_its_own_image(self):
++        markdown = "## 甲\n甲正文\n![](a.jpg)\n## 乙\n乙正文\n![](b.jpg)"
++        self.assertEqual(
++            move_first_image_under_heading(markdown),
++            "## 甲\n![](a.jpg)\n甲正文\n## 乙\n![](b.jpg)\n乙正文",
++        )
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/backend/tests/test_transcriber_idle_unload.py b/backend/tests/test_transcriber_idle_unload.py
+new file mode 100644
+index 0000000..809026f
+--- /dev/null
++++ b/backend/tests/test_transcriber_idle_unload.py
+@@ -0,0 +1,75 @@
++import pathlib
++import sys
++import time
++import unittest
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++try:
++    from app.transcriber import transcriber_provider as tp
++    from app.transcriber.transcriber_provider import (
++        TranscriberType,
++        touch_transcriber,
++        unload_idle_transcribers,
++    )
++    IMPORT_ERROR = None
++except Exception as exc:  # 宿主没装 faster-whisper 时跳过，容器内会真跑
++    IMPORT_ERROR = exc
++
++
++class _Fake:
++    def __init__(self):
++        self.unloaded = 0
++
++    def unload(self):
++        self.unloaded += 1
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要 faster-whisper：{IMPORT_ERROR}")
++class TestIdleUnload(unittest.TestCase):
++    def setUp(self):
++        self._saved_transcribers = dict(tp._transcribers)
++        self._saved_last_used = dict(tp._last_used)
++
++    def tearDown(self):
++        tp._transcribers.clear()
++        tp._transcribers.update(self._saved_transcribers)
++        tp._last_used.clear()
++        tp._last_used.update(self._saved_last_used)
++
++    def test_idle_instance_is_unloaded_and_cache_cleared(self):
++        fake = _Fake()
++        tp._transcribers[TranscriberType.FAST_WHISPER] = fake
++        tp._last_used[TranscriberType.FAST_WHISPER] = time.monotonic() - 700
++        unloaded = unload_idle_transcribers(600)
++        self.assertEqual(unloaded, [TranscriberType.FAST_WHISPER])
++        self.assertEqual(fake.unloaded, 1)
++        self.assertIsNone(tp._transcribers[TranscriberType.FAST_WHISPER])
++        self.assertIsNone(tp._transcriber_configs[TranscriberType.FAST_WHISPER])
++
++    def test_recently_used_instance_is_kept(self):
++        fake = _Fake()
++        tp._transcribers[TranscriberType.FAST_WHISPER] = fake
++        touch_transcriber(TranscriberType.FAST_WHISPER)
++        self.assertEqual(unload_idle_transcribers(600), [])
++        self.assertEqual(fake.unloaded, 0)
++        self.assertIs(tp._transcribers[TranscriberType.FAST_WHISPER], fake)
++
++    def test_instance_without_unload_method_is_still_dropped(self):
++        tp._transcribers[TranscriberType.BCUT] = object()
++        tp._last_used[TranscriberType.BCUT] = time.monotonic() - 700
++        self.assertEqual(unload_idle_transcribers(600), [TranscriberType.BCUT])
++
++    def test_whisper_unload_clears_model_and_is_idempotent(self):
++        from app.transcriber.whisper import WhisperTranscriber
++
++        transcriber = WhisperTranscriber.__new__(WhisperTranscriber)  # 不加载真模型
++        transcriber.model = object()
++        transcriber.unload()
++        self.assertIsNone(transcriber.model)
++        transcriber.unload()  # 重复调用不能炸
++        self.assertIsNone(transcriber.model)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/backend/tests/test_video_reader_dedupe.py b/backend/tests/test_video_reader_dedupe.py
+index 25d4e04..e1b539e 100644
+--- a/backend/tests/test_video_reader_dedupe.py
++++ b/backend/tests/test_video_reader_dedupe.py
+@@ -1,141 +1,115 @@
+-import importlib.util
+ import pathlib
+ import re
+ import sys
+ import tempfile
+-import types
+ import unittest
+ from unittest.mock import patch
+ 
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+ 
+-def _install_stubs():
+-    app_mod = types.ModuleType("app")
+-    utils_pkg = types.ModuleType("app.utils")
++from PIL import Image, ImageDraw
+ 
+-    logger_mod = types.ModuleType("app.utils.logger")
++from app.utils.video_reader import VideoReader
++from app.utils import video_reader as video_reader_module
+ 
+-    class _Logger:
+-        @staticmethod
+-        def info(*_args, **_kwargs):
+-            return None
+ 
+-        @staticmethod
+-        def warning(*_args, **_kwargs):
+-            return None
++def make_slide(lines: int, cursor: bool = False, chart: bool = False, extra_line: bool = False) -> Image.Image:
++    """造一张"课件"：白底 + 标题条 + lines 行正文条。"""
++    img = Image.new("RGB", (1280, 720), (255, 255, 255))
++    draw = ImageDraw.Draw(img)
++    draw.rectangle([80, 50, 1200, 95], fill=(20, 20, 20))
++    for i in range(lines):
++        y = 150 + i * 60
++        draw.rectangle([120, y, 1000 - i * 30, y + 26], fill=(20, 20, 20))
++    if extra_line:
++        # 模拟老师又补了一行板书：画面几乎没变，但内容更全
++        draw.rectangle([120, 400, 720, 412], fill=(20, 20, 20))
++    if chart:
++        draw.rectangle([820, 460, 1200, 680], outline=(20, 20, 20), width=5)
++        draw.line([(850, 650), (950, 520), (1050, 600), (1170, 480)], fill=(200, 40, 40), width=6)
++    if cursor:
++        draw.polygon([(600, 360), (600, 400), (626, 384)], fill=(255, 255, 255), outline=(0, 0, 0))
++    return img
+ 
+-        @staticmethod
+-        def error(*_args, **_kwargs):
+-            return None
+ 
+-    def _get_logger(_name):
+-        return _Logger()
+-
+-    logger_mod.get_logger = _get_logger
+-
+-    path_helper_mod = types.ModuleType("app.utils.path_helper")
+-    ffmpeg_mod = types.ModuleType("ffmpeg")
+-
+-    pil_mod = types.ModuleType("PIL")
+-    pil_image_mod = types.ModuleType("PIL.Image")
+-    pil_draw_mod = types.ModuleType("PIL.ImageDraw")
+-    pil_font_mod = types.ModuleType("PIL.ImageFont")
+-
+-    class _FakeImage:
+-        pass
+-
+-    class _FakeImageDraw:
+-        @staticmethod
+-        def Draw(*_args, **_kwargs):
+-            return None
+-
+-    class _FakeImageFont:
+-        @staticmethod
+-        def truetype(*_args, **_kwargs):
+-            return None
+-
+-        @staticmethod
+-        def load_default():
+-            return None
+-
+-    pil_image_mod.Image = _FakeImage
+-    pil_draw_mod.ImageDraw = _FakeImageDraw
+-    pil_font_mod.ImageFont = _FakeImageFont
+-
+-    def _get_app_dir(name):
+-        return name
+-
+-    path_helper_mod.get_app_dir = _get_app_dir
+-    ffmpeg_mod.probe = lambda *_args, **_kwargs: {"format": {"duration": "0"}}
+-
+-    sys.modules.setdefault("app", app_mod)
+-    sys.modules.setdefault("app.utils", utils_pkg)
+-    sys.modules["PIL"] = pil_mod
+-    sys.modules["PIL.Image"] = pil_image_mod
+-    sys.modules["PIL.ImageDraw"] = pil_draw_mod
+-    sys.modules["PIL.ImageFont"] = pil_font_mod
+-    sys.modules["ffmpeg"] = ffmpeg_mod
+-    sys.modules["app.utils.logger"] = logger_mod
+-    sys.modules["app.utils.path_helper"] = path_helper_mod
+-
+-
+-def _load_video_reader_module():
+-    _install_stubs()
+-    root = pathlib.Path(__file__).resolve().parents[1]
+-    module_path = root / "app" / "utils" / "video_reader.py"
+-    spec = importlib.util.spec_from_file_location("video_reader", module_path)
+-    if spec is None or spec.loader is None:
+-        raise ImportError("video_reader module spec not found")
+-    module = importlib.util.module_from_spec(spec)
+-    spec.loader.exec_module(module)
+-    return module
+-
+-
+-video_reader_module = _load_video_reader_module()
+-VideoReader = video_reader_module.VideoReader
+-
+-
+-def _make_fake_ffmpeg_runner(colors_by_second):
++def _make_fake_ffmpeg_runner(images_by_second):
+     def _runner(cmd, check=True):
+         output_path = next((arg for arg in cmd if isinstance(arg, str) and arg.endswith(".jpg")), None)
+         if output_path is None:
+             raise AssertionError("Output path not found in ffmpeg cmd")
+-        match = re.search(r"frame_(\d{2})_(\d{2})\.jpg$", output_path)
++        match = re.search(r"frame_(\d{2,3})_(\d{2})\.jpg$", output_path)
+         if match is None:
+-            raise AssertionError("Unexpected output path")
++            raise AssertionError(f"Unexpected output path: {output_path}")
+         sec = int(match.group(1)) * 60 + int(match.group(2))
+-        payload = colors_by_second[sec]
+-        with open(output_path, "wb") as f:
+-            f.write(payload)
++        images_by_second[sec].save(output_path, quality=92)
+         return 0
+ 
+     return _runner
+ 
+ 
+ class TestVideoReaderDeduplicateFrames(unittest.TestCase):
+-    def test_extract_frames_skips_adjacent_duplicates_when_enabled(self):
++    def _run(self, images_by_second, action, duration=None, **reader_kwargs):
+         with tempfile.TemporaryDirectory() as tmp_dir:
+-            frame_dir = pathlib.Path(tmp_dir) / "frames"
+-            grid_dir = pathlib.Path(tmp_dir) / "grids"
+             reader = VideoReader(
+                 video_path="dummy.mp4",
+                 frame_interval=1,
+-                frame_dir=str(frame_dir),
+-                grid_dir=str(grid_dir),
++                frame_dir=str(pathlib.Path(tmp_dir) / "frames"),
++                grid_dir=str(pathlib.Path(tmp_dir) / "grids"),
++                **reader_kwargs,
+             )
+-
+-            fake_colors = {
+-                0: b"frame-a",
+-                1: b"frame-a",
+-                2: b"frame-b",
+-                3: b"frame-b",
+-            }
+-
+-            with patch.object(video_reader_module.ffmpeg, "probe", return_value={"format": {"duration": "4"}}), \
+-                    patch.object(video_reader_module.subprocess, "run", side_effect=_make_fake_ffmpeg_runner(fake_colors)):
+-                paths = reader.extract_frames(max_frames=10)
+-
+-            names = [pathlib.Path(p).name for p in paths]
+-            self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
++            duration = str(duration if duration is not None else max(images_by_second) + 1)
++            with patch.object(video_reader_module.ffmpeg, "probe",
++                              return_value={"format": {"duration": duration}}), \
++                    patch.object(video_reader_module.subprocess, "run",
++                                 side_effect=_make_fake_ffmpeg_runner(images_by_second)):
++                return action(reader), pathlib.Path(reader.frame_dir)
++
++    def _extract(self, images_by_second, max_frames=10, duration=None, **reader_kwargs):
++        (paths, frame_dir) = self._run(images_by_second, lambda r: r.extract_frames(max_frames=max_frames),
++                                       duration=duration, **reader_kwargs)
++        return [pathlib.Path(p).name for p in paths], frame_dir
++
++    def test_skips_identical_adjacent_frames(self):
++        same = make_slide(3)
++        other = make_slide(3, chart=True)
++        names, _ = self._extract({0: same, 1: same, 2: other, 3: other})
++        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
++
++    def test_skips_visually_similar_frames(self):
++        """同一页课件只是多了个鼠标指针 → 只留一张；换了一页 → 保留。"""
++        names, _ = self._extract({0: make_slide(3), 1: make_slide(3, cursor=True), 2: make_slide(5)})
++        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
++
++    def test_keeps_the_more_complete_frame_of_a_similar_group(self):
++        """板书逐渐写满时留下写满的那一帧，网格图上的时间水印也跟着更新。"""
++        names, _ = self._extract({0: make_slide(3), 1: make_slide(3, extra_line=True)})
++        self.assertEqual(names, ["frame_00_01.jpg"])
++
++    def test_long_video_stretches_step_to_reach_the_tail(self):
++        """帧数有上限时自动放大步长：30 秒视频、间隔 1 秒、上限 5 帧 → 步长 6 秒，覆盖到片尾。"""
++        slides = {0: make_slide(1), 6: make_slide(3), 12: make_slide(5), 18: make_slide(7), 24: make_slide(9)}
++        names, _ = self._extract(slides, max_frames=5, duration=30)
++        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_06.jpg", "frame_00_12.jpg",
++                                 "frame_00_18.jpg", "frame_00_24.jpg"])
++
++    def test_keeps_everything_when_dedupe_disabled(self):
++        same = make_slide(3)
++        names, _ = self._extract({0: same, 1: same}, dedupe_enabled=False)
++        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_01.jpg"])
++
++    def test_duplicate_frame_files_are_deleted(self):
++        same = make_slide(3)
++        names, frame_dir = self._extract({0: same, 1: same, 2: make_slide(6)})
++        self.assertEqual(names, ["frame_00_00.jpg", "frame_00_02.jpg"])
++        self.assertFalse((frame_dir / "frame_00_01.jpg").exists())
++
++    def test_run_still_emits_grid_when_frames_are_fewer_than_cells(self):
++        """去重后只剩 2 张、网格是 2x2 时也要出图，否则模型一张截图都拿不到。"""
++        same = make_slide(3)
++        (urls, _) = self._run({0: same, 1: same, 2: make_slide(3, chart=True)},
++                              lambda r: r.run(), grid_size=(2, 2))
++        self.assertEqual(len(urls), 1)
++        self.assertTrue(urls[0].startswith("data:image/jpeg;base64,"))
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/backend/tests/test_whisper_transcript.py b/backend/tests/test_whisper_transcript.py
+new file mode 100644
+index 0000000..ad5036b
+--- /dev/null
++++ b/backend/tests/test_whisper_transcript.py
+@@ -0,0 +1,81 @@
++import json
++import pathlib
++import sys
++import unittest
++from dataclasses import asdict
++from unittest.mock import MagicMock
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++try:
++    from app.transcriber.whisper import WhisperTranscriber, transcription_info_to_dict
++    IMPORT_ERROR = None
++except Exception as exc:  # 宿主没装 faster-whisper 时跳过，容器内会真跑
++    IMPORT_ERROR = exc
++
++
++class _FakeInfo:
++    """faster-whisper 的 TranscriptionInfo：不是 dict，原样塞进 raw 会让 json.dumps 炸掉。"""
++
++    language = "zh"
++    language_probability = 0.99
++    duration = 12.3
++    model_id = "large-v3-turbo"
++    device = "cuda"
++    compute_type = "float16"
++    all_language_probs = [("zh", 0.99)]  # 不该被带进 raw 的字段
++
++
++class _FakeSegment:
++    def __init__(self, start, end, text):
++        self.start, self.end, self.text = start, end, text
++
++
++@unittest.skipIf(IMPORT_ERROR is not None, f"需要 faster-whisper：{IMPORT_ERROR}")
++class TestWhisperTranscript(unittest.TestCase):
++    def _transcriber_with(self, transcribe):
++        # 跳过 __init__（那会去加载真模型），只测 transcript() 的行为
++        transcriber = WhisperTranscriber.__new__(WhisperTranscriber)
++        transcriber.model = MagicMock()
++        transcriber.model.transcribe = transcribe
++        return transcriber
++
++    def test_failure_is_raised_not_swallowed(self):
++        """原来 except 里只 print、隐式返回 None，上层 asdict(None) 报的是
++        "asdict() should be called on dataclass instances"，真正的错因被埋掉。"""
++        transcriber = self._transcriber_with(
++            MagicMock(side_effect=RuntimeError("Library libcublas.so.12 is not found or cannot be loaded"))
++        )
++        with self.assertRaises(RuntimeError) as ctx:
++            transcriber.transcript("audio.mp3")
++        self.assertIn("libcublas", str(ctx.exception))
++
++    def test_result_can_be_written_to_transcript_cache(self):
++        """上层就是用 json.dumps(asdict(transcript)) 写缓存的，raw 必须可序列化。"""
++        transcriber = self._transcriber_with(
++            MagicMock(return_value=(iter([_FakeSegment(0.0, 1.5, " 你好 ")]), _FakeInfo()))
++        )
++        result = transcriber.transcript("audio.mp3")
++        dumped = json.loads(json.dumps(asdict(result), ensure_ascii=False))
++        self.assertEqual(dumped["language"], "zh")
++        self.assertEqual(dumped["full_text"], "你好")
++        self.assertEqual(dumped["segments"], [{"start": 0.0, "end": 1.5, "text": "你好"}])
++        self.assertEqual(dumped["raw"]["device"], "cuda")
++        self.assertNotIn("all_language_probs", dumped["raw"])
++
++    def test_info_to_dict_tolerates_missing_fields(self):
++        self.assertEqual(
++            transcription_info_to_dict(object()),
++            {
++                "language": None,
++                "language_probability": None,
++                "duration": None,
++                "model_id": None,
++                "device": None,
++                "compute_type": None,
++            },
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
