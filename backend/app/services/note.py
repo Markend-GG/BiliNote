@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import threading
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -69,6 +70,22 @@ IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 # 会被 lastResort（只放 WARNING 及以上）吞掉——"检测到转写缓存""截图整理：N 个标记 → 保留 M 张"
 # "任务进入执行队列"这些关键节点在 backend.log 里全都看不到，排查时只能靠猜。
 logger = get_logger(__name__)
+
+# 同一个视频被并发下载时（例如同时生成「行测课程」和「行测速查卡」），yt-dlp 写的是同一个
+# {video_id}.mp4.part：先完成的那个把 .part 改名成正式文件，后一个 rename 就撞
+# [Errno 2] No such file or directory，整篇笔记 FAILED（实测过一次，白烧一遍 API 额度）。
+# 按视频 URL 串行化下载：第二个任务等第一个下完，然后走缓存命中，几乎不额外花时间。
+# 锁只包住下载本身，抽帧（每次运行独立目录）和 LLM 调用都不在锁里。
+_download_locks: dict = {}
+_download_locks_guard = threading.Lock()
+
+
+def _download_lock(key: str) -> threading.Lock:
+    with _download_locks_guard:
+        lock = _download_locks.get(key)
+        if lock is None:
+            lock = _download_locks[key] = threading.Lock()
+        return lock
 
 
 class NoteGenerator:
@@ -456,12 +473,13 @@ class NoteGenerator:
         # 下载音频
         try:
             logger.info("开始下载音频")
-            audio = downloader.download(
-                video_url=video_url,
-                quality=quality,
-                output_dir=output_path,
-                need_video=need_video,
-            )
+            with _download_lock(video_url):
+                audio = downloader.download(
+                    video_url=video_url,
+                    quality=quality,
+                    output_dir=output_path,
+                    need_video=need_video,
+                )
             audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
             return audio
@@ -494,7 +512,8 @@ class NoteGenerator:
         grid_dir = Path(get_app_dir("grid_output")) / run_dir
         try:
             logger.info("开始下载视频")
-            video_path_str = downloader.download_video(video_url)
+            with _download_lock(video_url):
+                video_path_str = downloader.download_video(video_url)
             self.video_path = Path(video_path_str)
             logger.info(f"视频下载完成：{self.video_path}")
 

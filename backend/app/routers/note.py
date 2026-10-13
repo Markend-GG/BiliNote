@@ -136,6 +136,35 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 _running_tasks: set[str] = set()
 _running_tasks_lock = threading.Lock()
 
+# 光按 task_id 挡不住"一次点击发出两个请求"：实测两个新 task_id 只差 0.5ms，
+# 同视频同风格并发跑时两份 yt-dlp 写同一个 {video_id}.mp4.part，后完成的那个 rename 撞
+# Errno 2 → 白烧一次 API 额度、书架上还多一条 FAILED 笔记。所以再按 (视频, 风格) 去重。
+_inflight_keys: dict[str, str] = {}
+_key_by_task: dict[str, str] = {}
+
+
+def _submit_key(video_id: str, video_url: str, style: str) -> str:
+    return f"{video_id or video_url}|{style or ''}"
+
+
+def _claim_submit(key: str, task_id: str) -> Optional[str]:
+    """登记本次提交。若同视频同风格已有任务在跑，返回它的 task_id 让调用方直接复用。"""
+    with _running_tasks_lock:
+        existing = _inflight_keys.get(key)
+        if existing and existing != task_id:
+            return existing
+        _inflight_keys[key] = task_id
+        _key_by_task[task_id] = key
+        return None
+
+
+def _release_submit(task_id: str) -> None:
+    with _running_tasks_lock:
+        _running_tasks.discard(task_id)
+        key = _key_by_task.pop(task_id, None)
+        if key and _inflight_keys.get(key) == task_id:
+            _inflight_keys.pop(key, None)
+
 
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
@@ -156,8 +185,7 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         _run_note_task_inner(task_id, video_url, platform, quality, link, screenshot, model_name, provider_id,
                              _format, style, extras, video_understanding, video_interval, grid_size)
     finally:
-        with _running_tasks_lock:
-            _running_tasks.discard(task_id)
+        _release_submit(task_id)
 
 
 def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
@@ -344,6 +372,13 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         else:
             # 正常新建任务
             task_id = str(uuid.uuid4())
+
+        # 同视频同风格已经在跑就把那个 task_id 还回去：前端继续显示同一个任务的进度，
+        # 而不是再起一份注定撞下载文件名的任务
+        duplicate_of = _claim_submit(_submit_key(video_id, data.video_url, data.style), task_id)
+        if duplicate_of:
+            logger.warning(f"同一视频同一风格的任务已在生成中（{duplicate_of}），忽略这次重复提交")
+            return R.success({"task_id": duplicate_of, "deduped": True})
 
         # 统一先写入 PENDING，表示已进入队列等待串行执行
         NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
