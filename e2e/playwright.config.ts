@@ -7,6 +7,7 @@ export default defineConfig({
   testDir: './tests',
   timeout: 60_000,
   retries: 0,
+  globalSetup: './global-setup.ts',
   // 单 worker：每个用例都要渲染两三万字的笔记，3 个 worker 并跑时 CPU 争用会让
   // scroll-spy 这类"滚动后等高亮变化"的用例偶发超时（单跑 3.9s 过、并跑挂）。
   // 整套 14 例串行也只要 45 秒左右，确定性比这点时间值钱。
