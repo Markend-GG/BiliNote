@@ -27,6 +27,21 @@ index 179b969..08b39eb 100644
 +
 +# 文档图片（不参与构建）
 +doc
+diff --git a/.gitignore b/.gitignore
+index f2a9421..e354ec7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -326,4 +326,8 @@ cython_debug/
+ 
+ # FFmpeg 构建文件（不应该提交到仓库）
+ ffmpeg*/
+-ffmpg*/
+\ No newline at end of file
++ffmpg*/
++# Playwright e2e 产物
++e2e/test-results/
++e2e/playwright-report/
++e2e/blob-report/
 diff --git a/BillNote_extension/src/logic/types.ts b/BillNote_extension/src/logic/types.ts
 index b729ae8..26236ff 100644
 --- a/BillNote_extension/src/logic/types.ts
