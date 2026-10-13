@@ -454,11 +454,14 @@ def get_task_status(task_id: str):
             "task_id": task_id
         })
 
-    # 什么都没有，默认PENDING
+    # 什么都没有：后端没有这个任务的任何记录。提交路径是【同步】写完 status 文件才返回
+    # task_id 的，所以真任务一定查得到——known=False 让前端能区分"刚提交"和"根本没这个任务"，
+    # 否则浏览器里残留的旧任务会被永久当成"排队中"无限轮询下去。
     return R.success({
         "status": TaskStatus.PENDING.value,
-        "message": "任务排队中",
-        "task_id": task_id
+        "message": "后端没有这个任务的记录",
+        "task_id": task_id,
+        "known": False,
     })
 
 

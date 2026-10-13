@@ -8,6 +8,21 @@ export interface IResponse<T = any> {
   data: T;
 }
 
+/**
+ * 网络层失败时 reject 出来的对象。除了 { code, msg, data } 还带上"失败性质"，
+ * 因为调用方必须能区分：
+ *   - 超时（isTimeout）：请求可能已经送达、服务端可能已经在干活了 → 结果是"未知"，不是"失败"
+ *   - 连不上（status 为空）：请求根本没到服务端 → 可以安全重发
+ * 以前一律压成 "请求失败，请检查网络连接"，轮询把超时当成任务 FAILED，
+ * 界面显示生成失败而后端还在跑，用户再点一次就多烧一遍 API 额度。
+ */
+export interface RequestFailure extends IResponse<null> {
+  /** 客户端超时（axios ECONNABORTED）：服务端可能已经收到并在执行 */
+  isTimeout?: boolean
+  /** HTTP 状态码；连不上/超时时为 undefined */
+  status?: number
+}
+
 // 允许调用方在 axios 配置里带 suppressToast: true，让拦截器对【预期内的失败】
 // 不弹全局红 toast（例如 onboarding 撞名重试、轮询健康检查）。业务代码自己 catch 处理。
 declare module 'axios' {
@@ -50,16 +65,19 @@ request.interceptors.response.use(
     if (res) {
       // 如果后端有返回错误信息，则显示后端信息
       if (!suppress) toast.error(res.msg || '服务器错误，请稍后再试');
-      return Promise.reject(res);
-    } else {
-      // 没有响应数据（如网络中断），显示通用网络错误
-      if (!suppress) toast.error('请求失败，请检查网络连接或稍后再试')
-      return Promise.reject({
-        code: -1,
-        msg: '请求失败，请检查网络连接',
-        data: null
-      } as IResponse);
+      return Promise.reject({ ...res, status: error.response.status } as RequestFailure);
     }
+    const isTimeout = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message ?? ''))
+    if (!suppress) {
+      toast.error(isTimeout ? '请求超时，服务端可能仍在处理' : '请求失败，请检查网络连接或稍后再试')
+    }
+    return Promise.reject({
+      code: -1,
+      msg: isTimeout ? '请求超时' : '请求失败，请检查网络连接',
+      data: null,
+      isTimeout,
+      status: undefined,
+    } as RequestFailure);
   }
 );
 

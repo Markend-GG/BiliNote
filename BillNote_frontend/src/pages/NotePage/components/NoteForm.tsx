@@ -7,7 +7,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form.tsx'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm, useWatch, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -50,7 +50,10 @@ const formSchema = z
     quality: z.enum(['fast', 'medium', 'slow']),
     screenshot: z.boolean().optional(),
     link: z.boolean().optional(),
-    model_name: z.string().nonempty('请选择模型'),
+    // 不在 schema 里强制非空：只有一个可用模型时用户没必要手动选，提交时会解析出真正要用的
+    // 那个模型（解析不出来才报错并引导去添加）。以前是 nonempty + 默认值异步到达，
+    // 结果新建时点「生成笔记」静默失败，只在字段下冒一行小字
+    model_name: z.string(),
     format: z.array(z.string()).default([]),
     style: z.string().nonempty('请选择笔记生成风格'),
     extras: z.string().optional(),
@@ -177,6 +180,19 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
   const goModelAdd = () => {
     navigate("/settings/model");
   };
+
+  // 模型列表是异步加载的，而 useForm 的 defaultValues 只在挂载那一刻算一次——那时列表还是空的。
+  // 下面那个 reset effect 又开头就 `if (!currentTask) return`，新建流程永远轮不到它补默认值，
+  // 于是「模型选择」框是空的，点「生成笔记」只在字段下面冒一行小字，用户以为点了没反应。
+  // 用 reset 而不是 setValue：Controller 注册发生在列表到达后的那次渲染里，setValue 有可能
+  // 被随后注册的字段用 defaultValues 覆盖回去；reset 会整体重放值并通知所有 Controller。
+  useEffect(() => {
+    if (!modelList.length) return
+    const current = form.getValues('model_name')
+    if (current && modelList.some(m => m.model_name === current)) return
+    form.reset({ ...form.getValues(), model_name: modelList[0].model_name } as NoteFormValues)
+  }, [modelList, form])
+
   /* ---- 副作用 ---- */
   useEffect(() => {
     loadEnabledModels()
@@ -215,6 +231,11 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
   const generating = isTaskRunning(taskStatus)
   // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
   const [submitting, setSubmitting] = useState(false)
+  // 但真正的锁必须是 ref：react-hook-form 的 handleSubmit 要先跑异步校验才调用 onSubmit，
+  // 双击（或回车 + 点击）的第二次会赶在 setSubmitting 生效之前进入同一个 onSubmit，
+  // 两次都看到 busy=false → 发出两个相差不到 1ms 的请求（实测过，后端因此并发跑了两份下载）。
+  // ref 赋值是同步的，第二次进来立刻被挡住。
+  const submitLockRef = useRef(false)
   const busy = generating || submitting
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
@@ -236,17 +257,28 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
   }
 
   const onSubmit = async (values: NoteFormValues) => {
-    if (busy) {
+    if (submitLockRef.current || busy) {
       toast(`正在${taskStatusLabels[taskStatus ?? ''] || '生成'}，请勿重复点击`, { icon: '⏳' })
       return
     }
+    submitLockRef.current = true
     setSubmitting(true)
     try {
+      // 选中的模型必须能解析出 provider_id。以前这里是 `find(...)!.provider_id`：
+      // 模型列表还没加载完、或那个模型被删了，就抛 TypeError 被下面的 catch 吞掉，
+      // 用户点了「生成笔记」什么反应都没有（既没请求也没提示），只能反复点。
+      // 现在没选/选的已失效就退回列表第一个，一个都没有才拦下来并说清楚去哪儿加。
+      const model = modelList.find(m => m.model_name === values.model_name) ?? modelList[0]
+      if (!model) {
+        toast.error('还没有可用的模型，请先去「模型供应商」添加并启用一个')
+        return
+      }
       const payload: NoteFormValues = {
         ...values,
+        model_name: model.model_name,
         video_url:
           values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-        provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+        provider_id: model.provider_id,
         task_id: currentTask?.id || '',
       } as NoteFormValues & { provider_id: string; task_id: string }
       if (currentTask) {
@@ -257,6 +289,11 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
       }
 
       const data = await generateNote(payload)
+      if (!data?.task_id) {
+        // 没有 task_id 就没法接管轮询；后端可能已经建了任务，让用户去书架确认而不是盲点第二次
+        toast.error('后端没有返回任务 ID，请到书架页确认是否已经在生成')
+        return
+      }
       addPendingTask(data.task_id, values.platform, payload)
       onSubmitted?.(data.task_id)
     } catch (e: any) {
@@ -275,6 +312,7 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
       // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
       console.error('提交任务失败：', e)
     } finally {
+      submitLockRef.current = false
       setSubmitting(false)
     }
   }
@@ -425,7 +463,8 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
                    >
                      <FormControl>
                        <SelectTrigger className="w-full min-w-0 truncate">
-                         <SelectValue />
+                         {/* 没有 placeholder 时，空值看起来和"已选中第一个模型"一模一样 */}
+                         <SelectValue placeholder="请选择模型" />
                        </SelectTrigger>
                      </FormControl>
                      <SelectContent>
