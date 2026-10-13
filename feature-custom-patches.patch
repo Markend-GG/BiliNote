@@ -13166,6 +13166,68 @@ index 4b1d080..898f65e 100644
          logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
          # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
          # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
+diff --git a/backend/tests/stub_deps.py b/backend/tests/stub_deps.py
+new file mode 100644
+index 0000000..c3002a2
+--- /dev/null
++++ b/backend/tests/stub_deps.py
+@@ -0,0 +1,56 @@
++"""本地无 Docker 跑后端测试用的重依赖 stub 安装器。
++
++容器镜像里 yt_dlp/chromadb/openai/... 都齐，install_missing_stubs() 第一次 import app
++就成功、什么都不做；本地宿主缺哪个才 stub 哪个（只 stub find 不到的模块，不 shadow 真包）。
++stub 类支持迭代/下标/任意属性，够撑过下载器与向量库的 import 期代码。
++"""
++
++import importlib
++import sys
++import types
++
++
++class _StubMeta(type):
++    def __iter__(cls):
++        return iter(())
++
++    def __getitem__(cls, _k):
++        return _Stub
++
++    def __getattr__(cls, name):
++        if name.startswith("__"):
++            raise AttributeError(name)
++        return _Stub
++
++
++class _Stub(metaclass=_StubMeta):
++    def __init__(self, *a, **k):
++        pass
++
++    def __call__(self, *a, **k):
++        return _Stub()
++
++    def __getattr__(self, name):
++        if name.startswith("__"):
++            raise AttributeError(name)
++        return _Stub()
++
++    def __iter__(self):
++        return iter(())
++
++    def __getitem__(self, _k):
++        return _Stub()
++
++
++def install_missing_stubs(max_rounds: int = 80) -> list:
++    stubbed = []
++    for _ in range(max_rounds):
++        try:
++            importlib.import_module("app")
++            return stubbed
++        except ModuleNotFoundError as e:
++            mod = types.ModuleType(e.name)
++            mod.__getattr__ = lambda name: _Stub
++            sys.modules[e.name] = mod
++            stubbed.append(e.name)
++    raise ImportError("stub 轮数用完，app 仍导入失败")
 diff --git a/backend/tests/test_image_dedup.py b/backend/tests/test_image_dedup.py
 new file mode 100644
 index 0000000..dfdeb48
@@ -13251,16 +13313,20 @@ index 0000000..dfdeb48
 +    unittest.main()
 diff --git a/backend/tests/test_library_http.py b/backend/tests/test_library_http.py
 new file mode 100644
-index 0000000..7a8d2b8
+index 0000000..bffc397
 --- /dev/null
 +++ b/backend/tests/test_library_http.py
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,174 @@
 +"""library / storage / search / delete_task 的 HTTP 层测试（FastAPI TestClient）。
 +
 +DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
-+状态码包装、错误码、删除真的落盘。运行环境需要 fastapi+httpx（容器镜像里有）。
++响应包装、错误码、删除真的落盘。
++
++重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、这段 stub 逻辑是 no-op；
++本地无 Docker 跑时缺哪些就 stub 哪些（只 stub 真正找不到的模块，不污染有真包的环境）。
 +"""
 +
++import importlib
 +import json
 +import os
 +import pathlib
@@ -13279,11 +13345,17 @@ index 0000000..7a8d2b8
 +os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
 +os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
 +
-+from fastapi.testclient import TestClient  # noqa: E402
++
++from tests.stub_deps import install_missing_stubs  # noqa: E402
++
++install_missing_stubs()
 +
 +from app import create_app  # noqa: E402
-+from app.db import search_dao  # noqa: E402
 +from app.db.init_db import init_db  # noqa: E402
++from fastapi.testclient import TestClient  # noqa: E402
++
++from app.db import library_dao, search_dao  # noqa: E402
++from app.services import library_service  # noqa: E402
 +
 +
 +@asynccontextmanager
@@ -13314,6 +13386,12 @@ index 0000000..7a8d2b8
 +
 +
 +class TestLibraryHttp(unittest.TestCase):
++    def setUp(self):
++        # library_service 的路径常量是 import 时读死 env 的；多模块同进程跑时
++        # 别的模块会把它改到自己的临时目录，这里每个用例前绑回本模块的
++        library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
++        library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
++
 +    def test_library_shape(self):
 +        res = client.get("/api/library").json()
 +        self.assertEqual(res["code"], 0)
@@ -13401,6 +13479,8 @@ index 0000000..7a8d2b8
 +        task_id = str(uuid.uuid4())
 +        _make_note(task_id, "## 搜索章节\n恩格尔系数变式计算出现在这里足够长的正文正文正文\n")
 +        search_dao.rebuild_note(task_id, "## 搜索章节\n恩格尔系数变式计算出现在这里足够长的正文正文正文\n")
++        # 标题由 notes 索引表富化，模拟启动回填登记
++        library_dao.upsert_note(task_id, video_title="http-test-note", status="SUCCESS")
 +        res = client.get("/api/search", params={"q": "恩格尔系数"}).json()
 +        self.assertEqual(res["code"], 0)
 +        self.assertTrue(any(h["task_id"] == task_id for h in res["data"]))
@@ -13413,10 +13493,10 @@ index 0000000..7a8d2b8
 +    unittest.main(verbosity=2)
 diff --git a/backend/tests/test_library_store.py b/backend/tests/test_library_store.py
 new file mode 100644
-index 0000000..872f2aa
+index 0000000..4e46622
 --- /dev/null
 +++ b/backend/tests/test_library_store.py
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,338 @@
 +"""笔记库（文件夹 + 笔记索引）的数据层与删除逻辑测试。
 +
 +app.db.engine / app.services.library_service / app.services.vector_store 都在 import 时读环境变量。
@@ -13440,6 +13520,10 @@ index 0000000..872f2aa
 +
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
 +sys.path.insert(0, str(_ROOT))
++
++from tests.stub_deps import install_missing_stubs  # noqa: E402
++
++install_missing_stubs()
 +
 +_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-library-test-"))
 +os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
@@ -14297,10 +14381,10 @@ index f947ef8..98c6991 100644
      unittest.main()
 diff --git a/backend/tests/test_storage_search.py b/backend/tests/test_storage_search.py
 new file mode 100644
-index 0000000..a2c7969
+index 0000000..4e8dfbd
 --- /dev/null
 +++ b/backend/tests/test_storage_search.py
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,174 @@
 +"""V3.2 后端测试：存储扫描/孤儿截图清理 + FTS5 全文搜索。
 +
 +只 import app.db / app.services.library_service（不碰 routers，避免拉 fastapi/chromadb），
@@ -14317,6 +14401,10 @@ index 0000000..a2c7969
 +
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
 +sys.path.insert(0, str(_ROOT))
++
++from tests.stub_deps import install_missing_stubs  # noqa: E402
++
++install_missing_stubs()
 +
 +_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-storage-test-"))
 +os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
@@ -14869,21 +14957,21 @@ index 0000000..ad5036b
 +    unittest.main()
 diff --git a/backup/backup-bilinote.ps1 b/backup/backup-bilinote.ps1
 new file mode 100644
-index 0000000..0010d24
+index 0000000..047db91
 --- /dev/null
 +++ b/backup/backup-bilinote.ps1
 @@ -0,0 +1,48 @@
-+# BiliNote 数据卷备份脚本（Windows PowerShell）
++# BiliNote volume backup script (Windows PowerShell). Keep ASCII-only: PS 5.1 reads BOM-less files as ANSI.
 +#
-+# 用法：
++# Usage:
 +#   powershell -ExecutionPolicy Bypass -File backup-bilinote.ps1
 +#
-+# 原理：起一个一次性容器，把 6 个命名卷以只读方式挂进去、备份目录挂成可写，
-+# 用 bilinote 镜像自带的 tar 打包（不额外拉镜像、不依赖宿主机 tar）。
-+# 容器本身不被触碰，备份期间 BiliNote 可以照常运行（SQLite 为 WAL/短事务，
-+# 极端情况下可能拿到某一瞬间的不一致快照，可接受；要绝对一致请先 stop 容器）。
++# Spins a one-shot container mounting the 6 named volumes read-only plus the backup dir
++# writable, and tars with the tar shipped in the bilinote image (no extra pull, no host tar).
++# The running container is untouched; BiliNote keeps serving during backup.
++# For a strictly consistent snapshot stop the container first.
 +#
-+# 保留策略：最近 5 份。
++# Retention: keep the newest 5 archives.
 +$ErrorActionPreference = 'Stop'
 +
 +$backupRoot = 'G:\work\BiliNote\backups'
@@ -14893,7 +14981,7 @@ index 0000000..0010d24
 +
 +New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 +
-+Write-Host "开始备份 6 个数据卷 -> $backupRoot\$archive"
++Write-Host "Backing up 6 volumes -> $backupRoot\$archive"
 +docker run --rm --entrypoint tar `
 +  -v bilinote-cache:/ro/cache:ro `
 +  -v bilinote-config:/ro/config:ro `
@@ -14904,21 +14992,21 @@ index 0000000..0010d24
 +  -v "${backupRoot}:/out" `
 +  $runnerImage -czf "/out/$archive" -C /ro cache config data models static vector
 +
-+if ($LASTEXITCODE -ne 0) { throw "tar 退出码 $LASTEXITCODE，备份失败" }
++if ($LASTEXITCODE -ne 0) { throw "tar exited with $LASTEXITCODE" }
 +
 +$size = [math]::Round((Get-Item (Join-Path $backupRoot $archive)).Length / 1MB, 1)
-+Write-Host "备份完成：$archive（${size} MB）"
++Write-Host "Backup done: $archive (${size} MB)"
 +
-+# 只留最近 5 份
++# keep newest 5
 +Get-ChildItem $backupRoot -Filter 'bilinote-*.tar.gz' |
 +  Sort-Object LastWriteTime -Descending |
 +  Select-Object -Skip 5 |
 +  ForEach-Object {
-+    Write-Host "清理旧备份：$($_.Name)"
++    Write-Host "Pruning old backup: $($_.Name)"
 +    Remove-Item $_.FullName -Force
 +  }
 +
-+# 想每周自动跑（管理员 PowerShell 里执行一次即可）：
++# Optional weekly schedule (run once in an elevated PowerShell):
 +#   schtasks /Create /TN "BiliNoteBackup" /SC WEEKLY /D SAT /ST 09:00 `
 +#     /TR "powershell -ExecutionPolicy Bypass -File G:\work\BiliNote\bilinote-src\backup\backup-bilinote.ps1"
 diff --git a/deploy/supervisord.conf b/deploy/supervisord.conf
@@ -14981,6 +15069,72 @@ index 0000000..cdd700c
 +
 +headless 页面的 visibilityState 是 visible，所以 scroll-spy、smooth 滚动这些
 +"后台标签页验不了"的用例在这里能真跑。环境变量：E2E_BASE_URL、E2E_CHANNEL（默认 msedge，可改 chrome）。
+diff --git a/e2e/package-lock.json b/e2e/package-lock.json
+new file mode 100644
+index 0000000..db9f332
+--- /dev/null
++++ b/e2e/package-lock.json
+@@ -0,0 +1,60 @@
++{
++  "name": "bilinote-e2e",
++  "version": "0.0.0",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "bilinote-e2e",
++      "version": "0.0.0",
++      "devDependencies": {
++        "@playwright/test": "^1.49.1"
++      }
++    },
++    "node_modules/@playwright/test": {
++      "version": "1.64.0",
++      "resolved": "https://registry.npmmirror.com/@playwright/test/-/test-1.64.0.tgz",
++      "integrity": "sha512-oTN9FNYuN6bqQMwiho6jJKLCG2/QOYCixGXuCjRmzOq23eODeukuY2XiAVoVpAECbuezMt1MHQjAiQxK8F+Y+g==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "playwright": "1.64.0"
++      },
++      "bin": {
++        "playwright": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/playwright": {
++      "version": "1.64.0",
++      "resolved": "https://registry.npmmirror.com/playwright/-/playwright-1.64.0.tgz",
++      "integrity": "sha512-kVzTnYFYEyQ9RGzBjNCd2+yEqWmVbxl3AHPynv3qQ6JTjv4a+kwRcnqQwIpuP3NnrnIrE/Q6wWAIAvMfIE2/Yg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "playwright-core": "1.64.0"
++      },
++      "bin": {
++        "playwright": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/playwright-core": {
++      "version": "1.64.0",
++      "resolved": "https://registry.npmmirror.com/playwright-core/-/playwright-core-1.64.0.tgz",
++      "integrity": "sha512-T9r+MZkTECl2+oUcZ26YgZzTrYidTsIhYYkJix+6iDOymOb1FB2RLLSOxRGnZGv5DStt+aduIVbt+E8WygXYpg==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "playwright-core": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    }
++  }
++}
 diff --git a/e2e/package.json b/e2e/package.json
 new file mode 100644
 index 0000000..c3b7e04
