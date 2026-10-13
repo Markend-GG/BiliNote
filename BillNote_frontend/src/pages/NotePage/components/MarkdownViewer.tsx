@@ -38,6 +38,7 @@ import { useNoteActions } from '@/hooks/useNoteActions'
 import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 import { useLibraryStore } from '@/store/libraryStore'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
+import { useSectionTimes, sectionForTime } from '@/hooks/useSectionTimes'
 import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
 import type { Markdown } from '@/store/taskStore'
 import type { NoteVersion } from '@/services/library'
@@ -333,6 +334,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const outlinePrefRef = useRef(outlineCollapsed)
   const isNarrow = useMediaQuery('(max-width: 1100px)')
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
+  const [activeSectionId, setActiveSectionId] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
@@ -350,7 +352,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     folderName,
     entries: noteEntries,
     dialogs: noteDialogs,
-  } = useNoteActions(taskId, currentTask?.audioMeta?.title || '未命名笔记')
+  } = useNoteActions(
+    taskId,
+    currentTask?.audioMeta?.title || '未命名笔记',
+    currentTask?.formData?.video_url || currentTask?.audioMeta?.raw_info?.webpage_url || '',
+  )
   const [regenerateOpen, setRegenerateOpen] = useState(false)
 
   // 标题下拉里放同文件夹的笔记 + 最近打开的，去重后截断：
@@ -412,6 +418,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     if (dockOpen) dockRef.current?.expand()
     else dockRef.current?.collapse()
   }, [dockOpen])
+
+  // 转写↔正文联动：章节起始时间表 + 当前高亮章节的起始秒
+  const sectionTimes = useSectionTimes(bodyRef, selectedContent)
+  const activeSectionStart =
+    sectionTimes.find(t => t.id === activeSectionId)?.start ?? null
+  const handlePickTime = (seconds: number) => {
+    const section = sectionForTime(sectionTimes, seconds)
+    if (section) scrollToHeading(section.id)
+  }
 
   // ChatPanel 的放大/缩小按钮现在只负责调 dock 宽度，不再有"全屏替换正文"。
   // 宽窄状态必须存在这一层：ChatPanel 自己只认 mode prop，写死 'half' 会让按钮永远朝一个方向切。
@@ -820,6 +835,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     wide={dockWide}
                     onResize={handleChatResize}
                     onClose={() => setDockTab(null)}
+                    focusTime={dockTab === 'transcript' ? activeSectionStart : null}
+                    onPickTime={handlePickTime}
                   />
                 </div>
               )}
@@ -846,6 +863,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     taskId={currentTask.id}
                     wide={dockWide}
                     onResize={handleChatResize}
+                    focusTime={dockTab === 'transcript' ? activeSectionStart : null}
+                    onPickTime={handlePickTime}
                   />
                 )}
               </ResizablePanel>
@@ -860,6 +879,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         contentKey={viewMode === 'preview' && !editing ? selectedContent : ''}
         collapsed={outlineCollapsed}
         onCollapsedChange={setOutlineCollapsedPersist}
+        onActiveChange={setActiveSectionId}
       />
     </div>
   )

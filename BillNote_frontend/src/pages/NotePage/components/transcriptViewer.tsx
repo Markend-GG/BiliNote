@@ -19,7 +19,14 @@ interface Task {
   }
 }
 
-const TranscriptViewer = () => {
+interface TranscriptViewerProps {
+  /** 点某行转写时把该片段的起始秒抛出去，供正文跳到对应章节 */
+  onPickTime?: (seconds: number) => void
+  /** 正文当前章节的起始秒；变化时把列表滚到最近片段并高亮 */
+  focusTime?: number | null
+}
+
+const TranscriptViewer = ({ onPickTime, focusTime = null }: TranscriptViewerProps) => {
   const getCurrentTask = useTaskStore((state) => state.getCurrentTask)
   const currentTaskId = useTaskStore((state) => state.currentTaskId)
   const [task, setTask] = useState<Task | null>(null)
@@ -38,8 +45,22 @@ const TranscriptViewer = () => {
 
   const handleSegmentClick = (index: number) => {
     setActiveSegment(index)
-    // Here you could add functionality to play the audio from this segment
+    const seconds = task?.transcript?.segments?.[index]?.start
+    if (seconds !== undefined && onPickTime) onPickTime(seconds)
   }
+
+  // 正文章节变化 → 列表跟到该章节起始时间最近的片段
+  useEffect(() => {
+    if (focusTime === null || !task?.transcript?.segments?.length) return
+    const segments = task.transcript.segments
+    let index = 0
+    for (let i = 0; i < segments.length; i++) {
+      if ((segments[i].start ?? 0) <= focusTime) index = i
+      else break
+    }
+    setActiveSegment(index)
+    scrollToSegment(index)
+  }, [focusTime, task])
 
   const scrollToSegment = (index: number) => {
     segmentRefs.current[index]?.scrollIntoView({

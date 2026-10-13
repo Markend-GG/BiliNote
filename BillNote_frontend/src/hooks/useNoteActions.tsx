@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FolderInput, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { FolderInput, Link2, Pencil, SlidersHorizontal, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,7 +24,7 @@ const UNCATEGORIZED = '未分类'
  * 抽成 hook 是因为这些操作各自还要带一个对话框，全塞进 MarkdownHeader 会让它更长；
  * 这里返回菜单项 + 需要一并渲染的 dialogs，调用方两行就能接上。
  */
-export function useNoteActions(taskId: string | undefined, fallbackTitle: string) {
+export function useNoteActions(taskId: string | undefined, fallbackTitle: string, videoUrl?: string) {
   const navigate = useNavigate()
   const folders = useLibraryStore(state => state.folders)
   const notes = useLibraryStore(state => state.notes)
@@ -58,6 +58,19 @@ export function useNoteActions(taskId: string | undefined, fallbackTitle: string
   }
 
   const entries: MenuEntryOrSeparator[] = [
+    {
+      key: 'copy-link',
+      label: '复制视频链接',
+      icon: <Link2 className="h-4 w-4" />,
+      disabled: !videoUrl,
+      onSelect: () => {
+        if (!videoUrl) return
+        navigator.clipboard
+          .writeText(videoUrl)
+          .then(() => toast.success('已复制视频链接'))
+          .catch(() => toast.error('复制失败'))
+      },
+    },
     {
       key: 'rename',
       label: '重命名笔记',

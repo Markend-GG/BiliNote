@@ -15,6 +15,9 @@ interface ReferenceDockProps {
   onResize: (mode: 'half' | 'full') => void
   /** 窄屏浮层模式下给一个关闭按钮 */
   onClose?: () => void
+  /** 转写联动：点转写行抛时间、正文章节变化时把列表带过去 */
+  onPickTime?: (seconds: number) => void
+  focusTime?: number | null
 }
 
 /**
@@ -24,7 +27,16 @@ interface ReferenceDockProps {
  * 切 tab 不会把问了一半的对话弄丢。以前是两个并列 state + 硬编码宽度，
  * 而且 AI 切"全屏"会把原文参照整个替换掉、再也打不开。
  */
-export function ReferenceDock({ tab, onTab, taskId, wide, onResize, onClose }: ReferenceDockProps) {
+export function ReferenceDock({
+  tab,
+  onTab,
+  taskId,
+  wide,
+  onResize,
+  onClose,
+  onPickTime,
+  focusTime = null,
+}: ReferenceDockProps) {
   return (
     <div className="flex h-full min-w-0 flex-col bg-white print:hidden">
       <div role="tablist" aria-label="参照面板" className="flex h-10 shrink-0 items-center gap-1 border-b px-2">
@@ -58,7 +70,7 @@ export function ReferenceDock({ tab, onTab, taskId, wide, onResize, onClose }: R
 
       {/* TranscriptViewer 自带卡片边框，垫一点内边距让它在 dock 里看着是故意的 */}
       <div role="tabpanel" hidden={tab !== 'transcript'} className="h-full min-h-0 flex-1 overflow-hidden p-2">
-        <TranscriptViewer />
+        <TranscriptViewer onPickTime={onPickTime} focusTime={focusTime} />
       </div>
       <div role="tabpanel" hidden={tab !== 'chat'} className="h-full min-h-0 flex-1 overflow-hidden">
         <ChatPanel taskId={taskId} mode={wide ? 'full' : 'half'} onModeChange={onResize} embedded />

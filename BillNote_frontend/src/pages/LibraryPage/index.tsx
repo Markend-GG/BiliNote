@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
+  ArrowUpDown,
   Clock,
   Eye,
   FolderInput,
@@ -35,6 +36,9 @@ import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 import { NoteCard, NoteRow } from './components/NoteCard'
 import { FolderCard } from './components/FolderCard'
 import { PromptDialog } from '@/components/PromptDialog'
+import { Menu } from '@/components/ui/menu'
+import { NOTE_DRAG_MIME, SORTERS } from './utils'
+import type { ShelfSortMode } from '@/store/libraryStore'
 
 /** activeFolder: null = 全部，'none' = 未分类，其余是文件夹 id */
 type FolderFilter = string | 'none' | null
@@ -299,6 +303,25 @@ const LibraryPage = () => {
             </TooltipProvider>
           </div>
 
+          <Menu
+            align="end"
+            ariaLabel="排序方式"
+            triggerClassName="text-muted-foreground hover:bg-accent flex items-center gap-1 rounded px-2 py-1 text-sm"
+            trigger={
+              <>
+                <ArrowUpDown className="h-4 w-4" />
+                <span className="hidden lg:inline">{SORTERS[sortMode].label}</span>
+              </>
+            }
+            entries={(Object.keys(SORTERS) as ShelfSortMode[]).map(key => ({
+              key,
+              label: SORTERS[key].label,
+              searchText: SORTERS[key].label,
+              disabled: key === sortMode,
+              onSelect: () => setSortMode(key),
+            }))}
+          />
+
           <Button size="sm" onClick={() => setNewNoteOpen(true)}>
             <Plus className="h-4 w-4" />
             新建笔记
@@ -334,6 +357,7 @@ const LibraryPage = () => {
             count={counts.byFolder.get(folder.id) ?? 0}
             active={activeFolder === folder.id}
             onClick={() => setActiveFolder(folder.id)}
+            onDropNote={taskId => dropInto(taskId, folder.id)}
           />
         ))}
         <FilterChip
@@ -341,6 +365,7 @@ const LibraryPage = () => {
           count={counts.none}
           active={activeFolder === 'none'}
           onClick={() => setActiveFolder('none')}
+          onDropNote={taskId => dropInto(taskId, null)}
         />
         <Button
           variant="ghost"
@@ -566,20 +591,48 @@ function FilterChip({
   count,
   active,
   onClick,
+  onDropNote,
 }: {
   label: string
   count: number
   active: boolean
   onClick: () => void
+  /** 给了就是拖拽落点：把笔记卡拖到 chip 上直接归档，不用先滚到文件夹卡片那里 */
+  onDropNote?: (taskId: string) => void
 }) {
+  const [dragOver, setDragOver] = useState(false)
   return (
     <button
       type="button"
       onClick={onClick}
+      onDragOver={
+        onDropNote
+          ? e => {
+              if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              setDragOver(true)
+            }
+          : undefined
+      }
+      onDragLeave={onDropNote ? () => setDragOver(false) : undefined}
+      onDrop={
+        onDropNote
+          ? e => {
+              const taskId = e.dataTransfer.getData(NOTE_DRAG_MIME)
+              if (!taskId) return
+              e.preventDefault()
+              setDragOver(false)
+              onDropNote(taskId)
+            }
+          : undefined
+      }
       className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition ${
-        active
-          ? 'border-primary bg-primary text-white'
-          : 'bg-white text-neutral-700 hover:border-neutral-400'
+        dragOver
+          ? 'border-primary ring-primary/40 ring-2'
+          : active
+            ? 'border-primary bg-primary text-white'
+            : 'bg-white text-neutral-700 hover:border-neutral-400'
       }`}
     >
       {label}

@@ -12,12 +12,16 @@ import type {
 
 export type ShelfViewMode = 'card' | 'list'
 
+export type ShelfSortMode = 'created' | 'opened' | 'duration' | 'title'
+
 interface LibraryState {
   folders: LibraryFolder[]
   notes: LibraryNote[]
   /** 版本历史缓存（权威在后端），key = task_id，新在前 */
   versionsByTask: Record<string, NoteVersion[]>
   viewMode: ShelfViewMode
+  sortMode: ShelfSortMode
+  setSortMode: (mode: ShelfSortMode) => void
   loaded: boolean
   loading: boolean
   fetchVersions: (taskId: string) => Promise<void>
@@ -46,6 +50,8 @@ export const useLibraryStore = create<LibraryState>()(
       notes: [],
       versionsByTask: {},
       viewMode: 'card',
+      sortMode: 'created',
+      setSortMode: sortMode => set({ sortMode }),
       loaded: false,
       loading: false,
 
@@ -184,7 +190,8 @@ export const useLibraryStore = create<LibraryState>()(
     {
       name: 'library-storage',
       // 只持久化视图偏好；文件夹和笔记每次都从后端拉，避免两边不一致
-      partialize: state => ({ viewMode: state.viewMode }) as LibraryState,
+      partialize: state =>
+        ({ viewMode: state.viewMode, sortMode: state.sortMode }) as LibraryState,
       storage: createJSONStorage(() => ({
         getItem: async (name: string): Promise<string | null> => (await get(name)) ?? null,
         setItem: async (name: string, value: string): Promise<void> => {

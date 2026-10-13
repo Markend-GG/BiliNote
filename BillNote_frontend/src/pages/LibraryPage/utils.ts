@@ -1,5 +1,14 @@
 import type { ShelfItem } from '@/hooks/useShelfItems'
+import type { ShelfSortMode } from '@/store/libraryStore'
 import { taskStatusLabels, videoPlatforms } from '@/constant/note'
+
+/** 书架排序器：默认最新创建；"最近打开"没打开过的排最后 */
+export const SORTERS: Record<ShelfSortMode, { label: string; cmp: (a: ShelfItem, b: ShelfItem) => number }> = {
+  created: { label: '最新创建', cmp: (a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) },
+  opened: { label: '最近打开', cmp: (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0) },
+  duration: { label: '时长最长', cmp: (a, b) => (b.duration ?? 0) - (a.duration ?? 0) },
+  title: { label: '标题拼音', cmp: (a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN') },
+}
 
 /** 拖拽归档用的自定义 MIME。用 text/plain 会和"拖文字"混淆 */
 export const NOTE_DRAG_MIME = 'text/bilinote-note'

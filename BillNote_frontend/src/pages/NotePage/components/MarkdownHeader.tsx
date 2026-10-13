@@ -173,6 +173,7 @@ export function MarkdownHeader({
     ...(siblings ?? []).map(sibling => ({
       key: sibling.taskId,
       label: <span className="block max-w-[280px] truncate">{sibling.title}</span>,
+      searchText: sibling.title,
       icon: sibling.active ? <Check className="text-primary h-4 w-4" /> : <FileText className="h-4 w-4" />,
       disabled: sibling.active,
       onSelect: () => onSwitchNote?.(sibling.taskId),
@@ -187,17 +188,6 @@ export function MarkdownHeader({
   ]
 
   const moreEntries: MenuEntryOrSeparator[] = [
-    ...(onEdit
-      ? [
-          {
-            key: 'edit',
-            label: editing ? '正在编辑…' : '编辑笔记',
-            icon: <Pencil className="h-4 w-4" />,
-            disabled: editing,
-            onSelect: onEdit,
-          },
-        ]
-      : []),
     {
       key: 'copy',
       label: copied ? '已复制' : '复制内容',
@@ -227,22 +217,6 @@ export function MarkdownHeader({
             label: '打印 / 存为 PDF',
             icon: <Printer className="h-4 w-4" />,
             onSelect: onPrint,
-          },
-        ]
-      : []),
-    {
-      key: 'mindmap',
-      label: viewMode === 'map' ? '返回笔记视图' : '思维导图',
-      icon: <BrainCircuit className="h-4 w-4" />,
-      onSelect: () => setViewMode(viewMode === 'map' ? 'preview' : 'map'),
-    },
-    ...(onFoldAll && viewMode === 'preview'
-      ? [
-          {
-            key: 'fold',
-            label: foldAll ? '展开全部章节' : '收起全部章节',
-            icon: foldAll ? <ChevronsUpDown className="h-4 w-4" /> : <ChevronsDownUp className="h-4 w-4" />,
-            onSelect: onFoldAll,
           },
         ]
       : []),
@@ -298,6 +272,8 @@ export function MarkdownHeader({
       {canSwitch ? (
         <Menu
           align="start"
+          filterable
+          filterPlaceholder="搜索笔记标题…"
           className="min-w-0 flex-1"
           triggerClassName="flex w-full min-w-0 items-center gap-1 rounded px-2 py-1 text-sm font-medium hover:bg-neutral-100"
           ariaLabel="切换到其他笔记"
@@ -365,6 +341,60 @@ export function MarkdownHeader({
                 </Button>
               </TooltipTrigger>
               <TooltipContent>用原来的链接重新生成，可以先改风格和模型；结果会作为新版本追加</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+
+        {/* 编辑/思维导图/收起全部是高频操作，从 ⋯ 里拿回顶栏；窄屏只留图标 */}
+        {onEdit && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={editing ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8"
+                  onClick={onEdit}
+                  disabled={editing}
+                >
+                  <Pencil className="h-4 w-4" />
+                  <span className="hidden min-[1280px]:inline">{editing ? '编辑中' : '编辑'}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>编辑笔记内容（可删除重复的图片行）</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={viewMode === 'map' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-8"
+                onClick={() => setViewMode(viewMode === 'map' ? 'preview' : 'map')}
+              >
+                <BrainCircuit className="h-4 w-4" />
+                <span className="hidden min-[1280px]:inline">
+                  {viewMode === 'map' ? '返回笔记' : '思维导图'}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>思维导图</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
+        {onFoldAll && viewMode === 'preview' && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-8" onClick={onFoldAll}>
+                  {foldAll ? <ChevronsUpDown className="h-4 w-4" /> : <ChevronsDownUp className="h-4 w-4" />}
+                  <span className="hidden min-[1280px]:inline">{foldAll ? '展开全部' : '收起全部'}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>一键收起/展开所有章节，方便快速定位</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         )}

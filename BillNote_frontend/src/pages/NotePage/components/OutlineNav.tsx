@@ -16,6 +16,8 @@ interface OutlineNavProps {
   contentKey: string
   collapsed: boolean
   onCollapsedChange: (collapsed: boolean) => void
+  /** 当前高亮章节变化时通知外层（转写联动要用） */
+  onActiveChange?: (sectionId: string | null) => void
 }
 
 /**
@@ -26,10 +28,19 @@ interface OutlineNavProps {
  * scroll-spy 的滚动事件要绑 radix ScrollArea 的 viewport（window 上没有），
  * 且折叠会改变坐标，所以元素引用建表时缓存、rect 每次实时读，绝不缓存位置。
  */
-export function OutlineNav({ containerRef, contentKey, collapsed, onCollapsedChange }: OutlineNavProps) {
+export function OutlineNav({
+  containerRef,
+  contentKey,
+  collapsed,
+  onCollapsedChange,
+  onActiveChange,
+}: OutlineNavProps) {
   const [entries, setEntries] = useState<OutlineEntry[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const scrollTimer = useRef<number | null>(null)
+  // 回调放进 ref：scroll-spy 的 effect 不该因为外层重渲染而反复重挂监听
+  const activeChangeRef = useRef(onActiveChange)
+  activeChangeRef.current = onActiveChange
 
   useEffect(() => {
     const container = containerRef.current
@@ -94,7 +105,10 @@ export function OutlineNav({ containerRef, contentKey, collapsed, onCollapsedCha
         if (rect.height === 0) continue
         if (rect.top <= threshold) current = entry.id
       }
-      setActiveId(current)
+      setActiveId(prev => {
+        if (prev !== current) activeChangeRef.current?.(current)
+        return current
+      })
     }
     // 节流用 setTimeout 而不是 rAF：后台标签页会暂停 rAF，高亮会冻住
     const onScroll = () => {
