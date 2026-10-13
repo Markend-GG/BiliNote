@@ -8645,15 +8645,17 @@ index f759565..7c58c67 100644
        name: '部署监控',
 diff --git a/BillNote_frontend/src/pages/SettingPage/Storage.tsx b/BillNote_frontend/src/pages/SettingPage/Storage.tsx
 new file mode 100644
-index 0000000..8b008ed
+index 0000000..31e9b7e
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/SettingPage/Storage.tsx
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,333 @@
 +import { useCallback, useEffect, useMemo, useState } from 'react'
-+import { RefreshCw, Trash2 } from 'lucide-react'
++import { Clock, RefreshCw, Trash2 } from 'lucide-react'
 +import toast from 'react-hot-toast'
 +import { Button } from '@/components/ui/button'
 +import { Checkbox } from '@/components/ui/checkbox'
++import { Input } from '@/components/ui/input'
++import { Switch } from '@/components/ui/switch'
 +import {
 +  Dialog,
 +  DialogContent,
@@ -8662,7 +8664,16 @@ index 0000000..8b008ed
 +  DialogHeader,
 +  DialogTitle,
 +} from '@/components/ui/dialog'
-+import { deleteOrphans, scanStorage, type StorageScan } from '@/services/storage'
++import {
++  deleteOrphans,
++  getCleanupStatus,
++  runCleanup,
++  saveCleanupPolicy,
++  scanStorage,
++  type CleanupPolicy,
++  type CleanupStatus,
++  type StorageScan,
++} from '@/services/storage'
 +import { formatDate } from '@/pages/LibraryPage/utils'
 +
 +const formatBytes = (bytes: number) => {
@@ -8686,12 +8697,23 @@ index 0000000..8b008ed
 +  const [confirmOpen, setConfirmOpen] = useState(false)
 +  const [deleting, setDeleting] = useState(false)
 +  const [error, setError] = useState(false)
++  const [cleanup, setCleanup] = useState<CleanupStatus | null>(null)
++  // 表单用草稿态：改了数字还没保存时，不该让界面上的"当前策略"跟着变
++  const [draft, setDraft] = useState<CleanupPolicy>({
++    enabled: true,
++    keep_days: 14,
++    max_orphan_mb: 800,
++  })
++  const [savingPolicy, setSavingPolicy] = useState(false)
++  const [running, setRunning] = useState(false)
 +
 +  const refresh = useCallback(async () => {
 +    setLoading(true)
 +    try {
-+      const data = await scanStorage()
++      const [data, status] = await Promise.all([scanStorage(), getCleanupStatus()])
 +      setScan(data)
++      setCleanup(status)
++      setDraft(status.policy)
 +      setSelected(new Set())
 +      setError(false)
 +    } catch {
@@ -8705,6 +8727,36 @@ index 0000000..8b008ed
 +  useEffect(() => {
 +    refresh()
 +  }, [refresh])
++
++  const handleSavePolicy = async () => {
++    setSavingPolicy(true)
++    try {
++      const policy = await saveCleanupPolicy(draft)
++      setCleanup(prev => (prev ? { ...prev, policy } : prev))
++      toast.success('自动清理设置已保存')
++    } catch {
++      // 拦截器已提示
++    } finally {
++      setSavingPolicy(false)
++    }
++  }
++
++  const handleRunNow = async () => {
++    setRunning(true)
++    try {
++      const res = await runCleanup()
++      toast.success(
++        res.deleted
++          ? `已清理 ${res.deleted} 张孤儿截图，释放 ${formatBytes(res.freed_bytes)}`
++          : '没有需要清理的孤儿截图',
++      )
++      await refresh()
++    } catch {
++      // 拦截器已提示
++    } finally {
++      setRunning(false)
++    }
++  }
 +
 +  const orphans = useMemo(() => scan?.orphans ?? [], [scan])
 +  const allSelected = orphans.length > 0 && selected.size === orphans.length
@@ -8787,6 +8839,69 @@ index 0000000..8b008ed
 +              <div className="mt-1 text-xl font-semibold">{formatBytes(scan.vector_db_bytes)}</div>
 +              <div className="text-muted-foreground mt-1 text-xs">删除笔记时会自动清理对应索引</div>
 +            </div>
++          </div>
++
++          <div className="rounded-lg border bg-white p-3">
++            <div className="flex items-center gap-2">
++              <Clock className="h-4 w-4 shrink-0 text-neutral-500" />
++              <span className="text-sm font-medium">自动清理孤儿截图</span>
++              <span className="text-muted-foreground text-xs">后台每天检查一次</span>
++              <Switch
++                className="ml-auto"
++                checked={draft.enabled}
++                onCheckedChange={enabled => setDraft(d => ({ ...d, enabled }))}
++                aria-label="启用自动清理"
++              />
++            </div>
++            <p className="text-muted-foreground mt-1.5 text-xs leading-relaxed">
++              只清理<b className="text-neutral-700">没有任何笔记引用</b>的截图。笔记里正在用的图既不计入容量、
++              也永远不会被删；生成中的笔记有 30 分钟保护期。填 0 表示关掉对应那条规则。
++            </p>
++            <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
++              <label className="flex items-center gap-1.5">
++                <span className="text-muted-foreground">孤儿超过</span>
++                <Input
++                  type="number"
++                  min={0}
++                  value={draft.keep_days}
++                  onChange={e => setDraft(d => ({ ...d, keep_days: Number(e.target.value) || 0 }))}
++                  className="h-7 w-16 text-xs"
++                  aria-label="保留天数"
++                />
++                <span className="text-muted-foreground">天自动删</span>
++              </label>
++              <label className="flex items-center gap-1.5">
++                <span className="text-muted-foreground">孤儿总量超过</span>
++                <Input
++                  type="number"
++                  min={0}
++                  value={draft.max_orphan_mb}
++                  onChange={e => setDraft(d => ({ ...d, max_orphan_mb: Number(e.target.value) || 0 }))}
++                  className="h-7 w-20 text-xs"
++                  aria-label="孤儿总量上限 MB"
++                />
++                <span className="text-muted-foreground">MB 时从最旧的开始删</span>
++              </label>
++              <div className="ml-auto flex gap-2">
++                <Button variant="outline" size="sm" onClick={handleSavePolicy} disabled={savingPolicy}>
++                  {savingPolicy ? '保存中…' : '保存设置'}
++                </Button>
++                <Button variant="outline" size="sm" onClick={handleRunNow} disabled={running}>
++                  {running ? '清理中…' : '立即清理一次'}
++                </Button>
++              </div>
++            </div>
++            {cleanup?.last_run && (
++              <div className="text-muted-foreground mt-2.5 border-t pt-2 text-xs">
++                上次清理：{formatDate(cleanup.last_run.at)}
++                （{cleanup.last_run.reason === 'manual' ? '手动' : '定时'}）· 删除{' '}
++                {cleanup.last_run.deleted} 张（超期 {cleanup.last_run.aged_deleted} / 超容量{' '}
++                {cleanup.last_run.over_cap_deleted}）· 释放{' '}
++                {formatBytes(cleanup.last_run.freed_bytes)} · 剩余孤儿{' '}
++                {cleanup.last_run.remaining_orphans} 张 /{' '}
++                {formatBytes(cleanup.last_run.remaining_orphan_bytes)}
++              </div>
++            )}
 +          </div>
 +
 +          <div className="rounded-lg border bg-white">
@@ -9160,10 +9275,10 @@ index 722bd92..461cfb3 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/services/storage.ts b/BillNote_frontend/src/services/storage.ts
 new file mode 100644
-index 0000000..39ca17d
+index 0000000..6dd5074
 --- /dev/null
 +++ b/BillNote_frontend/src/services/storage.ts
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,64 @@
 +import request from '@/utils/request'
 +
 +export interface OrphanFile {
@@ -9195,6 +9310,39 @@ index 0000000..39ca17d
 +/** 服务端删除前会重算引用集，被任何笔记引用的都会进 skipped */
 +export const deleteOrphans = (names: string[]) =>
 +  request.post<any, DeleteOrphansResult>('/storage/delete', { names })
++
++export interface CleanupPolicy {
++  enabled: boolean
++  /** 孤儿超过多少天自动删；0 = 不按天数清理 */
++  keep_days: number
++  /** 孤儿总量上限（MB），超了从最旧的开始删；0 = 不按容量清理。只算孤儿，不含被引用的截图 */
++  max_orphan_mb: number
++}
++
++export interface CleanupRun {
++  at: number
++  reason: 'schedule' | 'manual' | string
++  aged_deleted: number
++  over_cap_deleted: number
++  deleted: number
++  skipped: number
++  freed_bytes: number
++  remaining_orphans: number
++  remaining_orphan_bytes: number
++}
++
++export interface CleanupStatus {
++  policy: CleanupPolicy
++  last_run: CleanupRun | null
++}
++
++export const getCleanupStatus = () => request.get<any, CleanupStatus>('/storage/cleanup_policy')
++
++export const saveCleanupPolicy = (patch: Partial<CleanupPolicy>) =>
++  request.post<any, CleanupPolicy>('/storage/cleanup_policy', patch)
++
++/** 界面上的「立即清理」：手动触发不受启用开关限制 */
++export const runCleanup = () => request.post<any, CleanupRun>('/storage/cleanup_run')
 diff --git a/BillNote_frontend/src/store/chatStore/index.ts b/BillNote_frontend/src/store/chatStore/index.ts
 index 51baa57..12a03bb 100644
 --- a/BillNote_frontend/src/store/chatStore/index.ts
@@ -11511,7 +11659,7 @@ index 0000000..d2475fe
 +        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
 +        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..1345c3b 100644
+index f433e46..409095a 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
 @@ -1,6 +1,9 @@
@@ -11546,14 +11694,14 @@ index f433e46..1345c3b 100644
 +_TASK_ID_RE = re.compile(
 +    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 +)
-+
-+
-+def _valid_task_id(task_id: str) -> bool:
-+    return isinstance(task_id, str) and bool(_TASK_ID_RE.fullmatch(task_id))
  
 -class RecordRequest(BaseModel):
 -    video_id: str
 -    platform: str
++
++def _valid_task_id(task_id: str) -> bool:
++    return isinstance(task_id, str) and bool(_TASK_ID_RE.fullmatch(task_id))
++
 +
 +class DeleteTaskRequest(BaseModel):
 +    task_id: str
@@ -11577,7 +11725,7 @@ index f433e46..1345c3b 100644
  def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
  
-@@ -121,6 +131,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+@@ -121,6 +131,41 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
  
  
@@ -11586,11 +11734,40 @@ index f433e46..1345c3b 100644
 +_running_tasks: set[str] = set()
 +_running_tasks_lock = threading.Lock()
 +
++# 光按 task_id 挡不住"一次点击发出两个请求"：实测两个新 task_id 只差 0.5ms，
++# 同视频同风格并发跑时两份 yt-dlp 写同一个 {video_id}.mp4.part，后完成的那个 rename 撞
++# Errno 2 → 白烧一次 API 额度、书架上还多一条 FAILED 笔记。所以再按 (视频, 风格) 去重。
++_inflight_keys: dict[str, str] = {}
++_key_by_task: dict[str, str] = {}
++
++
++def _submit_key(video_id: str, video_url: str, style: str) -> str:
++    return f"{video_id or video_url}|{style or ''}"
++
++
++def _claim_submit(key: str, task_id: str) -> Optional[str]:
++    """登记本次提交。若同视频同风格已有任务在跑，返回它的 task_id 让调用方直接复用。"""
++    with _running_tasks_lock:
++        existing = _inflight_keys.get(key)
++        if existing and existing != task_id:
++            return existing
++        _inflight_keys[key] = task_id
++        _key_by_task[task_id] = key
++        return None
++
++
++def _release_submit(task_id: str) -> None:
++    with _running_tasks_lock:
++        _running_tasks.discard(task_id)
++        key = _key_by_task.pop(task_id, None)
++        if key and _inflight_keys.get(key) == task_id:
++            _inflight_keys.pop(key, None)
++
 +
  def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                    link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                    _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-@@ -130,6 +146,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -130,6 +175,24 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
      if not model_name or not provider_id:
          raise HTTPException(status_code=400, detail="请选择模型和提供者")
  
@@ -11604,8 +11781,7 @@ index f433e46..1345c3b 100644
 +        _run_note_task_inner(task_id, video_url, platform, quality, link, screenshot, model_name, provider_id,
 +                             _format, style, extras, video_understanding, video_interval, grid_size)
 +    finally:
-+        with _running_tasks_lock:
-+            _running_tasks.discard(task_id)
++        _release_submit(task_id)
 +
 +
 +def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
@@ -11616,7 +11792,7 @@ index f433e46..1345c3b 100644
      def _execute_note_task():
          return NoteGenerator().generate(
              video_url=video_url,
-@@ -149,12 +184,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -149,12 +212,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
          )
  
      logger.info(f"任务进入执行队列 (task_id={task_id})")
@@ -11651,7 +11827,7 @@ index f433e46..1345c3b 100644
  
      # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
      try:
-@@ -165,13 +221,77 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -165,13 +249,77 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
  
  
  @router.post('/delete_task')
@@ -11734,8 +11910,17 @@ index f433e46..1345c3b 100644
  
  
  @router.post("/upload")
-@@ -227,6 +347,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -225,8 +373,17 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+             # 正常新建任务
+             task_id = str(uuid.uuid4())
  
++        # 同视频同风格已经在跑就把那个 task_id 还回去：前端继续显示同一个任务的进度，
++        # 而不是再起一份注定撞下载文件名的任务
++        duplicate_of = _claim_submit(_submit_key(video_id, data.video_url, data.style), task_id)
++        if duplicate_of:
++            logger.warning(f"同一视频同一风格的任务已在生成中（{duplicate_of}），忽略这次重复提交")
++            return R.success({"task_id": duplicate_of, "deduped": True})
++
          # 统一先写入 PENDING，表示已进入队列等待串行执行
          NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
 +        # 同步登记进笔记库索引，这样"生成中"的笔记立刻出现在书架页上
@@ -11743,7 +11928,7 @@ index f433e46..1345c3b 100644
  
          # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
          if data.prefetched_transcript:
-@@ -245,6 +367,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -245,6 +402,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
  
  @router.get("/task_status/{task_id}")
  def get_task_status(task_id: str):
@@ -11754,14 +11939,16 @@ index f433e46..1345c3b 100644
  
 diff --git a/backend/app/routers/storage.py b/backend/app/routers/storage.py
 new file mode 100644
-index 0000000..126fba4
+index 0000000..d357179
 --- /dev/null
 +++ b/backend/app/routers/storage.py
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,73 @@
++from typing import Optional
++
 +from fastapi import APIRouter
 +from pydantic import BaseModel
 +
-+from app.services import library_service
++from app.services import cleanup_service, library_service
 +from app.utils.logger import get_logger
 +from app.utils.response import ResponseWrapper as R
 +
@@ -11772,6 +11959,12 @@ index 0000000..126fba4
 +
 +class DeleteOrphansRequest(BaseModel):
 +    names: list[str]
++
++
++class CleanupPolicyRequest(BaseModel):
++    enabled: Optional[bool] = None
++    keep_days: Optional[int] = None
++    max_orphan_mb: Optional[int] = None
 +
 +
 +@router.get("/storage/scan")
@@ -11792,6 +11985,37 @@ index 0000000..126fba4
 +    except Exception as e:
 +        logger.error(f"删除孤儿截图失败: {e}", exc_info=True)
 +        return R.error(msg=f"删除失败: {e}")
++
++
++@router.get("/storage/cleanup_policy")
++def get_cleanup_policy():
++    """自动清理的策略与上次执行结果。"""
++    try:
++        return R.success(data=cleanup_service.get_status())
++    except Exception as e:
++        logger.error(f"读取自动清理配置失败: {e}", exc_info=True)
++        return R.error(msg=f"读取配置失败: {e}")
++
++
++@router.post("/storage/cleanup_policy")
++def update_cleanup_policy(data: CleanupPolicyRequest):
++    """改策略。keep_days / max_orphan_mb 填 0 = 关掉对应那条规则。"""
++    try:
++        patch = {k: v for k, v in data.model_dump().items() if v is not None}
++        return R.success(data=cleanup_service.save_policy(patch), msg="已保存")
++    except Exception as e:
++        logger.error(f"保存自动清理配置失败: {e}", exc_info=True)
++        return R.error(msg=f"保存失败: {e}")
++
++
++@router.post("/storage/cleanup_run")
++def run_cleanup_now():
++    """立刻跑一次自动清理（界面上的按钮）。手动触发不受"启用"开关限制。"""
++    try:
++        return R.success(data=cleanup_service.run_auto_cleanup("manual"))
++    except Exception as e:
++        logger.error(f"自动清理失败: {e}", exc_info=True)
++        return R.error(msg=f"清理失败: {e}")
 diff --git a/backend/app/services/chat_service.py b/backend/app/services/chat_service.py
 index e7239cf..d15aced 100644
 --- a/backend/app/services/chat_service.py
@@ -11842,6 +12066,200 @@ index e7239cf..d15aced 100644
  
      # 3. 获取 LLM client
      provider = ProviderService.get_provider_by_id(provider_id)
+diff --git a/backend/app/services/cleanup_service.py b/backend/app/services/cleanup_service.py
+new file mode 100644
+index 0000000..a5b1d80
+--- /dev/null
++++ b/backend/app/services/cleanup_service.py
+@@ -0,0 +1,188 @@
++"""孤儿截图的自动清理：按天数 + 按孤儿总量两条规则，定时在后台跑。
++
++两条规则都只在「孤儿集合」里生效——候选集由 library_service.scan_storage() 给出，
++它只列没有任何笔记引用（清单 ∪ 正则都查不到）的文件，所以笔记里的正常截图
++从一开始就不在候选里，不是靠阈值挡住的。真正的删除动作复用
++delete_orphan_screenshots()，删除前会再算一次引用，期间被新笔记引用的会自动跳过。
++
++策略与上次执行结果存 config/storage_cleanup.json（与 proxy.json 同一套约定，
++config 是独立卷，重建容器不丢）。keep_days / max_orphan_mb 填 0 表示关掉对应那条规则。
++"""
++
++import json
++import os
++import threading
++import time
++from pathlib import Path
++
++from app.services import library_service
++from app.utils.logger import get_logger
++
++logger = get_logger(__name__)
++
++# 测试里会被重绑到临时目录，所以每次用都重新取模块属性，别在 import 期固化成 Path
++POLICY_PATH = os.getenv("STORAGE_CLEANUP_CONFIG", "config/storage_cleanup.json")
++
++# 首次延迟：避开启动时的回填/模型加载；之后每 24 小时一次
++INITIAL_DELAY_SECONDS = 90
++INTERVAL_SECONDS = 24 * 3600
++
++DEFAULTS = {"enabled": True, "keep_days": 14, "max_orphan_mb": 800}
++
++_started = False
++_lock = threading.Lock()
++
++
++def _read_raw() -> dict:
++    path = Path(POLICY_PATH)
++    if not path.is_file():
++        return {}
++    try:
++        return json.loads(path.read_text(encoding="utf-8"))
++    except Exception as e:
++        # 配置坏了不该让接口 500，退回默认值，下一次保存会覆盖掉坏文件
++        logger.warning(f"读取自动清理配置失败，用默认值: {e}")
++        return {}
++
++
++def _write_raw(data: dict) -> None:
++    path = Path(POLICY_PATH)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
++
++
++def load_policy() -> dict:
++    raw = _read_raw()
++    policy = dict(DEFAULTS)
++    for key in DEFAULTS:
++        if key in raw:
++            policy[key] = raw[key]
++    policy["enabled"] = bool(policy["enabled"])
++    policy["keep_days"] = max(0, int(policy["keep_days"] or 0))
++    policy["max_orphan_mb"] = max(0, int(policy["max_orphan_mb"] or 0))
++    return policy
++
++
++def save_policy(patch: dict) -> dict:
++    """局部更新策略。写文件时保留 last_run，别把执行记录冲掉。"""
++    policy = load_policy()
++    if "enabled" in patch:
++        policy["enabled"] = bool(patch["enabled"])
++    if "keep_days" in patch:
++        policy["keep_days"] = max(0, int(patch["keep_days"] or 0))
++    if "max_orphan_mb" in patch:
++        policy["max_orphan_mb"] = max(0, int(patch["max_orphan_mb"] or 0))
++    raw = _read_raw()
++    raw.update(policy)
++    _write_raw(raw)
++    logger.info(
++        f"自动清理策略已更新：enabled={policy['enabled']} keep_days={policy['keep_days']} "
++        f"max_orphan_mb={policy['max_orphan_mb']}"
++    )
++    return policy
++
++
++def get_status() -> dict:
++    return {"policy": load_policy(), "last_run": _read_raw().get("last_run")}
++
++
++def run_auto_cleanup(reason: str = "schedule") -> dict:
++    """跑一次自动清理。reason=schedule 时尊重开关，manual（界面上点按钮）总是执行。"""
++    policy = load_policy()
++    if reason == "schedule" and not policy["enabled"]:
++        return {"skipped": "disabled", "deleted": 0, "freed_bytes": 0}
++
++    scan = library_service.scan_storage()
++    orphans = scan.get("orphans") or []
++    now_ms = int(time.time() * 1000)
++
++    aged, kept = [], []
++    if policy["keep_days"] > 0:
++        cutoff = now_ms - policy["keep_days"] * 86400 * 1000
++        for item in orphans:
++            (aged if item["mtime"] < cutoff else kept).append(item)
++    else:
++        kept = list(orphans)
++
++    # 容量规则算的是「孤儿总量」，不是截图目录总量：被引用的截图既不计数也不参与删除
++    over_cap = []
++    cap_bytes = policy["max_orphan_mb"] * 1024 * 1024
++    if cap_bytes > 0:
++        excess = sum(item["size"] for item in kept) - cap_bytes
++        if excess > 0:
++            for item in sorted(kept, key=lambda x: x["mtime"]):  # 最旧的先走
++                over_cap.append(item)
++                excess -= item["size"]
++                if excess <= 0:
++                    break
++
++    targets = aged + over_cap
++    size_by_name = {item["name"]: item["size"] for item in targets}
++    result = (
++        library_service.delete_orphan_screenshots(list(size_by_name))
++        if size_by_name
++        else {"deleted": [], "skipped": []}
++    )
++    deleted = result["deleted"]
++    freed = sum(size_by_name.get(name, 0) for name in deleted)
++
++    remaining = [o for o in orphans if o["name"] not in set(deleted)]
++    stats = {
++        "at": now_ms,
++        "reason": reason,
++        "aged_deleted": len([n for n in deleted if n in {i["name"] for i in aged}]),
++        "over_cap_deleted": len([n for n in deleted if n in {i["name"] for i in over_cap}]),
++        "deleted": len(deleted),
++        "skipped": len(result["skipped"]),
++        "freed_bytes": freed,
++        "remaining_orphans": len(remaining),
++        "remaining_orphan_bytes": sum(o["size"] for o in remaining),
++        "policy": policy,
++    }
++
++    raw = _read_raw()
++    raw.update(policy)
++    raw["last_run"] = stats
++    try:
++        _write_raw(raw)
++    except Exception as e:
++        logger.warning(f"写入自动清理记录失败: {e}")
++
++    if deleted:
++        logger.info(
++            f"自动清理孤儿截图（{reason}）：删除 {len(deleted)} 张、释放 {freed / 1048576:.1f}MB，"
++            f"其中超期 {stats['aged_deleted']} 张、超容量 {stats['over_cap_deleted']} 张；"
++            f"剩余孤儿 {stats['remaining_orphans']} 张 / {stats['remaining_orphan_bytes'] / 1048576:.1f}MB"
++        )
++    else:
++        logger.info(
++            f"自动清理孤儿截图（{reason}）：无需清理，剩余孤儿 {stats['remaining_orphans']} 张"
++        )
++    return stats
++
++
++def _loop() -> None:
++    time.sleep(INITIAL_DELAY_SECONDS)
++    while True:
++        try:
++            run_auto_cleanup("schedule")
++        except Exception as e:
++            # 后台线程里抛异常会静默死掉，之后再也不清理，必须兜住
++            logger.error(f"自动清理失败: {e}", exc_info=True)
++        time.sleep(INTERVAL_SECONDS)
++
++
++def start_scheduler() -> bool:
++    """启动后台清理线程（幂等）。在 main.py 的 lifespan 里调用。"""
++    global _started
++    with _lock:
++        if _started:
++            return False
++        _started = True
++    policy = load_policy()
++    logger.info(
++        f"孤儿截图自动清理已启动：enabled={policy['enabled']} keep_days={policy['keep_days']} "
++        f"max_orphan_mb={policy['max_orphan_mb']}，首次 {INITIAL_DELAY_SECONDS}s 后执行、之后每 24h 一次"
++    )
++    threading.Thread(target=_loop, name="orphan-cleanup", daemon=True).start()
++    return True
 diff --git a/backend/app/services/library_service.py b/backend/app/services/library_service.py
 new file mode 100644
 index 0000000..779bcd0
@@ -12176,19 +12594,20 @@ index 0000000..779bcd0
 +    logger.info(f"孤儿截图清理：删除 {len(deleted)} 张，跳过 {len(skipped)} 张")
 +    return {"deleted": deleted, "skipped": skipped}
 diff --git a/backend/app/services/note.py b/backend/app/services/note.py
-index f493c91..3715673 100644
+index f493c91..45e98f9 100644
 --- a/backend/app/services/note.py
 +++ b/backend/app/services/note.py
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,8 @@
  import json
 -import logging
  import os
 +import shutil
++import threading
 +import uuid
  from dataclasses import asdict
  from pathlib import Path
  from typing import List, Optional, Tuple, Union, Any
-@@ -31,8 +32,18 @@ from app.services.constant import SUPPORT_PLATFORM_MAP
+@@ -31,8 +33,18 @@ from app.services.constant import SUPPORT_PLATFORM_MAP
  from app.services.provider import ProviderService
  from app.transcriber.base import Transcriber
  from app.transcriber.transcriber_provider import get_transcriber, _transcribers
@@ -12208,7 +12627,7 @@ index f493c91..3715673 100644
  from app.utils.status_code import StatusCode
  from app.utils.video_helper import generate_screenshot
  from app.utils.video_reader import VideoReader
-@@ -54,9 +65,10 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
+@@ -54,9 +66,26 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
  # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
  IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
  
@@ -12219,10 +12638,26 @@ index f493c91..3715673 100644
 +# 会被 lastResort（只放 WARNING 及以上）吞掉——"检测到转写缓存""截图整理：N 个标记 → 保留 M 张"
 +# "任务进入执行队列"这些关键节点在 backend.log 里全都看不到，排查时只能靠猜。
 +logger = get_logger(__name__)
++
++# 同一个视频被并发下载时（例如同时生成「行测课程」和「行测速查卡」），yt-dlp 写的是同一个
++# {video_id}.mp4.part：先完成的那个把 .part 改名成正式文件，后一个 rename 就撞
++# [Errno 2] No such file or directory，整篇笔记 FAILED（实测过一次，白烧一遍 API 额度）。
++# 按视频 URL 串行化下载：第二个任务等第一个下完，然后走缓存命中，几乎不额外花时间。
++# 锁只包住下载本身，抽帧（每次运行独立目录）和 LLM 调用都不在锁里。
++_download_locks: dict = {}
++_download_locks_guard = threading.Lock()
++
++
++def _download_lock(key: str) -> threading.Lock:
++    with _download_locks_guard:
++        lock = _download_locks.get(key)
++        if lock is None:
++            lock = _download_locks[key] = threading.Lock()
++        return lock
  
  
  class NoteGenerator:
-@@ -232,7 +244,12 @@ class NoteGenerator:
+@@ -232,7 +261,12 @@ class NoteGenerator:
              # 6. 完成
              self._update_status(task_id, TaskStatus.SUCCESS)
              logger.info(f"笔记生成成功 (task_id={task_id})")
@@ -12236,7 +12671,7 @@ index f493c91..3715673 100644
  
          except Exception as exc:
              logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
-@@ -396,14 +413,23 @@ class NoteGenerator:
+@@ -396,14 +430,23 @@ class NoteGenerator:
          task_id = audio_cache_file.stem.split("_")[0]
          self._update_status(task_id, status_phase)
  
@@ -12261,7 +12696,7 @@ index f493c91..3715673 100644
  
          # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
          if skip_download:
-@@ -425,34 +451,7 @@ class NoteGenerator:
+@@ -425,44 +468,18 @@ class NoteGenerator:
              except Exception as exc:
                  logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
  
@@ -12297,7 +12732,24 @@ index f493c91..3715673 100644
  
          # 下载音频
          try:
-@@ -471,6 +470,58 @@ class NoteGenerator:
+             logger.info("开始下载音频")
+-            audio = downloader.download(
+-                video_url=video_url,
+-                quality=quality,
+-                output_dir=output_path,
+-                need_video=need_video,
+-            )
++            with _download_lock(video_url):
++                audio = downloader.download(
++                    video_url=video_url,
++                    quality=quality,
++                    output_dir=output_path,
++                    need_video=need_video,
++                )
+             audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
+             logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
+             return audio
+@@ -471,6 +488,59 @@ class NoteGenerator:
              self._handle_exception(task_id, exc)
              raise
  
@@ -12325,7 +12777,8 @@ index f493c91..3715673 100644
 +        grid_dir = Path(get_app_dir("grid_output")) / run_dir
 +        try:
 +            logger.info("开始下载视频")
-+            video_path_str = downloader.download_video(video_url)
++            with _download_lock(video_url):
++                video_path_str = downloader.download_video(video_url)
 +            self.video_path = Path(video_path_str)
 +            logger.info(f"视频下载完成：{self.video_path}")
 +
@@ -12356,7 +12809,7 @@ index f493c91..3715673 100644
  
      def _get_transcript(
          self,
-@@ -560,6 +611,10 @@ class NoteGenerator:
+@@ -560,6 +630,10 @@ class NoteGenerator:
          try:
              logger.info("开始转写音频")
              transcript = self.transcriber.transcript(file_path=audio_file)
@@ -12367,7 +12820,7 @@ index f493c91..3715673 100644
              transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
              logger.info(f"转写并缓存成功 ({transcript_cache_file})")
              return transcript
-@@ -595,7 +650,10 @@ class NoteGenerator:
+@@ -595,7 +669,10 @@ class NoteGenerator:
          :param extras: GPT 额外参数
          :return: 生成的 Markdown 字符串
          """
@@ -12379,7 +12832,7 @@ index f493c91..3715673 100644
          self._update_status(task_id, TaskStatus.SUMMARIZING)
  
          source = GPTSource(
-@@ -639,6 +697,9 @@ class NoteGenerator:
+@@ -639,6 +716,9 @@ class NoteGenerator:
          :param platform: 平台标识，用于链接替换
          :return: 处理后的 Markdown 字符串
          """
@@ -12389,7 +12842,7 @@ index f493c91..3715673 100644
          if "screenshot" in formats and video_path:
              try:
                  markdown = self._insert_screenshots(markdown, video_path)
-@@ -651,28 +712,85 @@ class NoteGenerator:
+@@ -651,28 +731,85 @@ class NoteGenerator:
              except Exception as e:
                  logger.warning(f"链接插入失败，跳过该步骤：{e}")
  
@@ -13383,10 +13836,10 @@ index 100dbff..db6cc64 100644
                  image_paths.append(out_path)
  
 diff --git a/backend/main.py b/backend/main.py
-index 4b1d080..898f65e 100644
+index 4b1d080..740a731 100644
 --- a/backend/main.py
 +++ b/backend/main.py
-@@ -48,6 +48,15 @@ async def lifespan(app: FastAPI):
+@@ -48,6 +48,23 @@ async def lifespan(app: FastAPI):
          logger.info("[startup 2/5] init_db() — 初始化 SQLite 数据库")
          init_db()
  
@@ -13399,15 +13852,23 @@ index 4b1d080..898f65e 100644
 +        except Exception as e:
 +            logger.warning(f"[startup 2/5] 笔记库回填失败（不影响启动）: {e}")
 +
++        # 孤儿截图自动清理（后台线程：首次延迟 90s，之后每 24h 一次）。
++        # 必须排在回填之后——回填会把截图清单补写进老笔记的 json，引用集完整了再判孤儿才不会误删
++        from app.services.cleanup_service import start_scheduler
++        try:
++            start_scheduler()
++        except Exception as e:
++            logger.warning(f"[startup 2/5] 自动清理线程启动失败（不影响启动）: {e}")
++
          logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
          # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
          # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
 diff --git a/backend/tests/isolation.py b/backend/tests/isolation.py
 new file mode 100644
-index 0000000..a573890
+index 0000000..5db8be9
 --- /dev/null
 +++ b/backend/tests/isolation.py
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,133 @@
 +"""测试隔离：DB / 笔记目录 / 截图目录 / 向量库一律指到临时目录。
 +
 +为什么要有这么个东西：app.db.engine 在 import 时就把 DATABASE_URL 读死了，而
@@ -13511,6 +13972,13 @@ index 0000000..a573890
 +
 +        library_service.NOTE_OUTPUT_DIR = str(self.note_dir)
 +        library_service.IMAGE_OUTPUT_DIR = self.shot_dir
++        try:
++            from app.services import cleanup_service
++
++            # 策略文件默认写 config/storage_cleanup.json（相对 CWD），不重绑就会写进仓库
++            cleanup_service.POLICY_PATH = str(self.tmp / "config" / "storage_cleanup.json")
++        except Exception:
++            pass
 +        try:
 +            from app.services import vector_store
 +
@@ -14349,10 +14817,10 @@ index 7ad2cb0..80b52b8 100644
      unittest.main()
 diff --git a/backend/tests/test_note_task_guard.py b/backend/tests/test_note_task_guard.py
 new file mode 100644
-index 0000000..df6c54c
+index 0000000..afdaf22
 --- /dev/null
 +++ b/backend/tests/test_note_task_guard.py
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,90 @@
 +import pathlib
 +import sys
 +import threading
@@ -14361,10 +14829,26 @@ index 0000000..df6c54c
 +
 +sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 +
-+from app.routers import note as note_router
++from tests.isolation import IsolatedEnv  # noqa: E402
++
++# _run_note_task_inner 里会写笔记库索引，不隔离就会在仓库里留下一个空的 bili_note.db
++ENV = IsolatedEnv("bilinote-guard-test-")
++
++from app.routers import note as note_router  # noqa: E402
++from app.services import note as note_service  # noqa: E402
 +
 +
 +class TestDuplicateSubmitGuard(unittest.TestCase):
++    def setUp(self):
++        ENV.bind()
++
++    def tearDown(self):
++        # 这几个是模块级注册表，用完必须清干净，否则用例之间会互相影响
++        note_router._inflight_keys.clear()
++        note_router._key_by_task.clear()
++        note_router._running_tasks.clear()
++        note_service._download_locks.clear()
++
 +    def test_same_task_submitted_twice_runs_once(self):
 +        """抽帧加生成要几分钟，用户重复点「重试」时第二次必须被忽略——
 +        否则两次 VideoReader.run() 会互相删掉对方的中间帧文件。"""
@@ -14394,6 +14878,35 @@ index 0000000..df6c54c
 +
 +        self.assertEqual(calls, ["task-guard"])
 +        self.assertNotIn("task-guard", note_router._running_tasks)
++
++    def test_same_video_and_style_dedupes(self):
++        """一次点击发出两个请求（实测两个新 task_id 只差 0.5ms）时，第二个必须复用第一个：
++        否则两份 yt-dlp 写同一个 {video_id}.mp4.part，后完成的那个 rename 撞 Errno 2，
++        整篇笔记 FAILED，还白烧一遍 API 额度。"""
++        key = note_router._submit_key("BV1py", "https://b23.tv/x", "xingce_course")
++        self.assertIsNone(note_router._claim_submit(key, "t1"))
++        self.assertEqual(note_router._claim_submit(key, "t2"), "t1")
++        # 第一个跑完后要放开，否则这条视频这个风格再也生成不了
++        note_router._release_submit("t1")
++        self.assertIsNone(note_router._claim_submit(key, "t3"))
++
++    def test_different_style_of_same_video_is_allowed(self):
++        """同一个视频生成「行测课程」和「行测速查卡」是正常用法，不能被去重挡掉。"""
++        a = note_router._submit_key("BV1py", "https://b23.tv/x", "xingce_course")
++        b = note_router._submit_key("BV1py", "https://b23.tv/x", "xingce_cheatsheet")
++        self.assertIsNone(note_router._claim_submit(a, "t1"))
++        self.assertIsNone(note_router._claim_submit(b, "t2"))
++
++    def test_retry_of_same_task_is_not_deduped(self):
++        """重试走的是同一个 task_id，不能把自己当成重复提交挡掉。"""
++        key = note_router._submit_key("BV1py", "https://b23.tv/x", "xingce_course")
++        self.assertIsNone(note_router._claim_submit(key, "t1"))
++        self.assertIsNone(note_router._claim_submit(key, "t1"))
++
++    def test_download_lock_is_per_video(self):
++        """并发保护按视频 URL 取锁：同视频同一把（串行下载），不同视频互不阻塞。"""
++        self.assertIs(note_service._download_lock("u1"), note_service._download_lock("u1"))
++        self.assertIsNot(note_service._download_lock("u1"), note_service._download_lock("u2"))
 +
 +
 +if __name__ == "__main__":
@@ -14707,10 +15220,10 @@ index f947ef8..98c6991 100644
      unittest.main()
 diff --git a/backend/tests/test_storage_search.py b/backend/tests/test_storage_search.py
 new file mode 100644
-index 0000000..2709fa9
+index 0000000..bfc6024
 --- /dev/null
 +++ b/backend/tests/test_storage_search.py
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,285 @@
 +"""V3.2 后端测试：存储扫描/孤儿截图清理 + FTS5 全文搜索。
 +
 +只 import app.db / app.services.library_service（不碰 routers，避免拉 fastapi/chromadb），
@@ -14733,7 +15246,7 @@ index 0000000..2709fa9
 +
 +from app.db import library_dao, search_dao  # noqa: E402
 +from app.db.init_db import init_db  # noqa: E402
-+from app.services import library_service  # noqa: E402
++from app.services import cleanup_service, library_service  # noqa: E402
 +
 +NOTE_DIR = ENV.note_dir
 +SHOT_DIR = ENV.shot_dir
@@ -14910,6 +15423,85 @@ index 0000000..2709fa9
 +        self.assertNotIn(broken, [o["name"] for o in library_service.scan_storage()["orphans"]])
 +        self.assertEqual(library_service.delete_orphan_screenshots([broken])["deleted"], [])
 +        self.assertTrue((SHOT_DIR / broken).exists())
++
++
++class TestAutoCleanup(unittest.TestCase):
++    """自动清理的两条规则（超期 / 超容量）都只作用于孤儿截图。
++
++    被笔记引用的截图不是"靠阈值保住"的，而是压根不进候选集——这条必须有测试钉住，
++    因为容量规则算的是孤儿总量，把被引用的大文件算进去就会引发连锁误删。
++    """
++
++    USED_OLD = "screenshot_020_aaaaaaaa-0000-4000-8000-00000000aa01.jpg"
++    ORPHAN_OLD = "screenshot_021_aaaaaaaa-0000-4000-8000-00000000aa02.jpg"
++    ORPHAN_MID = "screenshot_022_aaaaaaaa-0000-4000-8000-00000000aa03.jpg"
++    ORPHAN_NEW = "screenshot_023_aaaaaaaa-0000-4000-8000-00000000aa04.jpg"
++
++    def setUp(self):
++        ENV.bind()
++        ENV.reset_dirs()
++        library_service._ORPHAN_GRACE_MS = 0  # 宽限期另有专测，这里要把规则单独验清楚
++        for tid in _FTS_IDS:
++            search_dao.delete_note(tid)
++        _write_note(NOTE_1, f"## 节\n![](/static/screenshots/{self.USED_OLD})\n" + "正" * 40,
++                    manifest=[self.USED_OLD])
++        for name in (self.USED_OLD, self.ORPHAN_OLD, self.ORPHAN_NEW):
++            (SHOT_DIR / name).write_bytes(b"x" * 100)
++        self._age(self.USED_OLD, 30)
++        self._age(self.ORPHAN_OLD, 30)
++
++    @staticmethod
++    def _age(name: str, days: int) -> None:
++        old = time.time() - days * 86400
++        os.utime(SHOT_DIR / name, (old, old))
++
++    def test_age_rule_only_touches_orphans(self):
++        cleanup_service.save_policy({"enabled": True, "keep_days": 14, "max_orphan_mb": 0})
++        stats = cleanup_service.run_auto_cleanup("schedule")
++        self.assertEqual(stats["aged_deleted"], 1)
++        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists())
++        self.assertTrue((SHOT_DIR / self.ORPHAN_NEW).exists(), "没超期的孤儿不该被删")
++        self.assertTrue((SHOT_DIR / self.USED_OLD).exists(), "被笔记引用的截图绝不能删")
++
++    def test_cap_rule_counts_orphan_bytes_only(self):
++        # 3 张 400KB 孤儿 = 1.2MB，上限 1MB → 只需删掉最旧的那张就达标；
++        # 另有一张 5MB 的【被引用】截图，若被算进容量会引发连锁误删
++        for name in (self.ORPHAN_OLD, self.ORPHAN_MID, self.ORPHAN_NEW):
++            (SHOT_DIR / name).write_bytes(b"x" * 400 * 1024)
++        (SHOT_DIR / self.USED_OLD).write_bytes(b"x" * 5 * 1024 * 1024)
++        self._age(self.ORPHAN_OLD, 30)
++        self._age(self.ORPHAN_MID, 10)
++        cleanup_service.save_policy({"enabled": True, "keep_days": 0, "max_orphan_mb": 1})
++
++        stats = cleanup_service.run_auto_cleanup("schedule")
++
++        self.assertEqual(stats["deleted"], 1)
++        self.assertEqual(stats["over_cap_deleted"], 1)
++        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists(), "最旧的孤儿先走")
++        self.assertTrue((SHOT_DIR / self.ORPHAN_MID).exists())
++        self.assertTrue((SHOT_DIR / self.ORPHAN_NEW).exists())
++        self.assertTrue((SHOT_DIR / self.USED_OLD).exists(), "被引用的大图既不计入容量也不许删")
++        self.assertLessEqual(stats["remaining_orphan_bytes"], 1024 * 1024)
++
++    def test_switch_off_blocks_schedule_but_not_manual(self):
++        cleanup_service.save_policy({"enabled": False, "keep_days": 14, "max_orphan_mb": 0})
++        self.assertEqual(cleanup_service.run_auto_cleanup("schedule")["skipped"], "disabled")
++        self.assertTrue((SHOT_DIR / self.ORPHAN_OLD).exists())
++        # 界面上点"立即清理"是明确意图，不受开关限制
++        self.assertEqual(cleanup_service.run_auto_cleanup("manual")["deleted"], 1)
++        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists())
++
++    def test_policy_and_last_run_persist_outside_repo(self):
++        cleanup_service.save_policy({"keep_days": 7, "max_orphan_mb": 500})
++        self.assertEqual(cleanup_service.load_policy()["keep_days"], 7)
++        cleanup_service.run_auto_cleanup("manual")
++        status = cleanup_service.get_status()
++        self.assertEqual(status["policy"]["max_orphan_mb"], 500)
++        self.assertEqual(status["last_run"]["reason"], "manual")
++        self.assertEqual(status["last_run"]["deleted"], 1)
++        # 策略文件必须落在临时目录：写进仓库的 backend/config/ 就是又一次测试污染
++        self.assertIn(str(ENV.tmp), cleanup_service.POLICY_PATH)
++        self.assertTrue(pathlib.Path(cleanup_service.POLICY_PATH).is_file())
 +
 +
 +if __name__ == "__main__":
@@ -15512,10 +16104,10 @@ index 0000000..c3b7e04
 +}
 diff --git a/e2e/playwright.config.ts b/e2e/playwright.config.ts
 new file mode 100644
-index 0000000..d4ba93d
+index 0000000..d6dfb98
 --- /dev/null
 +++ b/e2e/playwright.config.ts
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,19 @@
 +import { defineConfig } from '@playwright/test'
 +
 +// 用系统已装的 Edge（channel），不下载 Playwright 自带浏览器。
@@ -15525,6 +16117,10 @@ index 0000000..d4ba93d
 +  testDir: './tests',
 +  timeout: 60_000,
 +  retries: 0,
++  // 单 worker：每个用例都要渲染两三万字的笔记，3 个 worker 并跑时 CPU 争用会让
++  // scroll-spy 这类"滚动后等高亮变化"的用例偶发超时（单跑 3.9s 过、并跑挂）。
++  // 整套 14 例串行也只要 45 秒左右，确定性比这点时间值钱。
++  workers: 1,
 +  use: {
 +    baseURL: process.env.E2E_BASE_URL || 'http://localhost',
 +    channel: process.env.E2E_CHANNEL || 'msedge',
@@ -15533,10 +16129,10 @@ index 0000000..d4ba93d
 +})
 diff --git a/e2e/tests/features.spec.ts b/e2e/tests/features.spec.ts
 new file mode 100644
-index 0000000..e0e1199
+index 0000000..30ee4cb
 --- /dev/null
 +++ b/e2e/tests/features.spec.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,108 @@
 +import { test, expect } from '@playwright/test'
 +
 +// 覆盖 V3.2/V3.3 的交互项。依赖真实数据的地方都先取 /api/library，没数据就 skip。
@@ -15618,11 +16214,32 @@ index 0000000..e0e1199
 +  await expect(page.getByRole('tablist')).toBeVisible()
 +  const vp = page.locator('[data-radix-scroll-area-viewport]').first()
 +  const before = await vp.evaluate(el => el.scrollTop)
-+  // 点第 30 行转写（足够靠后，对应正文中后段章节）
-+  await page.getByRole('tabpanel').locator('div.grid').nth(30).click()
-+  await page.waitForTimeout(1200)
-+  const after = await vp.evaluate(el => el.scrollTop)
-+  expect(after).toBeGreaterThan(before)
++  // 必须点靠后的一条：章节胶囊的时间分布因笔记而异，点第 30 行可能映射到开头章节，
++  // 正文本来就在顶部，scrollTop 前后都是 0（换一篇笔记就假失败）。最后一条一定在后段。
++  await page.getByRole('tabpanel').locator('div.grid').last().click()
++  await expect
++    .poll(() => vp.evaluate(el => el.scrollTop), { timeout: 8000 })
++    .toBeGreaterThan(before)
++})
++
++test('存储页能改自动清理策略并立即执行', async ({ page }) => {
++  await page.goto('/settings/storage')
++  const main = page.getByRole('main')
++  await expect(main.getByText('自动清理孤儿截图')).toBeVisible()
++  // 开关默认开着；策略存到服务端后刷新页面要还在
++  await expect(main.getByLabel('启用自动清理')).toBeVisible()
++  await main.getByLabel('保留天数').fill('14')
++  await main.getByLabel('孤儿总量上限 MB').fill('800')
++  await main.getByRole('button', { name: '保存设置' }).click()
++  await expect(page.getByText('自动清理设置已保存')).toBeVisible()
++
++  await page.reload()
++  await expect(main.getByLabel('保留天数')).toHaveValue('14')
++  await expect(main.getByLabel('孤儿总量上限 MB')).toHaveValue('800')
++
++  // 手动触发一次：14 天 / 800MB 的阈值下现存孤儿都不满足条件，所以断言"跑过并留下记录"而不是删除数量
++  await main.getByRole('button', { name: '立即清理一次' }).click()
++  await expect(main.getByText(/上次清理：/)).toBeVisible({ timeout: 30000 })
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
