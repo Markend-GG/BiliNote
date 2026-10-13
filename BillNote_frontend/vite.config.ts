@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import fs from 'fs'
@@ -55,6 +56,10 @@ export default defineConfig(({ mode }) => {
           },
         },
       },
+    },
+    test: {
+      environment: 'jsdom',
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     },
     server: {
       host: '0.0.0.0',
