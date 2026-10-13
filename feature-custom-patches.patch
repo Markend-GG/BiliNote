@@ -5219,10 +5219,10 @@ index 0000000..825306a
 +})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/index.tsx b/BillNote_frontend/src/pages/LibraryPage/index.tsx
 new file mode 100644
-index 0000000..d8ef534
+index 0000000..bdc4426
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/index.tsx
-@@ -0,0 +1,770 @@
+@@ -0,0 +1,771 @@
 +import { useEffect, useMemo, useState } from 'react'
 +import { Link, useLocation, useNavigate } from 'react-router-dom'
 +import {
@@ -5768,9 +5768,10 @@ index 0000000..d8ef534
 +        open={newNoteOpen}
 +        onOpenChange={setNewNoteOpen}
 +        taskId={null}
-+        onSubmitted={taskId => {
++        onSubmitted={() => {
++          // 提交成功后留在书架：新卡片带着「生成中」排在最前，想看进度再点进去。
++          // 直接把人扔进流程页等于锁在那一页——用户明确要的是"不影响我做其他操作"
 +          fetchLibrary()
-+          openNote(taskId)
 +        }}
 +      />
 +
@@ -6963,15 +6964,15 @@ index 0000000..040a183
 +}
 diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
 new file mode 100644
-index 0000000..9f4b820
+index 0000000..c79d346
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-@@ -0,0 +1,542 @@
+@@ -0,0 +1,559 @@
 +import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 +import { useNavigate } from 'react-router-dom'
 +import ReactMarkdown from 'react-markdown'
 +import { Button } from '@/components/ui/button.tsx'
-+import { ArrowRight } from 'lucide-react'
++import { ArrowLeft, ArrowRight } from 'lucide-react'
 +import { toast } from 'react-hot-toast'
 +import Error from '@/components/Lottie/error.tsx'
 +import Loading from '@/components/Lottie/Loading.tsx'
@@ -7302,14 +7303,31 @@ index 0000000..9f4b820
 +  // 编辑模式：解析草稿里的图片引用，生成缩略图列表（便于直观识别重复图片并删除）
 +  if (status === 'loading') {
 +    return (
-+      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
-+        <StepBar steps={steps} currentStep={taskStatus} />
-+        <Loading />
-+        <div className="text-center text-sm">
-+          <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
-+          <p className="mt-2 text-xs text-neutral-500">
-+            长视频要抽帧并分批送给模型，可能需要几分钟；按钮已锁定，无需重复点击
-+          </p>
++      <div className="flex h-full w-full flex-col">
++        {/* 生成中也要有出口：这一页以前没有任何返回入口，人被卡在这儿只能刷新或按浏览器后退，
++            很自然就会以为任务没成功、回去再新建一次（同一视频被生成两遍） */}
++        <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
++          <Button variant="ghost" size="sm" onClick={() => goShelf(folderId)}>
++            <ArrowLeft className="h-4 w-4" />
++            返回书架
++          </Button>
++          <span className="text-muted-foreground min-w-0 truncate text-xs">
++            {currentTask?.audioMeta?.title ||
++              currentTask?.formData?.video_url ||
++              '新任务'}{' '}
++            · 生成中，可以随时离开这一页
++          </span>
++        </div>
++        <div className="flex flex-1 flex-col items-center justify-center space-y-4 text-neutral-500">
++          <StepBar steps={steps} currentStep={taskStatus} />
++          <Loading />
++          <div className="text-center text-sm">
++            <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
++            <p className="text-muted-foreground mt-2 max-w-md text-xs">
++              长视频要抽帧并分批送给模型，可能需要几分钟。任务在后端跑着，
++              回书架做别的事也不影响，完成后那张卡片会变成「已完成」。
++            </p>
++          </div>
 +        </div>
 +      </div>
 +    )
@@ -9336,10 +9354,10 @@ index 0000000..45d18f8
 +export const searchNotes = (q: string) =>
 +  request.get<any, SearchHit[]>('/search', { params: { q } })
 diff --git a/BillNote_frontend/src/services/note.ts b/BillNote_frontend/src/services/note.ts
-index 722bd92..2fc63f9 100644
+index 722bd92..4a95ad8 100644
 --- a/BillNote_frontend/src/services/note.ts
 +++ b/BillNote_frontend/src/services/note.ts
-@@ -1,75 +1,86 @@
+@@ -1,75 +1,88 @@
  import request from '@/utils/request'
 +import type { RequestFailure } from '@/utils/request'
  import toast from 'react-hot-toast'
@@ -9407,7 +9425,9 @@ index 722bd92..2fc63f9 100644
 +    request.post<any, GenerateNoteResult>('/generate_note', data, { timeout: SUBMIT_TIMEOUT })
 +  const announce = (res: GenerateNoteResult) => {
 +    toast.success(
-+      res?.deduped ? '这个视频的同风格笔记正在生成中，已接回那个任务' : '笔记生成任务已提交！',
++      res?.deduped
++        ? '这个视频的同风格笔记正在生成中，书架卡片会显示进度'
++        : '已开始生成，书架上的卡片会显示进度（可以点进去看，也可以先做别的）',
 +    )
 +    return res
    }
@@ -11921,7 +11941,7 @@ index 0000000..d2475fe
 +        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
 +        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..c3b9f1b 100644
+index f433e46..9c22559 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
 @@ -1,6 +1,9 @@
@@ -11943,7 +11963,7 @@ index f433e46..c3b9f1b 100644
  from app.db.video_task_dao import get_task_by_video
 +from app.db import search_dao
 +from app.services.library_service import delete_note_artifacts
-+from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file
++from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file, write_status_file
  from app.enmus.exception import NoteErrorEnum
  from app.enmus.note_enums import DownloadQuality
  from app.exceptions.note import NoteError
@@ -12102,7 +12122,10 @@ index f433e46..c3b9f1b 100644
 +    """
 +    if not _valid_task_id(data.task_id):
 +        return R.error(msg='task_id 非法')
-+    try:
+     try:
+-        # TODO: 待持久化完成
+-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
+-        return R.success(msg='删除成功')
 +        result = delete_note_artifacts(data.task_id)
 +        return R.success(data=result, msg='删除成功')
 +    except Exception as e:
@@ -12134,10 +12157,7 @@ index f433e46..c3b9f1b 100644
 +    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
 +    if not os.path.exists(note_path):
 +        return R.error(msg='笔记文件不存在，无法保存')
-     try:
--        # TODO: 待持久化完成
--        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
--        return R.success(msg='删除成功')
++    try:
 +        with open(note_path, 'r', encoding='utf-8') as f:
 +            note_data = json.load(f)
 +        note_data['markdown'] = data.markdown
@@ -12172,10 +12192,12 @@ index f433e46..c3b9f1b 100644
  
  
  @router.post("/upload")
-@@ -225,8 +373,17 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -225,8 +373,20 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
              # 正常新建任务
              task_id = str(uuid.uuid4())
  
+-        # 统一先写入 PENDING，表示已进入队列等待串行执行
+-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
 +        # 同视频同风格已经在跑就把那个 task_id 还回去：前端继续显示同一个任务的进度，
 +        # 而不是再起一份注定撞下载文件名的任务
 +        duplicate_of = _claim_submit(_submit_key(video_id, data.video_url, data.style), task_id)
@@ -12183,14 +12205,17 @@ index f433e46..c3b9f1b 100644
 +            logger.warning(f"同一视频同一风格的任务已在生成中（{duplicate_of}），忽略这次重复提交")
 +            return R.success({"task_id": duplicate_of, "deduped": True})
 +
-         # 统一先写入 PENDING，表示已进入队列等待串行执行
-         NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
++        # 统一先写入 PENDING，表示已进入队列等待串行执行。
++        # 这里绝不能用 NoteGenerator()._update_status()：那个构造函数会把 Whisper 模型
++        # 加载进显存（实测 4.7~8.4s），用户点完「生成笔记」就得干等，超过 10 分钟没生成时
++        # 更是必然撞上（闲置自动卸载后又要重新加载）。写状态文件用轻量函数就够了。
++        write_status_file(task_id, TaskStatus.PENDING)
 +        # 同步登记进笔记库索引，这样"生成中"的笔记立刻出现在书架页上
 +        _index_note(task_id, TaskStatus.PENDING.value, platform=data.platform, form_data=_form_snapshot(data))
  
          # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
          if data.prefetched_transcript:
-@@ -245,6 +402,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -245,6 +405,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
  
  @router.get("/task_status/{task_id}")
  def get_task_status(task_id: str):
@@ -12199,7 +12224,7 @@ index f433e46..c3b9f1b 100644
      status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
      result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
  
-@@ -295,11 +454,14 @@ def get_task_status(task_id: str):
+@@ -295,11 +457,14 @@ def get_task_status(task_id: str):
              "task_id": task_id
          })
  
@@ -12874,7 +12899,7 @@ index 0000000..779bcd0
 +    logger.info(f"孤儿截图清理：删除 {len(deleted)} 张，跳过 {len(skipped)} 张")
 +    return {"deleted": deleted, "skipped": skipped}
 diff --git a/backend/app/services/note.py b/backend/app/services/note.py
-index f493c91..45e98f9 100644
+index f493c91..933052e 100644
 --- a/backend/app/services/note.py
 +++ b/backend/app/services/note.py
 @@ -1,6 +1,8 @@
@@ -12887,7 +12912,11 @@ index f493c91..45e98f9 100644
  from dataclasses import asdict
  from pathlib import Path
  from typing import List, Optional, Tuple, Union, Any
-@@ -31,8 +33,18 @@ from app.services.constant import SUPPORT_PLATFORM_MAP
+@@ -28,11 +30,22 @@ from app.models.model_config import ModelConfig
+ from app.models.notes_model import AudioDownloadResult, NoteResult
+ from app.models.transcriber_model import TranscriptResult, TranscriptSegment
+ from app.services.constant import SUPPORT_PLATFORM_MAP
++from app.services.note_index import write_status_file
  from app.services.provider import ProviderService
  from app.transcriber.base import Transcriber
  from app.transcriber.transcriber_provider import get_transcriber, _transcribers
@@ -12907,7 +12936,7 @@ index f493c91..45e98f9 100644
  from app.utils.status_code import StatusCode
  from app.utils.video_helper import generate_screenshot
  from app.utils.video_reader import VideoReader
-@@ -54,9 +66,26 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
+@@ -54,9 +67,26 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
  # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
  IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
  
@@ -12937,7 +12966,61 @@ index f493c91..45e98f9 100644
  
  
  class NoteGenerator:
-@@ -232,7 +261,12 @@ class NoteGenerator:
+@@ -71,11 +101,40 @@ class NoteGenerator:
+         self.model_size: str = config_manager.get_whisper_model_size()
+         self.device: Optional[str] = None
+         self.transcriber_type: str = config_manager.get_transcriber_type()
+-        self.transcriber: Transcriber = self._init_transcriber()
++        # 转写器懒加载：构造 NoteGenerator 不再把 Whisper 模型压进显存（实测 4.7s，冷启动 8.4s）。
++        # 提交接口只要写状态文件，后台任务也是先解析/下载/抽帧，好几分钟内用不到转写器
++        self._transcriber: Optional[Transcriber] = None
++        self._transcriber_lock = threading.Lock()
+         self.video_path: Optional[Path] = None
+         self.video_img_urls=[]
+         logger.info("NoteGenerator 初始化完成")
+ 
++    @property
++    def transcriber(self) -> Transcriber:
++        """按需创建（双检锁）：模型上显存很贵，不该在构造时就付。"""
++        if self._transcriber is None:
++            with self._transcriber_lock:
++                if self._transcriber is None:
++                    self._transcriber = self._init_transcriber()
++        return self._transcriber
++
++    def _warm_up_transcriber_async(self) -> None:
++        """后台线程预加载模型，让它和"取字幕 + 下载音视频 + 抽帧"这几分钟并行。
++
++        只在确实要转写时调用（字幕/转写缓存命中就没必要白占 2.3GB 显存）；
++        预热失败也不影响流程——懒加载属性在真正转写时会再试一次。
++        """
++        if self._transcriber is not None:
++            return
++
++        def _warm() -> None:
++            try:
++                _ = self.transcriber
++            except Exception as e:
++                logger.warning(f"转写器预热失败（转写时会重新加载）: {e}")
++
++        threading.Thread(target=_warm, name="transcriber-warmup", daemon=True).start()
++
+ 
+     # ---------------- 公有方法 ----------------
+ 
+@@ -151,6 +210,11 @@ class NoteGenerator:
+                 except Exception as e:
+                     logger.warning(f"加载转写缓存失败: {e}")
+ 
++            # 缓存没有 → 大概率要本地转写：让模型加载与"取平台字幕 + 下载 + 抽帧"并行，
++            # 别串在关键路径上。（万一平台字幕命中，这份显存由闲置回收线程在 10 分钟后释放）
++            if transcript is None:
++                self._warm_up_transcriber_async()
++
+             # 缓存没有，尝试获取平台字幕
+             if transcript is None:
+                 logger.info("尝试获取平台字幕（优先于音频下载）...")
+@@ -232,7 +296,12 @@ class NoteGenerator:
              # 6. 完成
              self._update_status(task_id, TaskStatus.SUCCESS)
              logger.info(f"笔记生成成功 (task_id={task_id})")
@@ -12951,7 +13034,47 @@ index f493c91..45e98f9 100644
  
          except Exception as exc:
              logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
-@@ -396,14 +430,23 @@ class NoteGenerator:
+@@ -319,36 +388,9 @@ class NoteGenerator:
+         :param status: TaskStatus 枚举或自定义状态字符串
+         :param message: 可选消息，用于记录失败原因等
+         """
+-        if not task_id:
+-            return
+-
+-        NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+-        status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+-        print(f"写入状态文件: {status_file} 当前状态: {status}")
+-        data = {"status": status.value if isinstance(status, TaskStatus) else status}
+-        if message:
+-            data["message"] = message
+-
+-        try:
+-            # First create a temporary file
+-            temp_file = status_file.with_suffix('.tmp')
+-
+-            # Write to temporary file
+-            with temp_file.open('w', encoding='utf-8') as f:
+-                json.dump(data, f, ensure_ascii=False, indent=2)
+-
+-            # Atomic rename operation
+-            temp_file.replace(status_file)
+-
+-            print(f"状态文件写入成功: {status_file}")
+-        except Exception as e:
+-            logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")
+-            # Try to write error to file directly as fallback
+-            try:
+-                with status_file.open('w', encoding='utf-8') as f:
+-                    f.write(f"Error writing status: {str(e)}")
+-            except:
+-                logger.error(f"写入错误  {e}")
++        # 实现挪到 note_index.write_status_file：路由层也要写状态（提交时的 PENDING），
++        # 而它不该为此构造一个 NoteGenerator（那会把 Whisper 模型加载进显存）
++        write_status_file(task_id, status, message)
+ 
+     def _handle_exception(self, task_id, exc):
+         logger.error(f"任务异常 (task_id={task_id})", exc_info=True)
+@@ -396,14 +438,23 @@ class NoteGenerator:
          task_id = audio_cache_file.stem.split("_")[0]
          self._update_status(task_id, status_phase)
  
@@ -12976,7 +13099,7 @@ index f493c91..45e98f9 100644
  
          # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
          if skip_download:
-@@ -425,44 +468,18 @@ class NoteGenerator:
+@@ -425,44 +476,18 @@ class NoteGenerator:
              except Exception as exc:
                  logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
  
@@ -13029,7 +13152,7 @@ index f493c91..45e98f9 100644
              audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
              logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
              return audio
-@@ -471,6 +488,59 @@ class NoteGenerator:
+@@ -471,6 +496,59 @@ class NoteGenerator:
              self._handle_exception(task_id, exc)
              raise
  
@@ -13089,7 +13212,7 @@ index f493c91..45e98f9 100644
  
      def _get_transcript(
          self,
-@@ -560,6 +630,10 @@ class NoteGenerator:
+@@ -560,6 +638,10 @@ class NoteGenerator:
          try:
              logger.info("开始转写音频")
              transcript = self.transcriber.transcript(file_path=audio_file)
@@ -13100,7 +13223,7 @@ index f493c91..45e98f9 100644
              transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
              logger.info(f"转写并缓存成功 ({transcript_cache_file})")
              return transcript
-@@ -595,7 +669,10 @@ class NoteGenerator:
+@@ -595,7 +677,10 @@ class NoteGenerator:
          :param extras: GPT 额外参数
          :return: 生成的 Markdown 字符串
          """
@@ -13112,7 +13235,7 @@ index f493c91..45e98f9 100644
          self._update_status(task_id, TaskStatus.SUMMARIZING)
  
          source = GPTSource(
-@@ -639,6 +716,9 @@ class NoteGenerator:
+@@ -639,6 +724,9 @@ class NoteGenerator:
          :param platform: 平台标识，用于链接替换
          :return: 处理后的 Markdown 字符串
          """
@@ -13122,7 +13245,7 @@ index f493c91..45e98f9 100644
          if "screenshot" in formats and video_path:
              try:
                  markdown = self._insert_screenshots(markdown, video_path)
-@@ -651,28 +731,85 @@ class NoteGenerator:
+@@ -651,28 +739,85 @@ class NoteGenerator:
              except Exception as e:
                  logger.warning(f"链接插入失败，跳过该步骤：{e}")
  
@@ -13215,10 +13338,10 @@ index f493c91..45e98f9 100644
      @staticmethod
 diff --git a/backend/app/services/note_index.py b/backend/app/services/note_index.py
 new file mode 100644
-index 0000000..c52f6ae
+index 0000000..4c489a6
 --- /dev/null
 +++ b/backend/app/services/note_index.py
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,98 @@
 +"""笔记索引与落盘：notes 表登记、表单参数快照、结果文件写入。
 +
 +从 routers/note.py 拆出来：路由文件只该管请求/响应，持久化细节集中在这里。
@@ -13228,14 +13351,46 @@ index 0000000..c52f6ae
 +import os
 +from enum import Enum
 +from dataclasses import asdict
-+from typing import Optional
++from pathlib import Path
++from typing import Optional, Union
 +
 +from app.db import library_dao
++from app.enmus.task_status_enums import TaskStatus
 +from app.utils.logger import get_logger
 +
 +logger = get_logger(__name__)
 +
 +NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
++
++
++def write_status_file(task_id: str, status: Union[str, TaskStatus], message: Optional[str] = None) -> None:
++    """写 {task_id}.status.json（临时文件 + 原子替换）。前端轮询读的就是它。
++
++    刻意做成模块级函数、不依赖 NoteGenerator：提交接口只需要落一个 PENDING 状态，
++    而 `NoteGenerator()` 的构造会把 Whisper 模型加载进显存——实测首次 4.7s、冷启动 8.4s，
++    再加上"闲置 600 秒自动卸载"，超过 10 分钟没生成，下一次点「生成笔记」就要干等这么久
++    （旧的 10 秒请求超时正好卡在这条线上，于是"报错但后台其实在跑"）。
++    """
++    if not task_id:
++        return
++
++    out_dir = Path(NOTE_OUTPUT_DIR)
++    out_dir.mkdir(parents=True, exist_ok=True)
++    status_file = out_dir / f"{task_id}.status.json"
++    data = {"status": status.value if isinstance(status, TaskStatus) else str(status)}
++    if message:
++        data["message"] = message
++
++    temp_file = status_file.with_suffix(".tmp")
++    try:
++        with temp_file.open("w", encoding="utf-8") as f:
++            json.dump(data, f, ensure_ascii=False, indent=2)
++        temp_file.replace(status_file)
++        logger.info(f"状态更新 {task_id}: {data['status']}")
++    except Exception as e:
++        # 不再把错误文本直接写进状态文件：那会造出一个 json.load 解析不了的文件，
++        # 让 /task_status 直接 500，任务在界面上永远卡住
++        logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")
 +
 +
 +def save_note_to_file(task_id: str, note):
@@ -13408,7 +13563,7 @@ index af29c17..f8249c9 100644
  # 各类型获取方法
  def get_groq_transcriber():
 diff --git a/backend/app/transcriber/whisper.py b/backend/app/transcriber/whisper.py
-index 3d254a2..1bbe7e5 100644
+index 3d254a2..4106aee 100644
 --- a/backend/app/transcriber/whisper.py
 +++ b/backend/app/transcriber/whisper.py
 @@ -14,6 +14,7 @@ from app.utils.path_helper import get_model_dir
@@ -13419,7 +13574,42 @@ index 3d254a2..1bbe7e5 100644
  import os
  import shutil
  
-@@ -141,12 +142,30 @@ class WhisperTranscriber(Transcriber):
+@@ -51,6 +52,7 @@ class WhisperTranscriber(Transcriber):
+         self.model_size = model_size
+ 
+         model_dir = get_model_dir("whisper")
++        self._model_dir = model_dir
+         try:
+             self.model = self._build_model(model_size, model_dir)
+         except Exception as e:
+@@ -59,6 +61,17 @@ class WhisperTranscriber(Transcriber):
+             self._purge_cache(model_dir, model_size)
+             self.model = self._build_model(model_size, model_dir)
+ 
++    def _ensure_model(self) -> WhisperModel:
++        """模型可能已被闲置回收线程卸载（unload 会把 self.model 置 None），按需重建。
++
++        长视频的下载 + 抽帧可能超过闲置阈值（默认 600s），而实例一直被任务持有，
++        等真要转写时模型已经没了——直接用就是 AttributeError: 'NoneType'。
++        """
++        if self.model is None:
++            logger.info("Whisper 模型已被闲置回收，转写前重新加载")
++            self.model = self._build_model(self.model_size, self._model_dir)
++        return self.model
++
+     def _build_model(self, model_size: str, model_dir: str) -> WhisperModel:
+         # resolve 把模型名映射成可加载标识：内置 size→Systran repo_id、自定义映射、
+         # 直通的 repo_id 或本地路径。faster-whisper 对本地目录走 os.path.isdir 分支，
+@@ -123,7 +136,7 @@ class WhisperTranscriber(Transcriber):
+     def transcript(self, file_path: str) -> TranscriptResult:
+         try:
+ 
+-            segments_raw, info = self.model.transcribe(file_path)
++            segments_raw, info = self._ensure_model().transcribe(file_path)
+ 
+             segments = []
+             full_text = ""
+@@ -141,12 +154,31 @@ class WhisperTranscriber(Transcriber):
                  language=info.language,
                  full_text=full_text.strip(),
                  segments=segments,
@@ -13441,8 +13631,9 @@ index 3d254a2..1bbe7e5 100644
 +    def unload(self) -> None:
 +        """释放显存：丢掉 CTranslate2 模型对象，下次 get_transcriber 会重新加载（约 8 秒）。
 +
-+        由 transcriber_provider 的闲置回收线程调用；正在跑的任务自己还持有实例引用，
-+        所以卸载不会影响进行中的转写。
++        由 transcriber_provider 的闲置回收线程调用。注意正在跑的任务持有的是**实例**引用，
++        self.model 一样会被置 None，所以 transcript() 走 _ensure_model() 按需重建，
++        不能让调用方直接摸 self.model。
 +        """
 +        model, self.model = self.model, None
 +        if model is not None:
@@ -13452,7 +13643,7 @@ index 3d254a2..1bbe7e5 100644
  
  
      def on_finish(self,video_path:str,result: TranscriptResult)->None:
-@@ -155,3 +174,9 @@ class WhisperTranscriber(Transcriber):
+@@ -155,3 +187,9 @@ class WhisperTranscriber(Transcriber):
              "file_path": video_path,
          })
  
@@ -14145,10 +14336,10 @@ index 4b1d080..740a731 100644
          # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
 diff --git a/backend/tests/isolation.py b/backend/tests/isolation.py
 new file mode 100644
-index 0000000..5db8be9
+index 0000000..a5c2a29
 --- /dev/null
 +++ b/backend/tests/isolation.py
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,140 @@
 +"""测试隔离：DB / 笔记目录 / 截图目录 / 向量库一律指到临时目录。
 +
 +为什么要有这么个东西：app.db.engine 在 import 时就把 DATABASE_URL 读死了，而
@@ -14252,6 +14443,13 @@ index 0000000..5db8be9
 +
 +        library_service.NOTE_OUTPUT_DIR = str(self.note_dir)
 +        library_service.IMAGE_OUTPUT_DIR = self.shot_dir
++        try:
++            from app.services import note_index
++
++            # 状态文件写在这里；不重绑就会往仓库里的 note_results/ 写
++            note_index.NOTE_OUTPUT_DIR = str(self.note_dir)
++        except Exception:
++            pass
 +        try:
 +            from app.services import cleanup_service
 +
@@ -15097,10 +15295,10 @@ index 7ad2cb0..80b52b8 100644
      unittest.main()
 diff --git a/backend/tests/test_note_task_guard.py b/backend/tests/test_note_task_guard.py
 new file mode 100644
-index 0000000..afdaf22
+index 0000000..a76cb8b
 --- /dev/null
 +++ b/backend/tests/test_note_task_guard.py
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,146 @@
 +import pathlib
 +import sys
 +import threading
@@ -15187,6 +15385,62 @@ index 0000000..afdaf22
 +        """并发保护按视频 URL 取锁：同视频同一把（串行下载），不同视频互不阻塞。"""
 +        self.assertIs(note_service._download_lock("u1"), note_service._download_lock("u1"))
 +        self.assertIsNot(note_service._download_lock("u1"), note_service._download_lock("u2"))
++
++
++class TestSubmitPathStaysLight(unittest.TestCase):
++    """提交接口不许构造 NoteGenerator。
++
++    它的构造函数会把 Whisper 模型压进显存（实测热态 4.7s、冷启动 8.4s），而提交只需要写一个
++    PENDING 状态文件。叠加"闲置 600s 自动卸载显存"之后，超过 10 分钟没生成，用户点一次
++    「生成笔记」就要干等这么久——旧的 10s 请求超时正好卡在这条线上，于是出现
++    "界面报错、后台其实在跑"，用户再点一次就把同一个视频生成两遍。
++    """
++
++    def setUp(self):
++        ENV.bind()
++        ENV.reset_dirs()
++
++    def tearDown(self):
++        note_router._inflight_keys.clear()
++        note_router._key_by_task.clear()
++        note_router._running_tasks.clear()
++
++    def test_generate_note_only_writes_status(self):
++        import json as _json
++
++        from fastapi import BackgroundTasks
++        from app.services.transcriber_config_manager import TranscriberConfigManager
++
++        constructions = []
++
++        class SpyGenerator:
++            def __init__(self):
++                constructions.append(1)
++
++        req = note_router.VideoRequest(
++            video_url="https://www.bilibili.com/video/BV1PYTD6uEEY",
++            platform="bilibili",
++            quality="medium",
++            model_name="m",
++            provider_id="p",
++            style="minimal",
++        )
++        with patch.object(note_router, "NoteGenerator", SpyGenerator), \
++                patch.object(TranscriberConfigManager, "is_model_ready",
++                             lambda self: {"ready": True, "transcriber_type": "fast-whisper",
++                                           "model_size": "tiny", "downloading": False}):
++            response = note_router.generate_note(req, BackgroundTasks())
++
++        self.assertEqual(constructions, [], "提交路径构造了 NoteGenerator（会顺带把模型加载进显存）")
++
++        body = _json.loads(response.body)
++        self.assertEqual(body["code"], 0)
++        task_id = body["data"]["task_id"]
++        status_file = ENV.note_dir / f"{task_id}.status.json"
++        self.assertTrue(status_file.is_file(), "PENDING 状态文件没写出来，前端轮询会看不到任务")
++        self.assertEqual(_json.loads(status_file.read_text(encoding="utf-8"))["status"], "PENDING")
++        # 后台任务只是排队，测试里不该真的跑起来
++        self.assertNotIn(task_id, note_router._running_tasks)
 +
 +
 +if __name__ == "__main__":
@@ -16559,10 +16813,10 @@ index 0000000..30ee4cb
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
-index 0000000..bf2874f
+index 0000000..734c8c3
 --- /dev/null
 +++ b/e2e/tests/note.spec.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,117 @@
 +import { test, expect } from '@playwright/test'
 +
 +let taskId = ''
@@ -16628,12 +16882,64 @@ index 0000000..bf2874f
 +  await page.locator('button[aria-label="关闭参照面板"]').click()
 +  await expect(page.getByRole('tablist')).toBeHidden()
 +})
++
++test('生成中的流程页有返回书架的出口', async ({ page }) => {
++  // 伪造一个"生成中"的任务：拦截笔记库与状态接口，不碰真实数据、也不会真跑一次生成。
++  // 回归的是用户明确提的问题——流程页以前没有任何返回入口，人被卡在这一页只能刷新或按
++  // 浏览器后退，很自然会以为任务没成功、回去再新建一次（同一视频就被生成两遍）。
++  const fakeId = 'e2e11111-2222-4222-8222-222222222222'
++  const now = Date.now()
++  await page.route('**/api/library', route =>
++    route.fulfill({
++      json: {
++        code: 0,
++        msg: 'success',
++        data: {
++          folders: [],
++          notes: [
++            {
++              task_id: fakeId,
++              title: null,
++              video_title: '生成中的测试任务',
++              folder_id: null,
++              status: 'PENDING',
++              video_id: 'BV1test',
++              platform: 'bilibili',
++              cover_url: '',
++              duration: 0,
++              created_at: now,
++              updated_at: now,
++              last_opened_at: null,
++              form_data: { video_url: 'https://www.bilibili.com/video/BV1test', platform: 'bilibili' },
++            },
++          ],
++        },
++      },
++    }),
++  )
++  await page.route(`**/api/task_status/${fakeId}`, route =>
++    route.fulfill({
++      json: {
++        code: 0,
++        msg: 'success',
++        data: { status: 'PENDING', message: '任务排队中', task_id: fakeId },
++      },
++    }),
++  )
++
++  await page.goto(`/note/${fakeId}`)
++  await expect(page.getByText(/请稍候/)).toBeVisible({ timeout: 10000 })
++  const back = page.getByRole('button', { name: '返回书架' })
++  await expect(back).toBeVisible()
++  await back.click()
++  await expect(page).toHaveURL(/\/$/)
++})
 diff --git a/e2e/tests/shelf.spec.ts b/e2e/tests/shelf.spec.ts
 new file mode 100644
-index 0000000..7fe1a18
+index 0000000..e8d3845
 --- /dev/null
 +++ b/e2e/tests/shelf.spec.ts
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,71 @@
 +import { test, expect } from '@playwright/test'
 +
 +test('书架页渲染卡片与新建入口', async ({ page }) => {
@@ -16699,6 +17005,11 @@ index 0000000..7fe1a18
 +    throw new Error(`没有发出提交请求。对话框内容：${text}`)
 +  }
 +  expect(posts.length, `双击发出了 ${posts.length} 次提交请求`).toBe(1)
++
++  // 提交完留在书架（不把人锁进流程页），并且立刻多出一张"生成中"的卡片
++  await expect(page).toHaveURL(/\/$/)
++  await expect(dialog).toBeHidden()
++  await expect(page.getByText(/排队中|生成中/).first()).toBeVisible({ timeout: 8000 })
 +})
 diff --git a/scripts/refresh-patch-snapshot.sh b/scripts/refresh-patch-snapshot.sh
 new file mode 100644
