@@ -3268,10 +3268,10 @@ index 0000000..9527feb
 +  return useMemo(() => mergeShelfItems(notes, tasks), [notes, tasks])
 +}
 diff --git a/BillNote_frontend/src/hooks/useTaskPolling.ts b/BillNote_frontend/src/hooks/useTaskPolling.ts
-index 58e406f..94ba806 100644
+index 58e406f..ba22612 100644
 --- a/BillNote_frontend/src/hooks/useTaskPolling.ts
 +++ b/BillNote_frontend/src/hooks/useTaskPolling.ts
-@@ -1,13 +1,12 @@
+@@ -1,15 +1,29 @@
  import { useEffect, useRef } from 'react'
  import { useTaskStore } from '@/store/taskStore'
 -import { get_task_status } from '@/services/note.ts'
@@ -3279,6 +3279,17 @@ index 58e406f..94ba806 100644
 +import { getTaskStatus } from '@/services/note.ts'
  import toast from 'react-hot-toast'
  
++// 连续多少轮一条都查不到才提示一次。提示只说"连接不稳"，绝不改任务状态
++const WARN_AFTER_ROUNDS = 3
++
++/**
++ * 轮询未完成任务的状态。
++ *
++ * 一条铁律：**只有后端说 FAILED 才算失败**。传输层出错（超时、断网、后端忙）只代表
++ * "这一轮没查到"，此时改状态会造成不可逆的错觉——写成 FAILED 后这个任务就被下面的
++ * 过滤器排除、再也不会自愈，界面永远显示"生成失败"而后端还在跑，用户只能重新提交，
++ * 于是同一个视频被生成两遍（白烧一遍 API 额度，书架上还多一条失败记录）。
++ */
  export const useTaskPolling = (interval = 3000) => {
    const tasks = useTaskStore(state => state.tasks)
    const updateTaskContent = useTaskStore(state => state.updateTaskContent)
@@ -3286,25 +3297,102 @@ index 58e406f..94ba806 100644
 -  const removeTask = useTaskStore(state => state.removeTask)
  
    const tasksRef = useRef(tasks)
++  // 上一轮没回来就跳过本轮：生成期间后端很忙，堆请求只会制造更多超时，形成自我加强的故障
++  const pollingRef = useRef(false)
++  const failedRoundsRef = useRef(0)
++  const warnedRef = useRef(false)
  
-@@ -27,7 +26,7 @@ export const useTaskPolling = (interval = 3000) => {
+   // 每次 tasks 更新，把最新的 tasks 同步进去
+   useEffect(() => {
+@@ -18,21 +32,36 @@ export const useTaskPolling = (interval = 3000) => {
  
-       for (const task of pendingTasks) {
-         try {
+   useEffect(() => {
+     const timer = setInterval(async () => {
++      if (pollingRef.current) return
++
+       const pendingTasks = tasksRef.current.filter(
+-        task => task.status != 'SUCCESS' && task.status != 'FAILED'
++        task => task.status != 'SUCCESS' && task.status != 'FAILED',
+       )
++      // 没有活跃任务时把计数清掉，下一次生成从零开始算
++      if (pendingTasks.length === 0) {
++        failedRoundsRef.current = 0
++        warnedRef.current = false
++        return
++      }
+ 
+-      // 无活跃任务时跳过轮询
+-      if (pendingTasks.length === 0) return
+-
+-      for (const task of pendingTasks) {
+-        try {
 -          const res = await get_task_status(task.id)
-+          const res = await getTaskStatus(task.id)
-           const { status } = res
+-          const { status } = res
++      pollingRef.current = true
++      let failedThisRound = 0
++      try {
++        for (const task of pendingTasks) {
++          try {
++            const res = await getTaskStatus(task.id)
++            // 后端明确说"没有这个任务的记录"：这是浏览器里的残留任务（提交时后端同步写状态文件，
++            // 真任务一定查得到）。标记失败并停止轮询，别让它永远显示"排队中"
++            if (res?.known === false) {
++              console.warn(`任务 ${task.id} 后端无记录，标记为失败`)
++              updateTaskContent(task.id, { status: 'FAILED' })
++              continue
++            }
++            const status = res?.status
++            if (!status || status === task.status) continue
  
-           if (status && status !== task.status) {
-@@ -40,6 +39,8 @@ export const useTaskPolling = (interval = 3000) => {
+-          if (status && status !== task.status) {
+             if (status === 'SUCCESS') {
+-              const { markdown, transcript, audio_meta } = res.result
++              const { markdown, transcript, audio_meta } = res.result ?? {}
+               toast.success('笔记生成成功')
+               updateTaskContent(task.id, {
+                 status,
+@@ -40,20 +69,34 @@ export const useTaskPolling = (interval = 3000) => {
                  transcript,
                  audioMeta: audio_meta,
                })
+-            } else if (status === 'FAILED') {
+-              updateTaskContent(task.id, { status })
+-              console.warn(`⚠️ 任务 ${task.id} 失败`)
 +              // 生成成功时后端落了一个新版本行，版本下拉要跟着刷新
 +              useLibraryStore.getState().fetchVersions(task.id)
-             } else if (status === 'FAILED') {
+             } else {
++              if (status === 'FAILED') console.warn(`⚠️ 任务 ${task.id} 后端判定失败`)
                updateTaskContent(task.id, { status })
-               console.warn(`⚠️ 任务 ${task.id} 失败`)
+             }
++          } catch (e) {
++            // 保持原状态，下一轮再试。这里改状态就是上面注释里说的那个坑
++            failedThisRound += 1
++            console.warn(`任务 ${task.id} 状态查询失败，保持原状态继续轮询：`, e)
+           }
+-        } catch (e) {
+-          console.error('❌ 任务轮询失败：', e)
+-          updateTaskContent(task.id, { status: 'FAILED' })
+         }
++      } finally {
++        pollingRef.current = false
++      }
++
++      if (failedThisRound === 0) {
++        failedRoundsRef.current = 0
++        warnedRef.current = false
++        return
++      }
++      failedRoundsRef.current += 1
++      if (failedRoundsRef.current >= WARN_AFTER_ROUNDS && !warnedRef.current) {
++        warnedRef.current = true
++        toast('与后端连接不稳定，正在自动重试；任务在后端继续跑，不用重新提交', { icon: '⚠️' })
+       }
+     }, interval)
+ 
+     return () => clearInterval(timer)
+-  }, [interval])
++  }, [interval, updateTaskContent])
+ }
 diff --git a/BillNote_frontend/src/hooks/useVersions.ts b/BillNote_frontend/src/hooks/useVersions.ts
 new file mode 100644
 index 0000000..5646101
@@ -7462,10 +7550,10 @@ index 21a7e8d..59371b9 100644
  
    // 用于跟踪是否处于全屏状态
 diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx b/BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
-similarity index 85%
+similarity index 75%
 rename from BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
 rename to BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
-index 8a04b7c..9562a59 100644
+index 8a04b7c..78ccf42 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/NoteForm.tsx
 +++ b/BillNote_frontend/src/pages/NotePage/components/NoteForm.tsx
 @@ -7,12 +7,12 @@ import {
@@ -7474,7 +7562,7 @@ index 8a04b7c..9562a59 100644
  } from '@/components/ui/form.tsx'
 -import { useEffect,useState } from 'react'
 -import { useForm, useWatch } from 'react-hook-form'
-+import { useEffect, useMemo, useState } from 'react'
++import { useEffect, useMemo, useRef, useState } from 'react'
 +import { useForm, useWatch, type FieldErrors, type Resolver } from 'react-hook-form'
  import { zodResolver } from '@hookform/resolvers/zod'
  import { z } from 'zod'
@@ -7502,7 +7590,19 @@ index 8a04b7c..9562a59 100644
  import { useNavigate } from 'react-router-dom'
  import toast from 'react-hot-toast'
  
-@@ -131,18 +129,30 @@ const CheckboxGroup = ({
+@@ -52,7 +50,10 @@ const formSchema = z
+     quality: z.enum(['fast', 'medium', 'slow']),
+     screenshot: z.boolean().optional(),
+     link: z.boolean().optional(),
+-    model_name: z.string().nonempty('请选择模型'),
++    // 不在 schema 里强制非空：只有一个可用模型时用户没必要手动选，提交时会解析出真正要用的
++    // 那个模型（解析不出来才报错并引导去添加）。以前是 nonempty + 默认值异步到达，
++    // 结果新建时点「生成笔记」静默失败，只在字段下冒一行小字
++    model_name: z.string(),
+     format: z.array(z.string()).default([]),
+     style: z.string().nonempty('请选择笔记生成风格'),
+     extras: z.string().optional(),
+@@ -131,18 +132,30 @@ const CheckboxGroup = ({
  )
  
  /* -------------------- 主组件 -------------------- */
@@ -7538,7 +7638,7 @@ index 8a04b7c..9562a59 100644
      defaultValues: {
        platform: 'bilibili',
        quality: 'medium',
-@@ -153,12 +163,16 @@ const NoteForm = () => {
+@@ -153,16 +166,33 @@ const NoteForm = () => {
        format: [],
      },
    })
@@ -7557,7 +7657,24 @@ index 8a04b7c..9562a59 100644
  
    const goModelAdd = () => {
      navigate("/settings/model");
-@@ -173,8 +187,6 @@ const NoteForm = () => {
+   };
++
++  // 模型列表是异步加载的，而 useForm 的 defaultValues 只在挂载那一刻算一次——那时列表还是空的。
++  // 下面那个 reset effect 又开头就 `if (!currentTask) return`，新建流程永远轮不到它补默认值，
++  // 于是「模型选择」框是空的，点「生成笔记」只在字段下面冒一行小字，用户以为点了没反应。
++  // 用 reset 而不是 setValue：Controller 注册发生在列表到达后的那次渲染里，setValue 有可能
++  // 被随后注册的字段用 defaultValues 覆盖回去；reset 会整体重放值并通知所有 Controller。
++  useEffect(() => {
++    if (!modelList.length) return
++    const current = form.getValues('model_name')
++    if (current && modelList.some(m => m.model_name === current)) return
++    form.reset({ ...form.getValues(), model_name: modelList[0].model_name } as NoteFormValues)
++  }, [modelList, form])
++
+   /* ---- 副作用 ---- */
+   useEffect(() => {
+     loadEnabledModels()
+@@ -173,8 +203,6 @@ const NoteForm = () => {
      if (!currentTask) return
      const { formData } = currentTask
  
@@ -7566,7 +7683,7 @@ index 8a04b7c..9562a59 100644
      form.reset({
        platform: formData.platform || 'bilibili',
        video_url: formData.video_url || '',
-@@ -188,10 +200,10 @@ const NoteForm = () => {
+@@ -188,10 +216,10 @@ const NoteForm = () => {
        video_interval: formData.video_interval ?? 6,
        grid_size: formData.grid_size ?? [2, 2],
        format: formData.format ?? [],
@@ -7579,7 +7696,7 @@ index 8a04b7c..9562a59 100644
      // modelList 用来兜底 model_name
      modelList.length,
      // 还要加上 formData 的各字段，或者直接 currentTask
-@@ -199,8 +211,11 @@ const NoteForm = () => {
+@@ -199,8 +227,16 @@ const NoteForm = () => {
    ])
  
    /* ---- 帮助函数 ---- */
@@ -7589,11 +7706,16 @@ index 8a04b7c..9562a59 100644
 +  const generating = isTaskRunning(taskStatus)
 +  // 提交请求发出到状态变成 PENDING 之间有一小段空窗，用 submitting 堵住，防止连点发出多个任务
 +  const [submitting, setSubmitting] = useState(false)
++  // 但真正的锁必须是 ref：react-hook-form 的 handleSubmit 要先跑异步校验才调用 onSubmit，
++  // 双击（或回车 + 点击）的第二次会赶在 setSubmitting 生效之前进入同一个 onSubmit，
++  // 两次都看到 busy=false → 发出两个相差不到 1ms 的请求（实测过，后端因此并发跑了两份下载）。
++  // ref 赋值是同步的，第二次进来立刻被挡住。
++  const submitLockRef = useRef(false)
 +  const busy = generating || submitting
    const handleFileUpload = async (file: File, cb: (url: string) => void) => {
      const formData = new FormData()
      formData.append('file', file)
-@@ -221,23 +236,29 @@ const NoteForm = () => {
+@@ -221,23 +257,45 @@ const NoteForm = () => {
    }
  
    const onSubmit = async (values: NoteFormValues) => {
@@ -7607,19 +7729,30 @@ index 8a04b7c..9562a59 100644
 -    }
 -    if (currentTaskId) {
 -      retryTask(currentTaskId, payload)
-+    if (busy) {
++    if (submitLockRef.current || busy) {
 +      toast(`正在${taskStatusLabels[taskStatus ?? ''] || '生成'}，请勿重复点击`, { icon: '⏳' })
        return
      }
 -
 -    // message.success('已提交任务')
++    submitLockRef.current = true
 +    setSubmitting(true)
      try {
++      // 选中的模型必须能解析出 provider_id。以前这里是 `find(...)!.provider_id`：
++      // 模型列表还没加载完、或那个模型被删了，就抛 TypeError 被下面的 catch 吞掉，
++      // 用户点了「生成笔记」什么反应都没有（既没请求也没提示），只能反复点。
++      // 现在没选/选的已失效就退回列表第一个，一个都没有才拦下来并说清楚去哪儿加。
++      const model = modelList.find(m => m.model_name === values.model_name) ?? modelList[0]
++      if (!model) {
++        toast.error('还没有可用的模型，请先去「模型供应商」添加并启用一个')
++        return
++      }
 +      const payload: NoteFormValues = {
 +        ...values,
++        model_name: model.model_name,
 +        video_url:
 +          values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-+        provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
++        provider_id: model.provider_id,
 +        task_id: currentTask?.id || '',
 +      } as NoteFormValues & { provider_id: string; task_id: string }
 +      if (currentTask) {
@@ -7630,16 +7763,22 @@ index 8a04b7c..9562a59 100644
 +      }
 +
        const data = await generateNote(payload)
++      if (!data?.task_id) {
++        // 没有 task_id 就没法接管轮询；后端可能已经建了任务，让用户去书架确认而不是盲点第二次
++        toast.error('后端没有返回任务 ID，请到书架页确认是否已经在生成')
++        return
++      }
        addPendingTask(data.task_id, values.platform, payload)
 +      onSubmitted?.(data.task_id)
      } catch (e: any) {
        // 就绪门禁：本地转写模型还没下载好。后端返回 reason='transcriber_model_not_ready'，
        // 引导用户去「设置 → 音频转写配置」下载，而不是留一个静默失败的任务。
-@@ -253,38 +274,28 @@ const NoteForm = () => {
+@@ -253,38 +311,29 @@ const NoteForm = () => {
        }
        // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
        console.error('提交任务失败：', e)
 +    } finally {
++      submitLockRef.current = false
 +      setSubmitting(false)
      }
    }
@@ -7687,7 +7826,7 @@ index 8a04b7c..9562a59 100644
      )
    }
  
-@@ -293,9 +304,6 @@ const NoteForm = () => {
+@@ -293,9 +342,6 @@ const NoteForm = () => {
      <div className="h-full w-full">
        <Form {...form}>
          <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="space-y-4">
@@ -7697,7 +7836,7 @@ index 8a04b7c..9562a59 100644
            {/* 视频链接 & 平台 */}
            <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
            <div className="flex gap-2">
-@@ -402,7 +410,6 @@ const NoteForm = () => {
+@@ -402,7 +448,6 @@ const NoteForm = () => {
              {
  
               modelList.length>0?(     <FormField
@@ -7705,7 +7844,17 @@ index 8a04b7c..9562a59 100644
                 control={form.control}
                 name="model_name"
                 render={({ field }) => (
-@@ -445,7 +452,6 @@ const NoteForm = () => {
+@@ -418,7 +463,8 @@ const NoteForm = () => {
+                    >
+                      <FormControl>
+                        <SelectTrigger className="w-full min-w-0 truncate">
+-                         <SelectValue />
++                         {/* 没有 placeholder 时，空值看起来和"已选中第一个模型"一模一样 */}
++                         <SelectValue placeholder="请选择模型" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+@@ -445,7 +491,6 @@ const NoteForm = () => {
  
              {/* 笔记风格 */}
              <FormField
@@ -7713,7 +7862,7 @@ index 8a04b7c..9562a59 100644
                control={form.control}
                name="style"
                render={({ field }) => (
-@@ -480,13 +486,13 @@ const NoteForm = () => {
+@@ -480,13 +525,13 @@ const NoteForm = () => {
              <FormField
                control={form.control}
                name="video_understanding"
@@ -7729,7 +7878,7 @@ index 8a04b7c..9562a59 100644
                      />
                    </div>
                    <FormMessage />
-@@ -575,6 +581,9 @@ const NoteForm = () => {
+@@ -575,6 +620,9 @@ const NoteForm = () => {
                </FormItem>
              )}
            />
@@ -9187,11 +9336,12 @@ index 0000000..45d18f8
 +export const searchNotes = (q: string) =>
 +  request.get<any, SearchHit[]>('/search', { params: { q } })
 diff --git a/BillNote_frontend/src/services/note.ts b/BillNote_frontend/src/services/note.ts
-index 722bd92..461cfb3 100644
+index 722bd92..2fc63f9 100644
 --- a/BillNote_frontend/src/services/note.ts
 +++ b/BillNote_frontend/src/services/note.ts
-@@ -1,20 +1,13 @@
+@@ -1,75 +1,86 @@
  import request from '@/utils/request'
++import type { RequestFailure } from '@/utils/request'
  import toast from 'react-hot-toast'
  
 -export const generateNote = async (data: {
@@ -9208,22 +9358,63 @@ index 722bd92..461cfb3 100644
 -  video_interval?: number
 -  grid_size: Array<number>
 -}) => {
+-  try {
+-    console.log('generateNote', data)
+-    const response = await request.post('/generate_note', data)
+-
+-    if (!response) {
+-      if (response.data.msg) {
+-        toast.error(response.data.msg)
+-      }
+-      return null
+-    }
+-    toast.success('笔记生成任务已提交！')
 +/**
 + * 生成笔记的请求体。字段与后端 VideoRequest 对齐；表单值里 quality 是字面量联合、
 + * 部分字段可选，逐字段声明会让每个调用点都报不兼容，这里收口为宽松对象。
 + */
 +export type GenerateNotePayload = Record<string, any>
-+
-+export const generateNote = async (data: GenerateNotePayload) => {
-   try {
-     console.log('generateNote', data)
-     const response = await request.post('/generate_note', data)
-@@ -41,25 +34,23 @@ export const generateNote = async (data: {
-   }
- }
  
+-    console.log('res', response)
+-    // 成功提示
+-
+-    return response
+-  } catch (e: any) {
+-    console.error('❌ 请求出错', e)
++export interface GenerateNoteResult {
++  task_id: string
++  /** 后端发现同视频同风格已在生成，直接复用了那个任务 */
++  deduped?: boolean
++}
+ 
+-    // 错误提示
+-    // toast.error('笔记生成失败，请稍后重试')
++// 提交入口有同步前置动作（转写模型就绪检查、视频 ID 解析），全局默认的 10s 不够；
++// 轮询反过来要短一点，免得一次卡住把后面的轮次全堵住
++const SUBMIT_TIMEOUT = 60_000
++const POLL_TIMEOUT = 15_000
+ 
+-    throw e // 抛出错误以便调用方处理
++/**
++ * 提交生成任务。
++ *
++ * 超时按「结果未知」处理，不能当失败：客户端断开不会让 FastAPI 停下，任务很可能已经排进队列。
++ * 后端按 (视频, 风格) 幂等去重——同键在跑就把那个 task_id 还回来——所以这里重发一次是安全的：
++ * 要么拿回同一个任务，要么在真的没提交成功时补上。
++ */
++export const generateNote = async (data: GenerateNotePayload): Promise<GenerateNoteResult> => {
++  const post = () =>
++    request.post<any, GenerateNoteResult>('/generate_note', data, { timeout: SUBMIT_TIMEOUT })
++  const announce = (res: GenerateNoteResult) => {
++    toast.success(
++      res?.deduped ? '这个视频的同风格笔记正在生成中，已接回那个任务' : '笔记生成任务已提交！',
++    )
++    return res
+   }
+-}
+-
 -export const delete_task = async ({ video_id, platform }) => {
--  try {
+   try {
 -    const data = {
 -      video_id,
 -      platform,
@@ -9233,11 +9424,33 @@ index 722bd92..461cfb3 100644
 -
 -      toast.success('任务已成功删除')
 -      return res
--  } catch (e) {
++    return announce(await post())
+   } catch (e) {
 -    toast.error('请求异常，删除任务失败')
 -    console.error('❌ 删除任务失败:', e)
 -    throw e
--  }
++    if (!(e as RequestFailure)?.isTimeout) throw e
++    toast('提交超时，正在确认任务是否已创建…', { icon: '⏳' })
++    try {
++      return announce(await post())
++    } catch (retryError) {
++      // 后端在排队前就会把 PENDING 写进笔记库，所以书架页大概率已经能看到这条"生成中"
++      toast.error('提交仍然超时。任务可能已在后台创建，请到书架页确认后再决定是否重试')
++      throw retryError
++    }
+   }
+ }
+ 
+-export const get_task_status = async (task_id: string) => {
+-  try {
+-    // 成功提示
+-
+-    return await request.get('/task_status/' + task_id)
+-  } catch (e) {
+-    console.error('❌ 请求出错', e)
+-
+-    // 错误提示
+-    toast.error('笔记生成失败，请稍后重试')
 +/**
 + * 删除一篇笔记。后端会真正清掉 note_results 下的 5 个文件、这篇引用的截图、
 + * SQLite 索引行和向量索引（以前那个接口是空壳，界面上删了盘上什么都没少）。
@@ -9252,20 +9465,22 @@ index 722bd92..461cfb3 100644
 +    res?.deleted_screenshots ? `已删除笔记，释放 ${res.deleted_screenshots} 张截图` : '已删除笔记',
 +  )
 +  return res
- }
- 
--export const get_task_status = async (task_id: string) => {
-+export const getTaskStatus = async (task_id: string) => {
-   try {
-     // 成功提示
- 
-@@ -70,6 +61,11 @@ export const get_task_status = async (task_id: string) => {
-     // 错误提示
-     toast.error('笔记生成失败，请稍后重试')
++}
  
 -    throw e // 抛出错误以便调用方处理
-+    throw e
-   }
+-  }
++/**
++ * 查任务状态（轮询与详情页恢复共用）。
++ *
++ * 失败必须静默：一次超时/断网只代表"这一轮没查到"，怎么解读由调用方决定。
++ * 以前这里自己弹「笔记生成失败，请稍后重试」，轮询又把异常当成 FAILED 写进 store，
++ * 于是一次 10 秒超时 = 两条红 toast + 界面永久显示生成失败，而后端还在正常跑。
++ */
++export const getTaskStatus = async (task_id: string) => {
++  return await request.get('/task_status/' + task_id, {
++    suppressToast: true,
++    timeout: POLL_TIMEOUT,
++  })
  }
 +
 +/** 保存手动编辑后的笔记（同步更新后端文件与 AI 问答索引） */
@@ -10393,7 +10608,7 @@ index 0000000..b4fd56a
 +}
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/utils/request.ts b/BillNote_frontend/src/utils/request.ts
-index c44693c..1ae2c9e 100644
+index c44693c..2a8c466 100644
 --- a/BillNote_frontend/src/utils/request.ts
 +++ b/BillNote_frontend/src/utils/request.ts
 @@ -1,4 +1,4 @@
@@ -10402,7 +10617,54 @@ index c44693c..1ae2c9e 100644
  import toast from 'react-hot-toast'
  
  // 统一响应类型
-@@ -63,4 +63,18 @@ request.interceptors.response.use(
+@@ -8,6 +8,21 @@ export interface IResponse<T = any> {
+   data: T;
+ }
+ 
++/**
++ * 网络层失败时 reject 出来的对象。除了 { code, msg, data } 还带上"失败性质"，
++ * 因为调用方必须能区分：
++ *   - 超时（isTimeout）：请求可能已经送达、服务端可能已经在干活了 → 结果是"未知"，不是"失败"
++ *   - 连不上（status 为空）：请求根本没到服务端 → 可以安全重发
++ * 以前一律压成 "请求失败，请检查网络连接"，轮询把超时当成任务 FAILED，
++ * 界面显示生成失败而后端还在跑，用户再点一次就多烧一遍 API 额度。
++ */
++export interface RequestFailure extends IResponse<null> {
++  /** 客户端超时（axios ECONNABORTED）：服务端可能已经收到并在执行 */
++  isTimeout?: boolean
++  /** HTTP 状态码；连不上/超时时为 undefined */
++  status?: number
++}
++
+ // 允许调用方在 axios 配置里带 suppressToast: true，让拦截器对【预期内的失败】
+ // 不弹全局红 toast（例如 onboarding 撞名重试、轮询健康检查）。业务代码自己 catch 处理。
+ declare module 'axios' {
+@@ -50,17 +65,34 @@ request.interceptors.response.use(
+     if (res) {
+       // 如果后端有返回错误信息，则显示后端信息
+       if (!suppress) toast.error(res.msg || '服务器错误，请稍后再试');
+-      return Promise.reject(res);
+-    } else {
+-      // 没有响应数据（如网络中断），显示通用网络错误
+-      if (!suppress) toast.error('请求失败，请检查网络连接或稍后再试')
+-      return Promise.reject({
+-        code: -1,
+-        msg: '请求失败，请检查网络连接',
+-        data: null
+-      } as IResponse);
++      return Promise.reject({ ...res, status: error.response.status } as RequestFailure);
+     }
++    const isTimeout = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message ?? ''))
++    if (!suppress) {
++      toast.error(isTimeout ? '请求超时，服务端可能仍在处理' : '请求失败，请检查网络连接或稍后再试')
++    }
++    return Promise.reject({
++      code: -1,
++      msg: isTimeout ? '请求超时' : '请求失败，请检查网络连接',
++      data: null,
++      isTimeout,
++      status: undefined,
++    } as RequestFailure);
    }
  );
  
@@ -11659,7 +11921,7 @@ index 0000000..d2475fe
 +        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
 +        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..409095a 100644
+index f433e46..c3b9f1b 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
 @@ -1,6 +1,9 @@
@@ -11936,6 +12198,24 @@ index f433e46..409095a 100644
 +        return R.error(msg='task_id 非法')
      status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
      result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+ 
+@@ -295,11 +454,14 @@ def get_task_status(task_id: str):
+             "task_id": task_id
+         })
+ 
+-    # 什么都没有，默认PENDING
++    # 什么都没有：后端没有这个任务的任何记录。提交路径是【同步】写完 status 文件才返回
++    # task_id 的，所以真任务一定查得到——known=False 让前端能区分"刚提交"和"根本没这个任务"，
++    # 否则浏览器里残留的旧任务会被永久当成"排队中"无限轮询下去。
+     return R.success({
+         "status": TaskStatus.PENDING.value,
+-        "message": "任务排队中",
+-        "task_id": task_id
++        "message": "后端没有这个任务的记录",
++        "task_id": task_id,
++        "known": False,
+     })
+ 
  
 diff --git a/backend/app/routers/storage.py b/backend/app/routers/storage.py
 new file mode 100644
@@ -16019,6 +16299,41 @@ index 0000000..cdd700c
 +
 +headless 页面的 visibilityState 是 visible，所以 scroll-spy、smooth 滚动这些
 +"后台标签页验不了"的用例在这里能真跑。环境变量：E2E_BASE_URL、E2E_CHANNEL（默认 msedge，可改 chrome）。
+diff --git a/e2e/global-setup.ts b/e2e/global-setup.ts
+new file mode 100644
+index 0000000..161a123
+--- /dev/null
++++ b/e2e/global-setup.ts
+@@ -0,0 +1,29 @@
++import { request, type FullConfig } from '@playwright/test'
++
++/**
++ * 等后端真的就绪再开跑。
++ *
++ * 容器刚重建时固定 sleep 十几秒是不够的：实测过一次前两个用例假失败、后面 9 个直接没跑，
++ * 单独重跑又全过。与其把 sleep 猜得越来越大，不如轮询一个真接口直到 200。
++ */
++export default async function globalSetup(config: FullConfig) {
++  const baseURL = config.projects[0]?.use?.baseURL || 'http://localhost'
++  const ctx = await request.newContext({ baseURL })
++  const deadline = Date.now() + 120_000
++  let lastError = 'unknown'
++  while (Date.now() < deadline) {
++    try {
++      const res = await ctx.get('/api/library', { timeout: 5000 })
++      if (res.ok()) {
++        await ctx.dispose()
++        return
++      }
++      lastError = `HTTP ${res.status()}`
++    } catch (e: any) {
++      lastError = e?.message || String(e)
++    }
++    await new Promise(resolve => setTimeout(resolve, 2000))
++  }
++  await ctx.dispose()
++  throw new Error(`后端 120 秒内没有就绪（${baseURL}/api/library）：${lastError}`)
++}
 diff --git a/e2e/package-lock.json b/e2e/package-lock.json
 new file mode 100644
 index 0000000..db9f332
@@ -16104,10 +16419,10 @@ index 0000000..c3b7e04
 +}
 diff --git a/e2e/playwright.config.ts b/e2e/playwright.config.ts
 new file mode 100644
-index 0000000..d6dfb98
+index 0000000..c6fe606
 --- /dev/null
 +++ b/e2e/playwright.config.ts
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,20 @@
 +import { defineConfig } from '@playwright/test'
 +
 +// 用系统已装的 Edge（channel），不下载 Playwright 自带浏览器。
@@ -16117,6 +16432,7 @@ index 0000000..d6dfb98
 +  testDir: './tests',
 +  timeout: 60_000,
 +  retries: 0,
++  globalSetup: './global-setup.ts',
 +  // 单 worker：每个用例都要渲染两三万字的笔记，3 个 worker 并跑时 CPU 争用会让
 +  // scroll-spy 这类"滚动后等高亮变化"的用例偶发超时（单跑 3.9s 过、并跑挂）。
 +  // 整套 14 例串行也只要 45 秒左右，确定性比这点时间值钱。
@@ -16314,10 +16630,10 @@ index 0000000..bf2874f
 +})
 diff --git a/e2e/tests/shelf.spec.ts b/e2e/tests/shelf.spec.ts
 new file mode 100644
-index 0000000..5284c6b
+index 0000000..7fe1a18
 --- /dev/null
 +++ b/e2e/tests/shelf.spec.ts
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,66 @@
 +import { test, expect } from '@playwright/test'
 +
 +test('书架页渲染卡片与新建入口', async ({ page }) => {
@@ -16342,6 +16658,47 @@ index 0000000..5284c6b
 +  await expect(page.locator('main img.h-12').first()).toBeVisible()
 +  await page.locator('button[aria-label="卡片视图"]').click()
 +  await expect(page.locator('main .aspect-video').first()).toBeVisible()
++})
++
++test('新建笔记双击也只发一次提交请求', async ({ page }) => {
++  // 拦截提交：既数得清发了几次，又不会真启动一次生成（那要烧 API 额度、跑好几分钟）。
++  // 回归的是真实事故：一次点击发出两个相差 0.5ms 的请求 → 后端并发跑两份下载 →
++  // 其中一份 rename .part 失败 → 书架上多一条"生成失败"，用户以为没成功又点一次。
++  const posts: unknown[] = []
++  await page.route('**/api/generate_note', async route => {
++    posts.push(route.request().postDataJSON())
++    await route.fulfill({
++      status: 200,
++      contentType: 'application/json',
++      body: JSON.stringify({
++        code: 0,
++        msg: 'success',
++        data: { task_id: 'e2e00000-1111-4111-8111-111111111111' },
++      }),
++    })
++  })
++
++  await page.goto('/')
++  await page.getByRole('button', { name: '新建笔记' }).click()
++  const dialog = page.locator('[data-slot="dialog-content"][data-state="open"]')
++  await expect(dialog).toBeVisible()
++  await dialog
++    .getByPlaceholder('请输入视频网站链接')
++    .fill('https://www.bilibili.com/video/BV1e2e000E2gQ')
++
++  const submit = dialog.getByRole('button', { name: /生成笔记/ })
++  await expect(submit).toBeEnabled()
++  // 双击 = 用户着急时的真实行为。防重锁必须是同步的 ref：react-hook-form 的校验是异步的，
++  // 靠 setState 上锁的话第二次点击会赶在重渲染之前溜进去
++  await submit.dblclick()
++  await page.waitForTimeout(2000)
++
++  if (posts.length === 0) {
++    // 一次都没发出去 = 卡在校验或前端异常，把对话框现状打出来，否则只看到 0 != 1 没法定位
++    const text = (await dialog.innerText()).replace(/\n+/g, ' | ').slice(0, 700)
++    throw new Error(`没有发出提交请求。对话框内容：${text}`)
++  }
++  expect(posts.length, `双击发出了 ${posts.length} 次提交请求`).toBe(1)
 +})
 diff --git a/scripts/refresh-patch-snapshot.sh b/scripts/refresh-patch-snapshot.sh
 new file mode 100644
