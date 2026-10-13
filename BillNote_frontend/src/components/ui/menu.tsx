@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 
 export interface MenuEntry {
@@ -29,11 +30,18 @@ interface MenuProps {
   ariaLabel?: string
 }
 
+const GAP = 4
+const EDGE = 8
+
 /**
  * 轻量下拉菜单。
 
  * 项目里没有 @radix-ui/react-dropdown-menu，而 Dockerfile.patch 用 pnpm install --frozen-lockfile，
  * 加依赖要连带改 lockfile、有构建风险，所以这里手写：外点关闭 + Esc + 上下键移动焦点。
+ *
+ * 面板必须走 **portal + fixed 定位**：书架卡片是 `overflow-hidden rounded-lg`，
+ * 用 absolute 挂在卡片里的话整个下拉会被卡片裁掉——「删除笔记」那几项正好在被裁的部分，
+ * 用户在界面上根本看不到（真实报障）。portal 之后还顺手解决了贴近视口边缘时的溢出。
  */
 export function Menu({
   entries,
@@ -48,7 +56,9 @@ export function Menu({
 }: MenuProps) {
   const [open, setOpen] = React.useState(false)
   const [query, setQuery] = React.useState('')
+  const [pos, setPos] = React.useState<{ top: number; left: number; maxHeight: number } | null>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
 
   const visibleEntries = React.useMemo(() => {
@@ -61,15 +71,69 @@ export function Menu({
     })
   }, [entries, query])
 
+  // 量完面板再定位：先渲染在屏幕外（visibility:hidden），拿到真实宽高后夹紧/翻转
+  const place = React.useCallback(() => {
+    const triggerEl = triggerRef.current
+    const panel = listRef.current
+    if (!triggerEl || !panel) return
+    const r = triggerEl.getBoundingClientRect()
+    const pw = panel.offsetWidth
+    const ph = panel.offsetHeight
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+
+    let left = align === 'end' ? r.right - pw : r.left
+    left = Math.max(EDGE, Math.min(left, vw - pw - EDGE))
+
+    const below = vh - r.bottom - GAP - EDGE
+    const above = r.top - GAP - EDGE
+    let top = r.bottom + GAP
+    let maxHeight = below
+    // 下方放不下、且上方更宽裕 → 翻到触发器上方
+    if (below < Math.min(ph, 200) && above > below) {
+      maxHeight = above
+      top = r.top - GAP - Math.min(ph, above)
+    }
+    setPos({ top, left, maxHeight: Math.max(120, maxHeight) })
+  }, [align])
+
+  React.useLayoutEffect(() => {
+    if (!open) {
+      setPos(null)
+      return
+    }
+    place()
+    let frame = 0
+    const onMove = () => {
+      // 书架是可滚动容器，滚动时面板要跟着触发器走；rAF 合并成一帧一次
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        place()
+      })
+    }
+    window.addEventListener('resize', onMove)
+    window.addEventListener('scroll', onMove, true)
+    return () => {
+      window.removeEventListener('resize', onMove)
+      window.removeEventListener('scroll', onMove, true)
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [open, place, visibleEntries])
+
   React.useEffect(() => {
     if (!open) return
 
     const onPointerDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      // 面板在 portal 里，不在 rootRef 子树内，两处都要判，否则点条目会先被当成"外点"关掉
+      if (rootRef.current?.contains(target) || listRef.current?.contains(target)) return
+      setOpen(false)
     }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setOpen(false)
+        triggerRef.current?.focus()
         return
       }
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
@@ -99,9 +163,11 @@ export function Menu({
   return (
     <div ref={rootRef} className={cn('relative', className)}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         aria-expanded={open}
+        aria-haspopup="menu"
         onClick={e => {
           // 菜单常挂在卡片上，卡片本身也能点开笔记，这里必须拦住冒泡
           e.stopPropagation()
@@ -116,65 +182,74 @@ export function Menu({
         {trigger}
       </button>
 
-      {open && (
-        <div
-          ref={listRef}
-          role="menu"
-          onKeyDown={e => {
-            // 过滤输入框里的上下键仍要能移动条目焦点
-            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
-            const items = [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
-            if (!items.length) return
-            e.preventDefault()
-            const index = items.indexOf(document.activeElement as HTMLButtonElement)
-            const next = e.key === 'ArrowDown' ? items[(index + 1) % items.length] : items[(index - 1 + items.length) % items.length]
-            next?.focus()
-          }}
-          className={cn(
-            'bg-popover text-popover-foreground absolute top-full z-50 mt-1 min-w-[184px] overflow-hidden rounded-md border py-1 shadow-lg',
-            align === 'end' ? 'right-0' : 'left-0',
-          )}
-        >
-          {info && (
-            <div className="text-muted-foreground border-b px-3 py-2 text-xs leading-5">{info}</div>
-          )}
-          {filterable && (
-            <div className="border-b p-1.5">
-              <input
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                placeholder={filterPlaceholder}
-                className="w-full rounded border px-2 py-1 text-xs outline-none focus:border-primary"
-              />
-            </div>
-          )}
-          {visibleEntries.map((entry, i) =>
-            entry === '---' ? (
-              <div key={`sep-${i}`} className="bg-border my-1 h-px" />
-            ) : (
-              <button
-                key={entry.key}
-                type="button"
-                role="menuitem"
-                disabled={entry.disabled}
-                onClick={e => {
-                  e.stopPropagation()
-                  setOpen(false)
-                  entry.onSelect()
-                }}
-                className={cn(
-                  'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-sm outline-none',
-                  'focus-visible:bg-accent hover:bg-accent disabled:pointer-events-none disabled:opacity-50',
-                  entry.danger ? 'text-destructive' : 'text-foreground',
-                )}
-              >
-                {entry.icon}
-                <span className="flex-1">{entry.label}</span>
-              </button>
-            ),
-          )}
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={listRef}
+            role="menu"
+            style={{
+              position: 'fixed',
+              top: pos?.top ?? -9999,
+              left: pos?.left ?? -9999,
+              maxHeight: pos?.maxHeight,
+              visibility: pos ? 'visible' : 'hidden',
+            }}
+            onKeyDown={e => {
+              // 过滤输入框里的上下键仍要能移动条目焦点
+              if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+              const items = [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+              if (!items.length) return
+              e.preventDefault()
+              const index = items.indexOf(document.activeElement as HTMLButtonElement)
+              const next = e.key === 'ArrowDown' ? items[(index + 1) % items.length] : items[(index - 1 + items.length) % items.length]
+              next?.focus()
+            }}
+            className={cn(
+              'bg-popover text-popover-foreground z-50 min-w-[184px] overflow-y-auto rounded-md border py-1 shadow-lg',
+            )}
+          >
+            {info && (
+              <div className="text-muted-foreground border-b px-3 py-2 text-xs leading-5">{info}</div>
+            )}
+            {filterable && (
+              <div className="border-b p-1.5">
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder={filterPlaceholder}
+                  className="w-full rounded border px-2 py-1 text-xs outline-none focus:border-primary"
+                />
+              </div>
+            )}
+            {visibleEntries.map((entry, i) =>
+              entry === '---' ? (
+                <div key={`sep-${i}`} className="bg-border my-1 h-px" />
+              ) : (
+                <button
+                  key={entry.key}
+                  type="button"
+                  role="menuitem"
+                  disabled={entry.disabled}
+                  onClick={e => {
+                    // portal 里的合成事件仍会沿 React 树冒泡到卡片，不拦住就会顺手把笔记打开
+                    e.stopPropagation()
+                    setOpen(false)
+                    entry.onSelect()
+                  }}
+                  className={cn(
+                    'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-sm outline-none',
+                    'focus-visible:bg-accent hover:bg-accent disabled:pointer-events-none disabled:opacity-50',
+                    entry.danger ? 'text-destructive' : 'text-foreground',
+                  )}
+                >
+                  {entry.icon}
+                  <span className="flex-1">{entry.label}</span>
+                </button>
+              ),
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

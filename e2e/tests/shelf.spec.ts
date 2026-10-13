@@ -24,6 +24,45 @@ test('列表/卡片视图切换', async ({ page }) => {
   await expect(page.locator('main .aspect-video').first()).toBeVisible()
 })
 
+test('卡片 ⋯ 菜单不被卡片裁掉，删除项看得到也点得到', async ({ page }) => {
+  // 回归：书架卡片是 overflow-hidden，菜单以前用 absolute 挂在卡片内部 → 整个下拉被裁掉，
+  // 「删除笔记」正好在被裁掉的部分，用户在界面上根本看不到（真实报障）。
+  const res = await page.request.get('/api/library')
+  const notes = ((await res.json()).data.notes || []).filter((n: any) => n.status === 'SUCCESS')
+  test.skip(!notes.length, '没有笔记数据')
+  const title = notes[0].title || notes[0].video_title
+
+  await page.goto('/')
+  const card = page.locator('main div.group', { hasText: title }).first()
+  // 卡片菜单的 aria-label 是「{标题} 的操作」，用 aria-haspopup 定位更稳
+  await card.locator('button[aria-haspopup="menu"]').click()
+
+  const item = page.getByRole('menuitem', { name: '删除笔记' })
+  await expect(item).toBeVisible()
+  await item.scrollIntoViewIfNeeded()
+  const box = await item.boundingBox()
+  expect(box, '菜单项没有布局位置').not.toBeNull()
+  const viewport = page.viewportSize()!
+  expect(box!.y).toBeGreaterThanOrEqual(0)
+  expect(box!.y + box!.height, '菜单项超出视口下沿').toBeLessThanOrEqual(viewport.height)
+
+  // 中心点上最顶层的元素必须还在菜单里：被祖先 overflow 裁掉时命中的会是卡片
+  const hit = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null
+      return el ? (el.closest('[role="menu"]') ? 'menu' : `not-menu:${el.tagName}`) : 'none'
+    },
+    [box!.x + box!.width / 2, box!.y + box!.height / 2],
+  )
+  expect(hit).toBe('menu')
+
+  // 真的能点：打开删除确认框，然后取消（不真删用户数据）
+  await item.click()
+  await expect(page.getByText('删除这篇笔记？')).toBeVisible()
+  await page.getByRole('button', { name: '取消' }).click()
+  await expect(page.getByText('删除这篇笔记？')).toBeHidden()
+})
+
 test('新建笔记双击也只发一次提交请求', async ({ page }) => {
   // 拦截提交：既数得清发了几次，又不会真启动一次生成（那要烧 API 额度、跑好几分钟）。
   // 回归的是真实事故：一次点击发出两个相差 0.5ms 的请求 → 后端并发跑两份下载 →
