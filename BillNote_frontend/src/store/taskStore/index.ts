@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { delete_task, generateNote } from '@/services/note.ts'
-import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 import { isTaskRunning, taskStatusLabels } from '@/constant/note'
@@ -67,6 +66,8 @@ export interface Task {
   folderId?: string | null
   /** 用户自定义别名，为空时显示视频标题 */
   title?: string | null
+  /** 本地存量版本是否已上传到后端（版本历史的权威存储在后端） */
+  versionsSynced?: boolean
   formData: {
     video_url: string
     link?: boolean
@@ -99,11 +100,13 @@ interface TaskStore {
   hydrateTask: (payload: HydratePayload) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
-  removeVersion: (taskId: string, verId: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
   retryTask: (id: string, payload?: any) => Promise<boolean>
+  /** 存量本地版本上传到后端后，本地只留最新一份正文 */
+  adoptServerVersions: (id: string, latestContent: string) => void
+  markVersionsSynced: (id: string) => void
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -145,55 +148,17 @@ export const useTaskStore = create<TaskStore>()(
           currentTaskId: taskId, // 默认设置为当前任务
         })),
 
+      // 版本历史已改由后端权威存储（note_versions 表），这里只更新"最新正文"缓存。
+      // 内容一模一样时不动：轮询重复收到同一份结果不该触发重渲染
       updateTaskContent: (id, data) =>
           set(state => ({
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
-
               if (task.status === 'SUCCESS' && data.status === 'SUCCESS') return task
-
-              // 如果是 markdown 字符串，封装为版本
-              if (typeof data.markdown === 'string') {
-                const prev = task.markdown
-                // 内容一模一样就不新增版本：重复点保存、或轮询重复收到同一份结果时，
-                // 版本下拉里会堆出好几个相同的版本，切来切去看着像没反应
-                const latestContent = Array.isArray(prev) ? prev[0]?.content : prev
-                if (typeof latestContent === 'string' && latestContent === data.markdown) {
-                  return { ...task, ...data, markdown: prev }
-                }
-                const newVersion: Markdown = {
-                  ver_id: `${task.id}-${uuidv4()}`,
-                  content: data.markdown,
-                  style: task.formData.style || '',
-                  model_name: task.formData.model_name || '',
-                  created_at: new Date().toISOString(),
-                }
-
-                let updatedMarkdown: Markdown[]
-                if (Array.isArray(prev)) {
-                  updatedMarkdown = [newVersion, ...prev]
-                } else {
-                  updatedMarkdown = [
-                    newVersion,
-                    ...(typeof prev === 'string' && prev
-                        ? [{
-                          ver_id: `${task.id}-${uuidv4()}`,
-                          content: prev,
-                          style: task.formData.style || '',
-                          model_name: task.formData.model_name || '',
-                          created_at: new Date().toISOString(),
-                        }]
-                        : []),
-                  ]
-                }
-
-                return {
-                  ...task,
-                  ...data,
-                  markdown: updatedMarkdown,
-                }
+              if (typeof data.markdown === 'string' && data.markdown === task.markdown) {
+                const { markdown: _same, ...rest } = data
+                return { ...task, ...rest }
               }
-
               return { ...task, ...data }
             }),
           })),
@@ -252,17 +217,6 @@ export const useTaskStore = create<TaskStore>()(
       },
 
 
-      removeVersion: (taskId, verId) =>
-        set(state => ({
-          tasks: state.tasks.map(task => {
-            if (task.id !== taskId || !Array.isArray(task.markdown)) return task
-            const rest = task.markdown.filter(v => v.ver_id !== verId)
-            // 至少留一个版本：删空了就没有内容可显示，按钮那边也会先拦住
-            if (!rest.length) return task
-            return { ...task, markdown: rest }
-          }),
-        })),
-
       removeTask: async id => {
         // 先本地移除让界面立刻响应。后端删除失败不回滚——条目塞回来只会让人以为没删掉，
         // 书架页刷新后它本来也会重新出现。
@@ -274,6 +228,20 @@ export const useTaskStore = create<TaskStore>()(
         // 但 note_results 里的文件和截图还在盘上
         await delete_task({ task_id: id })
       },
+
+      adoptServerVersions: (id, latestContent) =>
+        set(state => ({
+          tasks: state.tasks.map(task =>
+            task.id === id ? { ...task, markdown: latestContent, versionsSynced: true } : task,
+          ),
+        })),
+
+      markVersionsSynced: id =>
+        set(state => ({
+          tasks: state.tasks.map(task =>
+            task.id === id ? { ...task, versionsSynced: true } : task,
+          ),
+        })),
 
       hydrateTask: payload => {
         const { task_id } = payload

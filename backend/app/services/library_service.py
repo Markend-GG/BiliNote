@@ -67,7 +67,16 @@ def delete_note_artifacts(task_id: str) -> dict:
     if note_path.is_file():
         try:
             with open(note_path, "r", encoding="utf-8") as f:
-                referenced = _referenced_screenshots(json.load(f))
+                payload = json.load(f)
+            # 清单为主（生成时写下的真实引用），正则兜底（老笔记/清单被编辑过的情况）。
+            # 清单内容不可信程度等同于用户输入：必须过一遍文件名形态校验，防路径穿越
+            manifest = payload.get("screenshots")
+            if isinstance(manifest, list):
+                referenced.update(
+                    name for name in manifest
+                    if isinstance(name, str) and _SCREENSHOT_NAME_RE.fullmatch(name)
+                )
+            referenced.update(_referenced_screenshots(payload))
         except Exception as e:
             logger.warning(f"读取笔记 json 失败，跳过截图清理 {task_id}: {e}")
 
@@ -128,6 +137,15 @@ def backfill_library() -> int:
 
         meta = data.get("audio_meta") or {}
         raw = meta.get("raw_info") or {}
+        # 老笔记没有 screenshots 清单：按 markdown 反查补写一次（幂等）。
+        # 之后删除笔记、清理孤儿截图都以清单为准，反查只作兜底
+        if not isinstance(data.get("screenshots"), list):
+            data["screenshots"] = sorted(_SCREENSHOT_NAME_RE.findall(data.get("markdown", "") or ""))
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.warning(f"回填截图清单失败 {path.name}: {e}")
         mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None)
         library_dao.upsert_note(
             task_id,

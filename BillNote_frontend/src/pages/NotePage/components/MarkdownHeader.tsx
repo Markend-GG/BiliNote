@@ -30,13 +30,7 @@ import {
 } from '@/components/ui/dialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Menu, type MenuEntryOrSeparator } from '@/components/ui/menu'
-
-interface VersionNote {
-  ver_id: string
-  model_name?: string
-  style?: string
-  created_at?: string
-}
+import type { NoteVersion } from '@/services/library'
 
 export interface NoteSibling {
   taskId: string
@@ -45,9 +39,8 @@ export interface NoteSibling {
 }
 
 interface NoteHeaderProps {
-  currentTask?: {
-    markdown: VersionNote[] | string
-  }
+  /** 版本历史（新在前），权威存储在后端 note_versions 表 */
+  versions: NoteVersion[]
   isMultiVersion: boolean
   currentVerId: string
   setCurrentVerId: (id: string) => void
@@ -93,7 +86,7 @@ interface NoteHeaderProps {
  * 模型名 / 风格 / 创建时间改成「⋯」菜单顶部的只读信息，不再常驻占宽度。
  */
 export function MarkdownHeader({
-  currentTask,
+  versions,
   isMultiVersion,
   currentVerId,
   setCurrentVerId,
@@ -141,9 +134,9 @@ export function MarkdownHeader({
 
   const styleName = noteStyles.find(v => v.value === style)?.label || style
 
-  const formatDate = (date: string | Date | undefined) => {
+  const formatDate = (date: string | Date | number | undefined | null) => {
     if (!date) return ''
-    const d = typeof date === 'string' ? new Date(date) : date
+    const d = typeof date === 'number' ? new Date(date) : typeof date === 'string' ? new Date(date) : date
     if (isNaN(d.getTime())) return ''
     return d
       .toLocaleString('zh-CN', {
@@ -156,12 +149,7 @@ export function MarkdownHeader({
       .replace(/\//g, '-')
   }
 
-  // 版本按时间倒序排好，最新的在第 0 位
-  const versions: VersionNote[] = Array.isArray(currentTask?.markdown)
-    ? [...currentTask!.markdown].sort(
-        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
-      )
-    : []
+  // versions 由后端按新在前返回，这里不再排序
 
   // 版本号按时间正序编号：最早那版是 V1，最新那版是 V{n}
   const versionLabel = (index: number) => {

@@ -2,16 +2,27 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { del, get, set } from 'idb-keyval'
 import * as api from '@/services/library'
-import type { DeleteFolderMode, LibraryFolder, LibraryNote } from '@/services/library'
+import type {
+  DeleteFolderMode,
+  LibraryFolder,
+  LibraryNote,
+  NoteVersion,
+  VersionUpload,
+} from '@/services/library'
 
 export type ShelfViewMode = 'card' | 'list'
 
 interface LibraryState {
   folders: LibraryFolder[]
   notes: LibraryNote[]
+  /** 版本历史缓存（权威在后端），key = task_id，新在前 */
+  versionsByTask: Record<string, NoteVersion[]>
   viewMode: ShelfViewMode
   loaded: boolean
   loading: boolean
+  fetchVersions: (taskId: string) => Promise<void>
+  uploadLocalVersions: (taskId: string, versions: VersionUpload[]) => Promise<boolean>
+  removeServerVersion: (taskId: string, verId: string) => Promise<boolean>
   fetchLibrary: () => Promise<void>
   setViewMode: (mode: ShelfViewMode) => void
   addFolder: (name: string) => Promise<boolean>
@@ -33,9 +44,39 @@ export const useLibraryStore = create<LibraryState>()(
     (set, get) => ({
       folders: [],
       notes: [],
+      versionsByTask: {},
       viewMode: 'card',
       loaded: false,
       loading: false,
+
+      fetchVersions: async taskId => {
+        try {
+          const list = await api.getVersions(taskId)
+          set(state => ({ versionsByTask: { ...state.versionsByTask, [taskId]: list ?? [] } }))
+        } catch {
+          // 版本拉不到不阻断阅读：正文还有最新一份兜底
+        }
+      },
+
+      uploadLocalVersions: async (taskId, versions) => {
+        try {
+          await api.syncVersions(taskId, versions)
+          await get().fetchVersions(taskId)
+          return true
+        } catch {
+          return false
+        }
+      },
+
+      removeServerVersion: async (taskId, verId) => {
+        try {
+          await api.deleteServerVersion(taskId, verId)
+          await get().fetchVersions(taskId)
+          return true
+        } catch {
+          return false
+        }
+      },
 
       fetchLibrary: async () => {
         if (get().loading) return

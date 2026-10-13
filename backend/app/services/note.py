@@ -244,7 +244,12 @@ class NoteGenerator:
             # 6. 完成
             self._update_status(task_id, TaskStatus.SUCCESS)
             logger.info(f"笔记生成成功 (task_id={task_id})")
-            return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
+            return NoteResult(
+                markdown=markdown,
+                transcript=transcript,
+                audio_meta=audio_meta,
+                screenshots=getattr(self, "_last_screenshots", []),
+            )
 
         except Exception as exc:
             logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
@@ -780,6 +785,12 @@ class NoteGenerator:
                 f"截图整理：{len(matches)} 个标记 → 笔记保留 {len(kept) - len(run_dropped)} 张"
                 f"（相似合并 {dropped} 张、连续插图丢弃 {len(run_dropped)} 张）"
             )
+        # 显式记录这篇笔记最终引用了哪些截图文件：删除笔记时按清单清文件，
+        # 只靠正则从 markdown 反查的话，用户编辑删掉图片行后那些截图就永远成孤儿
+        dropped_names = {url.rsplit("/", 1)[-1] for url in run_dropped}
+        self._last_screenshots = [
+            Path(p).name for _, p in kept if Path(p).name not in dropped_names
+        ]
         return markdown
 
     @staticmethod

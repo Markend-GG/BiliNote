@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useTaskStore } from '@/store/taskStore'
+import { useLibraryStore } from '@/store/libraryStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
@@ -38,6 +39,8 @@ export const useTaskPolling = (interval = 3000) => {
                 transcript,
                 audioMeta: audio_meta,
               })
+              // 生成成功时后端落了一个新版本行，版本下拉要跟着刷新
+              useLibraryStore.getState().fetchVersions(task.id)
             } else if (status === 'FAILED') {
               updateTaskContent(task.id, { status })
               console.warn(`⚠️ 任务 ${task.id} 失败`)

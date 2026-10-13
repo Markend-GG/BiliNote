@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.db.engine import get_db
-from app.db.models.library import Folder, NoteRecord
+from app.db.models.library import Folder, NoteRecord, NoteVersion
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +28,23 @@ def _folder_to_dict(row: Folder) -> dict:
         "id": row.id,
         "name": row.name,
         "sort_order": row.sort_order or 0,
+        "created_at": _ms(row.created_at),
+    }
+
+
+def _dt(ms: Optional[int]) -> Optional[datetime]:
+    """epoch 毫秒 → naive UTC（与表里其它时间列一致）。"""
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+
+def _version_to_dict(row: "NoteVersion") -> dict:
+    return {
+        "ver_id": row.ver_id,
+        "content": row.content,
+        "style": row.style,
+        "model_name": row.model_name,
         "created_at": _ms(row.created_at),
     }
 
@@ -232,6 +249,111 @@ def delete_note_row(task_id: str) -> None:
         row = db.query(NoteRecord).filter_by(task_id=task_id).first()
         if row:
             db.delete(row)
-            db.commit()
+        db.query(NoteVersion).filter_by(task_id=task_id).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
+# ── 版本历史 ──────────────────────────────────────────────────
+
+
+def list_versions(task_id: str) -> list[dict]:
+    """新在前，与前端旧版本地数组的顺序一致，MarkdownHeader 不用改排序逻辑。"""
+    db = next(get_db())
+    try:
+        rows = (
+            db.query(NoteVersion)
+            .filter_by(task_id=task_id)
+            .order_by(NoteVersion.created_at.desc(), NoteVersion.id.desc())
+            .all()
+        )
+        return [_version_to_dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+def add_version(task_id: str, ver_id: str, content: str, style: str = None,
+                model_name: str = None, created_at_ms: int = None) -> Optional[dict]:
+    """ver_id 已存在则视为重复写入（轮询重发/重复保存），直接返回已有行。"""
+    db = next(get_db())
+    try:
+        row = db.query(NoteVersion).filter_by(ver_id=ver_id).first()
+        if row:
+            return _version_to_dict(row)
+        row = NoteVersion(
+            task_id=task_id,
+            ver_id=ver_id,
+            content=content,
+            style=style,
+            model_name=model_name,
+            created_at=_dt(created_at_ms) or datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return _version_to_dict(row)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"写入版本失败 task_id={task_id}: {e}")
+        return None
+    finally:
+        db.close()
+
+
+def sync_versions(task_id: str, versions: list[dict]) -> int:
+    """浏览器存量版本一次性上传：按 ver_id 去重，只补缺的。返回新增条数。"""
+    added = 0
+    db = next(get_db())
+    try:
+        existing = {r.ver_id for r in db.query(NoteVersion.ver_id).filter_by(task_id=task_id).all()}
+        for item in versions:
+            ver_id = item.get("ver_id")
+            content = item.get("content")
+            if not ver_id or not content or ver_id in existing:
+                continue
+            db.add(NoteVersion(
+                task_id=task_id,
+                ver_id=ver_id,
+                content=content,
+                style=item.get("style"),
+                model_name=item.get("model_name"),
+                created_at=_dt(item.get("created_at_ms")) or _dt(item.get("created_at"))
+                or datetime.now(timezone.utc).replace(tzinfo=None),
+            ))
+            existing.add(ver_id)
+            added += 1
+        db.commit()
+        if added:
+            logger.info(f"已同步浏览器存量版本 task_id={task_id} 新增 {added} 条")
+        return added
+    except Exception as e:
+        db.rollback()
+        logger.error(f"同步版本失败 task_id={task_id}: {e}")
+        return 0
+    finally:
+        db.close()
+
+
+def delete_version(task_id: str, ver_id: str) -> bool:
+    db = next(get_db())
+    try:
+        deleted = db.query(NoteVersion).filter_by(task_id=task_id, ver_id=ver_id).delete()
+        db.commit()
+        return bool(deleted)
+    finally:
+        db.close()
+
+
+def latest_version(task_id: str) -> Optional[dict]:
+    db = next(get_db())
+    try:
+        row = (
+            db.query(NoteVersion)
+            .filter_by(task_id=task_id)
+            .order_by(NoteVersion.created_at.desc(), NoteVersion.id.desc())
+            .first()
+        )
+        return _version_to_dict(row) if row else None
     finally:
         db.close()

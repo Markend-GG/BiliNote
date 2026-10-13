@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+import time
 import uuid
 from enum import Enum
 from pathlib import Path
@@ -234,6 +235,15 @@ def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: D
     save_note_to_file(task_id, note)
     _index_note(task_id, "SUCCESS", audio_meta=asdict(note.audio_meta) if note.audio_meta else None,
                 platform=platform)
+    # 版本历史以后端为准：生成成功即落一行，浏览器缓存清了也能找回全部版本
+    library_dao.add_version(
+        task_id,
+        f"{task_id}-{uuid.uuid4()}",
+        note.markdown,
+        style=style,
+        model_name=model_name,
+        created_at_ms=int(time.time() * 1000),
+    )
 
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
@@ -292,8 +302,18 @@ def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
             f.write(data.markdown)
 
         background_tasks.add_task(_reindex_note, data.task_id)
+        # 编辑保存也产生一个版本（风格/模型沿用上一版，编辑不改这两样）
+        prev = library_dao.latest_version(data.task_id)
+        ver = library_dao.add_version(
+            data.task_id,
+            f"{data.task_id}-{uuid.uuid4()}",
+            data.markdown,
+            style=prev.get("style") if prev else None,
+            model_name=prev.get("model_name") if prev else None,
+            created_at_ms=int(time.time() * 1000),
+        )
         logger.info(f"笔记已手动编辑保存: {data.task_id}")
-        return R.success(msg='保存成功')
+        return R.success(data={"ver_id": ver["ver_id"] if ver else None}, msg='保存成功')
     except Exception as e:
         logger.error(f"保存笔记失败: {e}")
         return R.error(msg=f'保存失败: {e}')

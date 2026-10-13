@@ -1,4 +1,5 @@
 from sqlalchemy import Column, DateTime, Float, Integer, String, Text, func
+from sqlalchemy.schema import Index
 
 from app.db.engine import Base
 
@@ -39,3 +40,23 @@ class NoteRecord(Base):
     # 生成这篇笔记时的表单参数（JSON 文本）。详情页刷新后若浏览器本地记录已丢，
     # 「重新生成」还得知道原来的链接/风格/模型，只能从这里恢复。
     form_data = Column(Text, nullable=True)
+
+
+class NoteVersion(Base):
+    """笔记版本历史。
+
+    以前版本只存在浏览器 IndexedDB 里：清一次缓存、换一台电脑，就只剩最新一版。
+    现在后端是权威存储，浏览器那份退化为缓存。
+    """
+
+    __tablename__ = "note_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(String, nullable=False)
+    ver_id = Column(String, nullable=False, unique=True)
+    content = Column(Text, nullable=False)
+    style = Column(String, nullable=True)
+    model_name = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_note_versions_task_id", "task_id"),)

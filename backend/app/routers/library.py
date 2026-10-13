@@ -35,6 +35,20 @@ class TouchRequest(BaseModel):
     task_id: str
 
 
+class VersionItem(BaseModel):
+    ver_id: str
+    content: str
+    style: Optional[str] = None
+    model_name: Optional[str] = None
+    # epoch 毫秒；前端存量版本是 ISO 串，上传前自行转换
+    created_at: Optional[int] = None
+
+
+class VersionsSyncRequest(BaseModel):
+    task_id: str
+    versions: list[VersionItem]
+
+
 @router.get("/library")
 def get_library():
     """书架页的唯一数据源：文件夹 + 全部笔记索引。"""
@@ -118,6 +132,50 @@ def rename_note(data: RenameRequest):
     except Exception as e:
         logger.error(f"重命名笔记失败: {e}", exc_info=True)
         return R.error(msg=f"重命名失败: {e}")
+
+
+@router.get("/library/versions/{task_id}")
+def get_versions(task_id: str):
+    """版本历史（新在前）。后端是权威存储，浏览器那份只是缓存。"""
+    try:
+        return R.success(data=library_dao.list_versions(task_id))
+    except Exception as e:
+        logger.error(f"读取版本历史失败 {task_id}: {e}", exc_info=True)
+        return R.error(msg=f"读取版本历史失败: {e}")
+
+
+@router.post("/library/versions/sync")
+def sync_versions(data: VersionsSyncRequest):
+    """浏览器存量版本一次性上传（升级到本版后首次打开自动跑），按 ver_id 去重、只补缺的。"""
+    try:
+        added = library_dao.sync_versions(
+            data.task_id,
+            [
+                {
+                    "ver_id": item.ver_id,
+                    "content": item.content,
+                    "style": item.style,
+                    "model_name": item.model_name,
+                    "created_at_ms": item.created_at,
+                }
+                for item in data.versions
+            ],
+        )
+        return R.success(data={"added": added})
+    except Exception as e:
+        logger.error(f"同步版本失败 {data.task_id}: {e}", exc_info=True)
+        return R.error(msg=f"同步版本失败: {e}")
+
+
+@router.delete("/library/versions/{task_id}/{ver_id}")
+def delete_version(task_id: str, ver_id: str):
+    try:
+        if not library_dao.delete_version(task_id, ver_id):
+            return R.error(msg="版本不存在")
+        return R.success()
+    except Exception as e:
+        logger.error(f"删除版本失败 {task_id}/{ver_id}: {e}", exc_info=True)
+        return R.error(msg=f"删除版本失败: {e}")
 
 
 @router.post("/library/touch")

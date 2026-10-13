@@ -46,5 +46,9 @@ COPY backend/app/db/library_dao.py /app/backend/app/db/library_dao.py
 COPY backend/app/db/models/library.py /app/backend/app/db/models/library.py
 COPY backend/app/routers/library.py /app/backend/app/routers/library.py
 COPY backend/app/services/library_service.py /app/backend/app/services/library_service.py
+# 日志轮转：上游 supervisord conf 没配 maxbytes/backups，backend.log 会无限涨。
+# 先清掉上游 conf.d 再放我们的，避免同名 program 定义冲突导致 supervisord 起不来
+RUN rm -f /etc/supervisor/conf.d/*.conf
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/bilinote.conf
 # 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
 COPY backend/tests/ /app/backend/tests/

@@ -38,8 +38,12 @@ import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 import { useLibraryStore } from '@/store/libraryStore'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
+import type { Markdown } from '@/store/taskStore'
+import type { NoteVersion } from '@/services/library'
 
 const OUTLINE_STORAGE_KEY = 'note-outline-collapsed'
+// 模块级空数组：selector 里现造 [] 会让 zustand 每渲染都判定变了，陷入重渲染循环
+const EMPTY_VERSIONS: NoteVersion[] = []
 
 interface MarkdownViewerProps {
   status: 'idle' | 'loading' | 'success' | 'failed'
@@ -310,7 +314,13 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const currentTask = useTaskStore(state => state.getCurrentTask())
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
-  const isMultiVersion = Array.isArray(currentTask?.markdown)
+  // 版本历史的权威存储在后端 note_versions 表；本地 store 里可能还留着升级前的数组格式，
+  // 由下面的 effect 一次性上传后降级为最新正文串
+  const versionsOrNull = useLibraryStore(state =>
+    taskId ? (state.versionsByTask[taskId] ?? null) : null,
+  )
+  const versions = versionsOrNull ?? EMPTY_VERSIONS
+  const isMultiVersion = versions.length > 1
   // 原文参照 / AI 问答合并成一个 dock 的两个 tab，null = 关闭。
   // 以前是两个并列 state + 硬编码宽度，且 AI 切"全屏"会把原文参照整个替换掉再也打不开。
   const [dockTab, setDockTab] = useState<DockTab | null>(null)
@@ -410,37 +420,65 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     dockRef.current?.resize(mode === 'full' ? 65 : 38)
   }
 
-  // 多版本内容处理
+  // 进详情页拉一次版本列表；重新生成/编辑保存后会单独再拉
+  useEffect(() => {
+    if (taskId) useLibraryStore.getState().fetchVersions(taskId)
+  }, [taskId])
+
+  // 升级前的本地版本数组一次性上传到后端，之后本地只留最新正文
+  useEffect(() => {
+    if (!currentTask || currentTask.versionsSynced) return
+    if (!Array.isArray(currentTask.markdown)) {
+      useTaskStore.getState().markVersionsSynced(currentTask.id)
+      return
+    }
+    const local = currentTask.markdown as Markdown[]
+    useLibraryStore
+      .getState()
+      .uploadLocalVersions(
+        currentTask.id,
+        local.map(v => ({
+          ver_id: v.ver_id,
+          content: v.content,
+          style: v.style || null,
+          model_name: v.model_name || null,
+          created_at: v.created_at ? new Date(v.created_at).getTime() : null,
+        })),
+      )
+      .then(ok => {
+        if (!ok) return
+        const latest = [...local].sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        )[0]
+        useTaskStore.getState().adoptServerVersions(currentTask.id, latest?.content || '')
+      })
+      .catch(() => {})
+  }, [currentTask?.id, currentTask?.versionsSynced])
+
+  // 多版本内容处理：versions 已按新在前排好
   useEffect(() => {
     if (!currentTask) return
 
-    if (!isMultiVersion) {
+    if (versions.length === 0) {
       setCurrentVerId('') // 清空旧版本 ID
       setModelName(currentTask.formData.model_name)
       setStyle(currentTask.formData.style)
       setCreateTime(currentTask.createdAt)
-      setSelectedContent(currentTask?.markdown)
-    } else {
-      const latestVersion = [...currentTask.markdown].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )[0]
-
-      if (latestVersion) {
-        setCurrentVerId(latestVersion.ver_id)
-      }
+      setSelectedContent(typeof currentTask.markdown === 'string' ? currentTask.markdown : '')
+      return
     }
-  }, [currentTask?.id, taskStatus])
+    if (!versions.some(v => v.ver_id === currentVerId)) {
+      setCurrentVerId(versions[0].ver_id)
+    }
+  }, [currentTask?.id, taskStatus, versions])
   useEffect(() => {
-    if (!currentTask || !isMultiVersion) return
-
-    const currentVer = currentTask.markdown.find(v => v.ver_id === currentVerId)
-    if (currentVer) {
-      setModelName(currentVer.model_name)
-      setStyle(currentVer.style)
-      setCreateTime(currentVer.created_at || '')
-      setSelectedContent(currentVer.content)
-    }
-  }, [currentVerId, currentTask?.id])
+    const currentVer = versions.find(v => v.ver_id === currentVerId)
+    if (!currentVer) return
+    setModelName(currentVer.model_name || '')
+    setStyle(currentVer.style || '')
+    setCreateTime(currentVer.created_at ? new Date(currentVer.created_at).toISOString() : '')
+    setSelectedContent(currentVer.content)
+  }, [currentVerId, versions])
   // ---- 章节折叠 ----
   // 折叠状态用 DOM class 存（不用 React state）：一节一节展开/收起是纯视觉状态，
   // 走事件委托改 class 既不用给每个标题挂状态，也不会和 React 的重渲染打架
@@ -473,17 +511,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     setFoldAll(false)
   }, [selectedContent])
 
-  const handleDeleteVersion = () => {
+  const handleDeleteVersion = async () => {
     if (!currentTask || !currentVerId) return
-    const versions = Array.isArray(currentTask.markdown) ? currentTask.markdown : []
     if (versions.length <= 1) {
       toast.error('只剩一个版本了，不能删')
       return
     }
-    useTaskStore.getState().removeVersion(currentTask.id, currentVerId)
-    const rest = [...((useTaskStore.getState().getCurrentTask()?.markdown as typeof versions) || [])].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    )
+    const ok = await useLibraryStore.getState().removeServerVersion(currentTask.id, currentVerId)
+    if (!ok) return
+    const rest = useLibraryStore.getState().versionsByTask[currentTask.id] ?? []
     // 删的正是当前在看的版本时切到剩下的最新版，否则界面会停在已删除的内容上
     if (!rest.some(v => v.ver_id === currentVerId)) {
       setCurrentVerId(rest[0]?.ver_id || '')
@@ -533,17 +569,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     }
     setSaving(true)
     try {
-      await update_note(currentTask.id, draft)
-      // 保存为本地新版本（旧版本仍可在版本下拉中查看）
+      const res = await update_note(currentTask.id, draft)
+      // 后端保存时落了一个新版本行，拉回来并切过去
+      await useLibraryStore.getState().fetchVersions(currentTask.id)
+      if (res?.ver_id) setCurrentVerId(res.ver_id)
       useTaskStore.getState().updateTaskContent(currentTask.id, { markdown: draft })
-      // 自动切换到新版本
-      const updated = useTaskStore.getState().getCurrentTask()
-      if (updated && Array.isArray(updated.markdown)) {
-        const latest = [...updated.markdown].sort(
-          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-        )[0]
-        if (latest) setCurrentVerId(latest.ver_id)
-      }
       setEditing(false)
       toast.success('已保存（旧版本可在版本下拉中查看）')
     } catch (e) {
@@ -678,7 +708,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         onBackToShelf={() => goShelf()}
         onRegenerate={() => setRegenerateOpen(true)}
         noteEntries={noteEntries}
-        currentTask={currentTask}
+        versions={versions}
         isMultiVersion={isMultiVersion}
         currentVerId={currentVerId}
         setCurrentVerId={setCurrentVerId}
@@ -695,7 +725,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         foldAll={foldAll}
         onFoldAll={handleToggleFoldAll}
         onDeleteVersion={handleDeleteVersion}
-        canDeleteVersion={isMultiVersion && (currentTask?.markdown as unknown[])?.length > 1}
+        canDeleteVersion={versions.length > 1}
         onEdit={handleStartEdit}
         editing={editing}
       />

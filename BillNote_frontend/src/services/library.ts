@@ -32,6 +32,23 @@ export interface LibraryPayload {
 
 export type DeleteFolderMode = 'move' | 'delete'
 
+export interface NoteVersion {
+  ver_id: string
+  content: string
+  style: string | null
+  model_name: string | null
+  /** epoch 毫秒 */
+  created_at: number | null
+}
+
+export interface VersionUpload {
+  ver_id: string
+  content: string
+  style?: string | null
+  model_name?: string | null
+  created_at?: number | null
+}
+
 // 响应拦截器已经把 { code, msg, data } 拆成了 data，所以第二个泛型参数才是真正拿到的类型。
 // 所有时间字段是 epoch 毫秒（后端存的是 naive UTC，返回 ISO 字符串会被 new Date() 当本地时间解析）。
 export const getLibrary = () => request.get<any, LibraryPayload>('/library')
@@ -60,3 +77,14 @@ export const renameNote = (taskId: string, title: string) =>
 /** 进详情页时打点，书架页的「最近打开」靠它排序。失败不值得打扰用户。 */
 export const touchNote = (taskId: string) =>
   request.post<any, null>('/library/touch', { task_id: taskId }, { suppressToast: true })
+
+/** 版本历史（新在前）。后端是权威存储，浏览器本地那份只是缓存。 */
+export const getVersions = (taskId: string) =>
+  request.get<any, NoteVersion[]>(`/library/versions/${taskId}`)
+
+/** 浏览器存量版本一次性上传，按 ver_id 去重 */
+export const syncVersions = (taskId: string, versions: VersionUpload[]) =>
+  request.post<any, { added: number }>('/library/versions/sync', { task_id: taskId, versions })
+
+export const deleteServerVersion = (taskId: string, verId: string) =>
+  request.delete<any, null>(`/library/versions/${taskId}/${verId}`)

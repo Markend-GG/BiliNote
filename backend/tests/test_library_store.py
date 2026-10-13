@@ -273,5 +273,52 @@ class TestBackfill(unittest.TestCase):
         self.assertEqual(library_dao.list_notes(), [])
 
 
+class TestNoteVersions(unittest.TestCase):
+    def setUp(self):
+        engine = get_engine()
+        for table in reversed(Base.metadata.sorted_tables):
+            with engine.begin() as conn:
+                conn.execute(table.delete())
+
+    def test_add_list_delete_version(self):
+        first = library_dao.add_version("t1", "t1-v1", "内容一", style="minimal", model_name="m",
+                                        created_at_ms=1791763200000)
+        library_dao.add_version("t1", "t1-v2", "内容二", created_at_ms=1791763260000)
+        self.assertEqual(first["created_at"], 1791763200000)
+
+        versions = library_dao.list_versions("t1")
+        # 新在前，与前端旧版本地数组顺序一致
+        self.assertEqual([v["ver_id"] for v in versions], ["t1-v2", "t1-v1"])
+        self.assertEqual(library_dao.latest_version("t1")["ver_id"], "t1-v2")
+
+        self.assertTrue(library_dao.delete_version("t1", "t1-v2"))
+        self.assertFalse(library_dao.delete_version("t1", "t1-v2"))
+        self.assertEqual([v["ver_id"] for v in library_dao.list_versions("t1")], ["t1-v1"])
+
+    def test_add_version_is_idempotent_by_ver_id(self):
+        library_dao.add_version("t1", "t1-v1", "内容一")
+        library_dao.add_version("t1", "t1-v1", "内容被改了吗")
+        self.assertEqual(len(library_dao.list_versions("t1")), 1)
+        self.assertEqual(library_dao.list_versions("t1")[0]["content"], "内容一")
+
+    def test_sync_versions_only_fills_missing(self):
+        library_dao.add_version("t1", "t1-v1", "已有")
+        added = library_dao.sync_versions("t1", [
+            {"ver_id": "t1-v1", "content": "已有"},
+            {"ver_id": "t1-v0", "content": "浏览器存量", "created_at_ms": 1791763100000},
+            {"ver_id": "", "content": "坏数据"},
+            {"ver_id": "t1-x", "content": ""},
+        ])
+        self.assertEqual(added, 1)
+        ids = [v["ver_id"] for v in library_dao.list_versions("t1")]
+        self.assertEqual(sorted(ids), ["t1-v0", "t1-v1"])
+
+    def test_deleting_note_cascades_versions(self):
+        library_dao.upsert_note("t1", status="SUCCESS")
+        library_dao.add_version("t1", "t1-v1", "内容")
+        library_dao.delete_note_row("t1")
+        self.assertEqual(library_dao.list_versions("t1"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
