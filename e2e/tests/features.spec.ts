@@ -15,7 +15,8 @@ test.beforeAll(async ({ request }) => {
 
 test('设置→存储与清理页能扫描并列出占用', async ({ page }) => {
   await page.goto('/settings/storage')
-  await expect(page.getByText('存储与清理')).toBeVisible()
+  // 左侧导航里也有"存储与清理"这一项，不限定 main 会撞 strict mode
+  await expect(page.getByRole('main').getByText('存储与清理')).toBeVisible()
   await expect(page.getByText('截图目录')).toBeVisible()
   await expect(page.getByText('AI 问答向量索引')).toBeVisible()
   // 孤儿区要么是清单要么是"很干净"
