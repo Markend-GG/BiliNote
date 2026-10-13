@@ -79,11 +79,12 @@ test('点转写行会把正文滚到对应章节', async ({ page }) => {
   await expect(page.getByRole('tablist')).toBeVisible()
   const vp = page.locator('[data-radix-scroll-area-viewport]').first()
   const before = await vp.evaluate(el => el.scrollTop)
-  // 点第 30 行转写（足够靠后，对应正文中后段章节）
-  await page.getByRole('tabpanel').locator('div.grid').nth(30).click()
-  await page.waitForTimeout(1200)
-  const after = await vp.evaluate(el => el.scrollTop)
-  expect(after).toBeGreaterThan(before)
+  // 必须点靠后的一条：章节胶囊的时间分布因笔记而异，点第 30 行可能映射到开头章节，
+  // 正文本来就在顶部，scrollTop 前后都是 0（换一篇笔记就假失败）。最后一条一定在后段。
+  await page.getByRole('tabpanel').locator('div.grid').last().click()
+  await expect
+    .poll(() => vp.evaluate(el => el.scrollTop), { timeout: 8000 })
+    .toBeGreaterThan(before)
 })
 
 test('存储页能改自动清理策略并立即执行', async ({ page }) => {
