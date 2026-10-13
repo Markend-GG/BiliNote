@@ -10811,7 +10811,7 @@ index 0000000..6d65c96
 +    __table_args__ = (Index("ix_note_versions_task_id", "task_id"),)
 diff --git a/backend/app/db/search_dao.py b/backend/app/db/search_dao.py
 new file mode 100644
-index 0000000..8419473
+index 0000000..6ef446c
 --- /dev/null
 +++ b/backend/app/db/search_dao.py
 @@ -0,0 +1,86 @@
@@ -10823,7 +10823,7 @@ index 0000000..8419473
 +不足 3 个字符（trigram 的下限）时退化为 LIKE 扫表——索引总量只有几百行，扫得起。
 +"""
 +
-+from app.db.engine import engine
++from app.db.engine import get_engine  # 每次调用取全局引擎：import 期绑死会让测试没法换库
 +from app.utils.logger import get_logger
 +from app.utils.markdown_chunks import chunk_markdown
 +
@@ -10834,7 +10834,7 @@ index 0000000..8419473
 +
 +def init_search_table() -> None:
 +    """建 FTS5 虚拟表。create_all 建不了虚拟表，所以单独用原生 SQL；已存在则跳过。"""
-+    with engine.begin() as conn:
++    with get_engine().begin() as conn:
 +        row = conn.exec_driver_sql(
 +            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)
 +        ).fetchone()
@@ -10850,7 +10850,7 @@ index 0000000..8419473
 +def rebuild_note(task_id: str, markdown: str) -> int:
 +    """重建一篇笔记的索引块，返回块数。生成成功/编辑保存/启动回填时调用。"""
 +    chunks = chunk_markdown(markdown or "")
-+    with engine.begin() as conn:
++    with get_engine().begin() as conn:
 +        conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
 +        for chunk in chunks:
 +            conn.exec_driver_sql(
@@ -10861,7 +10861,7 @@ index 0000000..8419473
 +
 +
 +def delete_note(task_id: str) -> None:
-+    with engine.begin() as conn:
++    with get_engine().begin() as conn:
 +        conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
 +
 +
@@ -10869,7 +10869,7 @@ index 0000000..8419473
 +    q = (query or "").strip()
 +    if not q:
 +        return []
-+    with engine.connect() as conn:
++    with get_engine().connect() as conn:
 +        if len(q) >= 3:
 +            expr = '"' + q.replace('"', '""') + '"'
 +            # 高亮标记用控制字符而不是 <mark>：snippet 里是笔记原文，
@@ -13239,6 +13239,138 @@ index 4b1d080..898f65e 100644
          logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
          # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
          # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
+diff --git a/backend/tests/isolation.py b/backend/tests/isolation.py
+new file mode 100644
+index 0000000..a573890
+--- /dev/null
++++ b/backend/tests/isolation.py
+@@ -0,0 +1,126 @@
++"""测试隔离：DB / 笔记目录 / 截图目录 / 向量库一律指到临时目录。
++
++为什么要有这么个东西：app.db.engine 在 import 时就把 DATABASE_URL 读死了，而
++stub_deps 为了探测缺哪些重依赖必须先 import app。顺序一旦搞反，测试就落到默认值
++sqlite:///bili_note.db —— 在仓库里是 backend/bili_note.db，跨运行累积脏数据，
++「命中 1 条」这类断言第二次运行必红；在跑着的容器里那更是生产库。
++
++用法（每个测试模块）：
++
++    from tests.isolation import IsolatedEnv
++    ENV = IsolatedEnv("bilinote-xxx-test-")   # 模块级：建临时目录 → 设 env → stub → 绑引擎 → 建表
++
++    class T(unittest.TestCase):
++        def setUp(self):
++            ENV.bind()   # 同进程里别的模块会把全局引擎换成它自己的库，每个用例前抢回来
++"""
++
++import atexit
++import os
++import pathlib
++import shutil
++import sys
++import tempfile
++
++_ROOT = pathlib.Path(__file__).resolve().parents[1]
++if str(_ROOT) not in sys.path:
++    sys.path.insert(0, str(_ROOT))
++
++from tests.stub_deps import install_missing_stubs  # noqa: E402
++
++# 默认库名黑名单：测试连到它说明隔离没生效，宁可当场炸掉
++_FORBIDDEN_DB_NAMES = {"bili_note.db"}
++
++
++class IsolatedEnv:
++    def __init__(self, prefix: str):
++        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix=prefix))
++        self.db_url = f"sqlite:///{(self.tmp / 'test.db').as_posix()}"
++        self.note_dir = self.tmp / "note_results"
++        self.shot_dir = self.tmp / "screenshots"
++        self.vector_dir = self.tmp / "vector_db"
++
++        os.environ["DATABASE_URL"] = self.db_url
++        os.environ["NOTE_OUTPUT_DIR"] = str(self.note_dir)
++        os.environ["OUT_DIR"] = str(self.shot_dir)
++        os.environ["VECTOR_DB_DIR"] = str(self.vector_dir)
++
++        install_missing_stubs()  # 必须在 env 就位之后：这一步会 import app，引擎在 import 期就绑死
++
++        self._engine = None
++        self._dispose_default_engine()
++        self.bind()
++        self.init_schema()
++        # atexit 是 LIFO：先注册删目录、再注册关连接，退出时才会先关连接再删目录
++        # （Windows 上连接不关，临时目录删不掉）
++        atexit.register(self.cleanup)
++        atexit.register(self._dispose)
++
++    def _dispose_default_engine(self) -> None:
++        """import app 时按默认值建的那个引擎指向仓库里的 bili_note.db，关掉它。
++
++        只认默认库名，避免误关同进程里别的测试模块的引擎。
++        """
++        import app.db.engine as db_engine
++
++        try:
++            if str(db_engine.engine.url).endswith(tuple(_FORBIDDEN_DB_NAMES)):
++                db_engine.engine.dispose()
++        except Exception:
++            pass
++
++    def _dispose(self) -> None:
++        if self._engine is not None:
++            self._engine.dispose()
++
++    def bind(self):
++        """把全局 engine/SessionLocal 和各模块 import 期读死的路径常量指回本 env。"""
++        import app.db.engine as db_engine
++        from sqlalchemy import create_engine
++        from sqlalchemy.orm import sessionmaker
++
++        if pathlib.Path(self.db_url.rsplit("///", 1)[-1]).name in _FORBIDDEN_DB_NAMES:
++            raise RuntimeError(f"测试拒绝连接默认库：{self.db_url}")
++
++        os.environ["DATABASE_URL"] = self.db_url
++        os.environ["NOTE_OUTPUT_DIR"] = str(self.note_dir)
++        os.environ["OUT_DIR"] = str(self.shot_dir)
++        os.environ["VECTOR_DB_DIR"] = str(self.vector_dir)
++
++        if db_engine.engine is not self._engine:
++            if self._engine is None:
++                self._engine = create_engine(
++                    self.db_url, connect_args={"check_same_thread": False}
++                )
++            db_engine.engine = self._engine
++            db_engine.SessionLocal = sessionmaker(
++                autocommit=False, autoflush=False, bind=self._engine
++            )
++
++        from app.services import library_service
++
++        library_service.NOTE_OUTPUT_DIR = str(self.note_dir)
++        library_service.IMAGE_OUTPUT_DIR = self.shot_dir
++        try:
++            from app.services import vector_store
++
++            vector_store.VECTOR_DB_DIR = str(self.vector_dir)
++        except Exception:
++            # chromadb 不在环境里就跳过：delete_note_artifacts 自己会吞掉向量库异常
++            pass
++        return self._engine
++
++    def init_schema(self) -> None:
++        from app.db.init_db import init_db
++
++        init_db()
++
++    def reset_dirs(self) -> None:
++        """清空并重建笔记/截图目录，用例之间不共享盘上残留。"""
++        shutil.rmtree(self.note_dir, ignore_errors=True)
++        shutil.rmtree(self.shot_dir, ignore_errors=True)
++        self.note_dir.mkdir(parents=True, exist_ok=True)
++        self.shot_dir.mkdir(parents=True, exist_ok=True)
++
++    def cleanup(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
 diff --git a/backend/tests/stub_deps.py b/backend/tests/stub_deps.py
 new file mode 100644
 index 0000000..c3002a2
@@ -13386,25 +13518,23 @@ index 0000000..dfdeb48
 +    unittest.main()
 diff --git a/backend/tests/test_library_http.py b/backend/tests/test_library_http.py
 new file mode 100644
-index 0000000..bffc397
+index 0000000..f515b82
 --- /dev/null
 +++ b/backend/tests/test_library_http.py
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,161 @@
 +"""library / storage / search / delete_task 的 HTTP 层测试（FastAPI TestClient）。
 +
 +DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
 +响应包装、错误码、删除真的落盘。
 +
-+重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、这段 stub 逻辑是 no-op；
++重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、stub 逻辑是 no-op；
 +本地无 Docker 跑时缺哪些就 stub 哪些（只 stub 真正找不到的模块，不污染有真包的环境）。
++DB 与目录由 tests.isolation 统一指到临时位置。
 +"""
 +
-+import importlib
 +import json
-+import os
 +import pathlib
 +import sys
-+import tempfile
 +import unittest
 +import uuid
 +from contextlib import asynccontextmanager
@@ -13412,23 +13542,14 @@ index 0000000..bffc397
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
 +sys.path.insert(0, str(_ROOT))
 +
-+_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-http-test-"))
-+os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-+os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-+os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-+os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
++from tests.isolation import IsolatedEnv  # noqa: E402
 +
-+
-+from tests.stub_deps import install_missing_stubs  # noqa: E402
-+
-+install_missing_stubs()
++ENV = IsolatedEnv("bilinote-http-test-")
 +
 +from app import create_app  # noqa: E402
-+from app.db.init_db import init_db  # noqa: E402
 +from fastapi.testclient import TestClient  # noqa: E402
 +
 +from app.db import library_dao, search_dao  # noqa: E402
-+from app.services import library_service  # noqa: E402
 +
 +
 +@asynccontextmanager
@@ -13436,11 +13557,10 @@ index 0000000..bffc397
 +    yield
 +
 +
-+init_db()
 +client = TestClient(create_app(lifespan=_noop_lifespan))
 +
-+NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-+SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
++NOTE_DIR = ENV.note_dir
++SHOT_DIR = ENV.shot_dir
 +
 +
 +def _make_note(task_id: str, markdown: str, shots=()) -> None:
@@ -13460,10 +13580,9 @@ index 0000000..bffc397
 +
 +class TestLibraryHttp(unittest.TestCase):
 +    def setUp(self):
-+        # library_service 的路径常量是 import 时读死 env 的；多模块同进程跑时
-+        # 别的模块会把它改到自己的临时目录，这里每个用例前绑回本模块的
-+        library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-+        library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
++        # 多模块同进程跑时，别的模块会把全局引擎和路径常量换到它自己的临时目录，
++        # 每个用例前绑回本模块的
++        ENV.bind()
 +
 +    def test_library_shape(self):
 +        res = client.get("/api/library").json()
@@ -13566,81 +13685,46 @@ index 0000000..bffc397
 +    unittest.main(verbosity=2)
 diff --git a/backend/tests/test_library_store.py b/backend/tests/test_library_store.py
 new file mode 100644
-index 0000000..4e46622
+index 0000000..706a46b
 --- /dev/null
 +++ b/backend/tests/test_library_store.py
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,287 @@
 +"""笔记库（文件夹 + 笔记索引）的数据层与删除逻辑测试。
 +
-+app.db.engine / app.services.library_service / app.services.vector_store 都在 import 时读环境变量。
-+但 unittest discover 会先把所有测试模块导入一遍，别的模块很可能已经用默认值把这几个模块导入过了，
-+所以光设 os.environ 不够——必须在导入之后把模块里的常量直接改指到临时目录，
-+否则会往真实的 bili_note.db 和 note_results/ 里写。
++DB / 笔记目录 / 截图目录 / 向量库全部由 tests.isolation 指到临时位置：
++app.db.engine 在 import 期就把 DATABASE_URL 读死了，事后改 os.environ 不可靠，
++落到默认值就会写进仓库里的 backend/bili_note.db（在跑着的容器里那更是生产库）。
 +"""
 +
-+import atexit
 +import json
 +import pathlib
-+import shutil
 +import sys
-+import tempfile
 +import unittest
 +from datetime import datetime, timezone
-+
-+import os
-+from sqlalchemy import create_engine
-+from sqlalchemy.orm import sessionmaker
 +
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
 +sys.path.insert(0, str(_ROOT))
 +
-+from tests.stub_deps import install_missing_stubs  # noqa: E402
++from tests.isolation import IsolatedEnv  # noqa: E402
 +
-+install_missing_stubs()
-+
-+_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-library-test-"))
-+os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-+os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-+os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-+os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
-+
-+import app.db.engine as db_engine  # noqa: E402
-+
-+# 把全局 engine / SessionLocal 换成测试库：library_dao 与 video_task_dao 都是
-+# 通过 app.db.engine.get_db() 拿会话，而 get_db 在调用时才查模块全局 SessionLocal。
-+_TEST_ENGINE = create_engine(os.environ["DATABASE_URL"], connect_args={"check_same_thread": False})
-+db_engine.engine = _TEST_ENGINE
-+db_engine.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_TEST_ENGINE)
++ENV = IsolatedEnv("bilinote-library-test-")
 +
 +from app.db.engine import Base, get_engine  # noqa: E402
 +from app.db import library_dao  # noqa: E402
 +from app.db.init_db import init_db  # noqa: E402
 +from app.services import library_service  # noqa: E402
 +
-+NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-+SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
-+
-+# 删笔记时会顺带删向量索引；不指到临时目录就会去动真实的 vector_db
-+try:
-+    from app.services import vector_store as _vector_store
-+
-+    _vector_store.VECTOR_DB_DIR = os.environ["VECTOR_DB_DIR"]
-+except Exception:  # chromadb 不在环境里时跳过，delete_note_artifacts 自己会吞掉异常
-+    pass
++NOTE_DIR = ENV.note_dir
++SHOT_DIR = ENV.shot_dir
 +
 +
-+def _point_library_service_at_tmp():
-+    """library_service 的路径常量在 import 时就读死了 env。
++def _truncate_all() -> None:
++    """每个用例从空库开始，避免相互干扰；顺带把全局引擎抢回本模块的临时库。"""
++    ENV.bind()
++    for table in reversed(Base.metadata.sorted_tables):
++        with get_engine().begin() as conn:
++            conn.execute(table.delete())
 +
-+    单进程跑多个测试模块时，后导入的模块改 env 也影响不了先导入的常量，
-+    所以每个用到文件路径的用例在 setUp 里显式重绑，与导入顺序解耦。
-+    """
-+    library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-+    library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
-+
-+
-+init_db()
-+atexit.register(shutil.rmtree, _TMP, True)
 +
 +# utils/video_helper.py:22 的命名规则：screenshot_{index:03}_{uuid4}.jpg
 +SHOT_A = "screenshot_003_11111111-1111-4111-8111-111111111111.jpg"
@@ -13668,14 +13752,11 @@ index 0000000..4e46622
 +class TestLibraryDao(unittest.TestCase):
 +    @classmethod
 +    def setUpClass(cls):
-+        init_db()
++        ENV.bind()
++        init_db()  # 再建一次：建表必须幂等
 +
 +    def setUp(self):
-+        # 每个用例从空库开始，避免相互干扰
-+        engine = get_engine()
-+        for table in reversed(Base.metadata.sorted_tables):
-+            with engine.begin() as conn:
-+                conn.execute(table.delete())
++        _truncate_all()
 +
 +    def test_folder_crud_and_duplicate_name(self):
 +        folder = library_dao.create_folder("行测")
@@ -13783,15 +13864,9 @@ index 0000000..4e46622
 +
 +class TestDeleteNoteArtifacts(unittest.TestCase):
 +    def setUp(self):
-+        _point_library_service_at_tmp()
-+        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-+        shutil.rmtree(SHOT_DIR, ignore_errors=True)
-+        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-+        SHOT_DIR.mkdir(parents=True, exist_ok=True)
-+        engine = get_engine()
-+        for table in reversed(Base.metadata.sorted_tables):
-+            with engine.begin() as conn:
-+                conn.execute(table.delete())
++        ENV.bind()
++        ENV.reset_dirs()
++        _truncate_all()
 +
 +    def test_deletes_files_and_only_referenced_screenshots(self):
 +        """delete_task 以前是空壳，界面删了盘上什么都没少。
@@ -13828,13 +13903,9 @@ index 0000000..4e46622
 +
 +class TestBackfill(unittest.TestCase):
 +    def setUp(self):
-+        _point_library_service_at_tmp()
-+        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-+        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-+        engine = get_engine()
-+        for table in reversed(Base.metadata.sorted_tables):
-+            with engine.begin() as conn:
-+                conn.execute(table.delete())
++        ENV.bind()
++        ENV.reset_dirs()
++        _truncate_all()
 +
 +    def test_backfills_existing_notes_and_is_idempotent(self):
 +        _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "# 笔记", title="数量关系专项")
@@ -13861,10 +13932,7 @@ index 0000000..4e46622
 +
 +class TestNoteVersions(unittest.TestCase):
 +    def setUp(self):
-+        engine = get_engine()
-+        for table in reversed(Base.metadata.sorted_tables):
-+            with engine.begin() as conn:
-+                conn.execute(table.delete())
++        _truncate_all()
 +
 +    def test_add_list_delete_version(self):
 +        first = library_dao.add_version("t1", "t1-v1", "内容一", style="minimal", model_name="m",
@@ -14454,43 +14522,34 @@ index f947ef8..98c6991 100644
      unittest.main()
 diff --git a/backend/tests/test_storage_search.py b/backend/tests/test_storage_search.py
 new file mode 100644
-index 0000000..4e8dfbd
+index 0000000..d0f20ae
 --- /dev/null
 +++ b/backend/tests/test_storage_search.py
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,157 @@
 +"""V3.2 后端测试：存储扫描/孤儿截图清理 + FTS5 全文搜索。
 +
 +只 import app.db / app.services.library_service（不碰 routers，避免拉 fastapi/chromadb），
-+这样没有 Docker 也能在宿主上用 stub runner 跑。
++这样没有 Docker 也能在宿主上用 stub runner 跑。DB 与目录全部由 tests.isolation 指到临时位置。
 +"""
 +
 +import json
-+import os
 +import pathlib
-+import shutil
 +import sys
-+import tempfile
 +import unittest
 +
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
 +sys.path.insert(0, str(_ROOT))
 +
-+from tests.stub_deps import install_missing_stubs  # noqa: E402
++from tests.isolation import IsolatedEnv  # noqa: E402
 +
-+install_missing_stubs()
-+
-+_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-storage-test-"))
-+os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-+os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-+os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-+os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
++ENV = IsolatedEnv("bilinote-storage-test-")
 +
 +from app.db import search_dao  # noqa: E402
 +from app.db.init_db import init_db  # noqa: E402
 +from app.services import library_service  # noqa: E402
 +
-+NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-+SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
++NOTE_DIR = ENV.note_dir
++SHOT_DIR = ENV.shot_dir
 +
 +SHOT_A = "screenshot_001_11111111-1111-4111-8111-111111111111.jpg"  # 清单引用
 +SHOT_B = "screenshot_002_22222222-2222-4222-8222-222222222222.jpg"  # 仅 markdown 正则引用
@@ -14522,19 +14581,15 @@ index 0000000..4e8dfbd
 +    (NOTE_DIR / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 +
 +
-+def _point_library_service_at_tmp():
-+    # 与 test_library_store 同理：路径常量 import 时读死，setUp 里重绑才能多模块同进程跑
-+    library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-+    library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
-+
-+
 +class TestSearchIndex(unittest.TestCase):
 +    @classmethod
 +    def setUpClass(cls):
++        ENV.bind()
 +        init_db()
 +        init_db()  # 再跑一次：建表必须幂等
 +
 +    def setUp(self):
++        ENV.bind()
 +        search_dao.delete_note("s1")
 +        search_dao.delete_note("s2")
 +
@@ -14576,14 +14631,11 @@ index 0000000..4e8dfbd
 +
 +class TestStorageScan(unittest.TestCase):
 +    def setUp(self):
-+        _point_library_service_at_tmp()
++        ENV.bind()
++        ENV.reset_dirs()
 +        # TestSearchIndex 用完的 s1/s2 索引行要清掉，否则搜索命中数会串
 +        search_dao.delete_note("s1")
 +        search_dao.delete_note("s2")
-+        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-+        shutil.rmtree(SHOT_DIR, ignore_errors=True)
-+        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-+        SHOT_DIR.mkdir(parents=True, exist_ok=True)
 +        for name in (SHOT_A, SHOT_B, SHOT_C):
 +            (SHOT_DIR / name).write_bytes(b"x" * 100)
 +        _write_note(NOTE_1, MD, manifest=[SHOT_A])
@@ -14618,8 +14670,7 @@ index 0000000..4e8dfbd
 +        self.assertTrue((SHOT_DIR / SHOT_C).exists())
 +
 +    def test_backfill_rebuilds_search_index(self):
-+        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-+        NOTE_DIR.mkdir(parents=True, exist_ok=True)
++        ENV.reset_dirs()
 +        _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", MD)
 +        self.assertEqual(library_service.backfill_library(), 1)
 +        hits = search_dao.search("恩格尔系数")
@@ -14631,7 +14682,7 @@ index 0000000..4e8dfbd
 +    try:
 +        unittest.main(verbosity=2)
 +    finally:
-+        shutil.rmtree(_TMP, ignore_errors=True)
++        ENV.cleanup()
 diff --git a/backend/tests/test_transcriber_idle_unload.py b/backend/tests/test_transcriber_idle_unload.py
 new file mode 100644
 index 0000000..809026f
@@ -15425,6 +15476,40 @@ index 0000000..5284c6b
 +  await page.locator('button[aria-label="卡片视图"]').click()
 +  await expect(page.locator('main .aspect-video').first()).toBeVisible()
 +})
+diff --git a/scripts/refresh-patch-snapshot.sh b/scripts/refresh-patch-snapshot.sh
+new file mode 100644
+index 0000000..269150b
+--- /dev/null
++++ b/scripts/refresh-patch-snapshot.sh
+@@ -0,0 +1,28 @@
++#!/usr/bin/env bash
++# 刷新 feature-custom-patches.patch：把全部自定义改动相对上游基线打包成一份可重放的补丁。
++# 升级镜像 / 换机器时，只要在上游基线的干净检出上 git apply 这份补丁就能恢复我们的改动。
++#
++#   bash scripts/refresh-patch-snapshot.sh
++#
++# 基线 90940fd = 开始改之前的上游 master 提交（git merge-base --is-ancestor 可验证）。
++# 生成时排除补丁文件自身，否则每一轮都会把上一轮的内容当新增文件嵌进来，体积按轮次翻倍。
++set -e
++cd "$(dirname "$0")/.."
++BASE=90940fd
++OUT=feature-custom-patches.patch
++ROOT="$(pwd)"
++
++git diff "$BASE" HEAD -- . ":(exclude)$OUT" > "$OUT"
++
++# 只写不验等于没写：在基线的临时 worktree 上 --check 一遍，坏补丁当场暴露
++TMP="$(mktemp -d)"
++git worktree add --detach "$TMP" "$BASE" >/dev/null 2>&1
++status=0
++if (cd "$TMP" && git apply --check "$ROOT/$OUT"); then
++  echo "OK: $(wc -l < "$OUT") 行，可在 $BASE 上干净应用"
++else
++  echo "FAIL: 补丁无法干净应用到 $BASE" >&2
++  status=1
++fi
++git worktree remove --force "$TMP" >/dev/null 2>&1 || true
++exit $status
 diff --git a/scripts/verify-after-deploy.sh b/scripts/verify-after-deploy.sh
 new file mode 100644
 index 0000000..e7d79c7
