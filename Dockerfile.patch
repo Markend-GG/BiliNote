@@ -25,33 +25,19 @@ ENV HF_HUB_DISABLE_XET=1
 RUN /usr/local/bin/pip uninstall -y hf-xet || true
 RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
 COPY --from=ui /app/dist/ /usr/share/nginx/html/
-COPY backend/app/routers/chat.py /app/backend/app/routers/chat.py
-COPY backend/app/services/chat_service.py /app/backend/app/services/chat_service.py
-COPY backend/app/routers/note.py /app/backend/app/routers/note.py
-COPY backend/app/routers/config.py /app/backend/app/routers/config.py
-COPY backend/app/utils/image_dedup.py /app/backend/app/utils/image_dedup.py
-COPY backend/app/utils/video_reader.py /app/backend/app/utils/video_reader.py
-COPY backend/app/utils/screenshot_marker.py /app/backend/app/utils/screenshot_marker.py
-COPY backend/app/utils/note_helper.py /app/backend/app/utils/note_helper.py
-COPY backend/app/utils/markdown_toc.py /app/backend/app/utils/markdown_toc.py
-COPY backend/app/services/note.py /app/backend/app/services/note.py
-COPY backend/app/gpt/prompt_builder.py /app/backend/app/gpt/prompt_builder.py
-COPY backend/app/gpt/prompt.py /app/backend/app/gpt/prompt.py
-COPY backend/app/enmus/task_status_enums.py /app/backend/app/enmus/task_status_enums.py
-COPY backend/app/transcriber/whisper.py /app/backend/app/transcriber/whisper.py
-COPY backend/app/transcriber/transcriber_provider.py /app/backend/app/transcriber/transcriber_provider.py
-# 笔记库（书架页 / 文件夹）：新表 + 索引接口 + 真正删除笔记产物；main.py 里加了启动回填
+# 后端整目录同步，不再逐文件列清单。清单已经漏过一次：V3.2 新增的
+# app/db/search_dao.py、app/routers/storage.py、app/services/note_index.py、
+# app/utils/markdown_chunks.py 都没进镜像，容器一启动就 ImportError
+# （init_db 要 search_dao、app/__init__ 要 routers.storage、routers/note 要 note_index）；
+# 改过的 universal_gpt / vector_store / notes_model 没进镜像则是静默跑旧代码，更难发现。
+# .dockerignore 已排除 __pycache__ / data / static / *.db，整目录 COPY 是安全的。
+COPY backend/app/ /app/backend/app/
 COPY backend/main.py /app/backend/main.py
-COPY backend/app/__init__.py /app/backend/app/__init__.py
-COPY backend/app/db/init_db.py /app/backend/app/db/init_db.py
-COPY backend/app/db/video_task_dao.py /app/backend/app/db/video_task_dao.py
-COPY backend/app/db/library_dao.py /app/backend/app/db/library_dao.py
-COPY backend/app/db/models/library.py /app/backend/app/db/models/library.py
-COPY backend/app/routers/library.py /app/backend/app/routers/library.py
-COPY backend/app/services/library_service.py /app/backend/app/services/library_service.py
-# 日志轮转：上游 supervisord conf 没配 maxbytes/backups，backend.log 会无限涨。
-# 先清掉上游 conf.d 再放我们的，避免同名 program 定义冲突导致 supervisord 起不来
-RUN rm -f /etc/supervisor/conf.d/*.conf
-COPY deploy/supervisord.conf /etc/supervisor/conf.d/bilinote.conf
-# 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
 COPY backend/tests/ /app/backend/tests/
+# 日志轮转：上游 supervisord conf 没配 maxbytes/backups，backend.log 会无限涨。
+# 必须覆盖成【同名】文件：基础镜像的 CMD 是
+#   /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+# 写成别的名字（一度写成 bilinote.conf）CMD 就找不到配置文件，容器起来就退出、无限重启。
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+# 启动命令显式写死，不赌基础镜像继承了什么
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
