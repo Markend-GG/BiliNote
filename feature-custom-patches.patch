@@ -411,6 +411,28 @@ index d27ba62..cb8a455 100644
 +/** 除终态以外都算「正在生成」，用来禁用提交按钮、拦截重复点击 */
 +export const isTaskRunning = (status?: string) =>
 +  !!status && status !== 'SUCCESS' && status !== 'FAILED'
+diff --git a/BillNote_frontend/src/hooks/useMediaQuery.ts b/BillNote_frontend/src/hooks/useMediaQuery.ts
+new file mode 100644
+index 0000000..a9bdaeb
+--- /dev/null
++++ b/BillNote_frontend/src/hooks/useMediaQuery.ts
+@@ -0,0 +1,16 @@
++import { useEffect, useState } from 'react'
++
++/** 响应式断点。窄屏（<1100px）时章节导航默认收起、参照 dock 变浮层。 */
++export function useMediaQuery(query: string): boolean {
++  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
++
++  useEffect(() => {
++    const mql = window.matchMedia(query)
++    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches)
++    setMatches(mql.matches)
++    mql.addEventListener('change', onChange)
++    return () => mql.removeEventListener('change', onChange)
++  }, [query])
++
++  return matches
++}
 diff --git a/BillNote_frontend/src/hooks/useNoteActions.tsx b/BillNote_frontend/src/hooks/useNoteActions.tsx
 new file mode 100644
 index 0000000..0620ada
@@ -560,13 +582,16 @@ index 0000000..0620ada
 +}
 diff --git a/BillNote_frontend/src/hooks/useShelfItems.ts b/BillNote_frontend/src/hooks/useShelfItems.ts
 new file mode 100644
-index 0000000..2a871ba
+index 0000000..a802a6f
 --- /dev/null
 +++ b/BillNote_frontend/src/hooks/useShelfItems.ts
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,73 @@
 +import { useMemo } from 'react'
 +import { useLibraryStore } from '@/store/libraryStore'
 +import { useTaskStore } from '@/store/taskStore'
++
++/** 终态：本地与后端都写完后不会再变。非终态以本地轮询值为准，终态冲突时信后端 */
++const TERMINAL = new Set(['SUCCESS', 'FAILED'])
 +
 +export interface ShelfItem {
 +  taskId: string
@@ -598,11 +623,14 @@ index 0000000..2a871ba
 +
 +    const fromIndex = notes.map(note => {
 +      const local = localById.get(note.task_id)
++      // 本地还停留在 FAILED 而后端已经重跑成功时，书架不该继续显示失败徽章
++      const status =
++        local && !TERMINAL.has(local.status) ? local.status : note.status || local?.status || 'PENDING'
 +      return {
 +        taskId: note.task_id,
 +        title: note.title || note.video_title || local?.audioMeta?.title || '未命名笔记',
 +        folderId: note.folder_id,
-+        status: local?.status || note.status || 'PENDING',
++        status,
 +        platform: note.platform || local?.platform || null,
 +        coverUrl: note.cover_url || local?.audioMeta?.cover_url || null,
 +        duration: note.duration ?? local?.audioMeta?.duration ?? null,
@@ -1361,6 +1389,563 @@ index 89934b5..0000000
 -    </div>
 -  )
 -}
+diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
+deleted file mode 100644
+index c34a0e5..0000000
+--- a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
++++ /dev/null
+@@ -1,551 +0,0 @@
+-import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+-import ReactMarkdown from 'react-markdown'
+-import { Button } from '@/components/ui/button.tsx'
+-import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
+-import { toast } from 'react-hot-toast'
+-import Error from '@/components/Lottie/error.tsx'
+-import Loading from '@/components/Lottie/Loading.tsx'
+-import Idle from '@/components/Lottie/Idle.tsx'
+-import StepBar from '@/pages/HomePage/components/StepBar.tsx'
+-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+-import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
+-import Zoom from 'react-medium-image-zoom'
+-import 'react-medium-image-zoom/dist/styles.css'
+-import gfm from 'remark-gfm'
+-import remarkMath from 'remark-math'
+-import rehypeKatex from 'rehype-katex'
+-import rehypeSlug from 'rehype-slug'
+-import 'katex/dist/katex.min.css'
+-import 'github-markdown-css/github-markdown-light.css'
+-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+-import { useTaskStore } from '@/store/taskStore'
+-import { noteStyles } from '@/constant/note.ts'
+-import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
+-import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
+-import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
+-import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
+-import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
+-
+-interface VersionNote {
+-  ver_id: string
+-  content: string
+-  style: string
+-  model_name: string
+-  created_at?: string
+-}
+-
+-interface MarkdownViewerProps {
+-  content: string | VersionNote[]
+-  status: 'idle' | 'loading' | 'success' | 'failed'
+-}
+-
+-const steps = [
+-  { label: '解析链接', key: 'PARSING' },
+-  { label: '下载音频', key: 'DOWNLOADING' },
+-  { label: '转写文字', key: 'TRANSCRIBING' },
+-  { label: '总结内容', key: 'SUMMARIZING' },
+-  { label: '保存完成', key: 'SUCCESS' },
+-]
+-
+-const remarkPlugins = [gfm, remarkMath]
+-const rehypePlugins = [rehypeKatex, rehypeSlug]
+-
+-/**
+- * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
+- * 使用函数 + useMemo 避免每次渲染都创建新的函数实例。
+- */
+-function createMarkdownComponents(baseURL: string) {
+-  return {
+-    h1: ({ children, ...props }: any) => (
+-      <h1
+-        className="text-primary my-6 scroll-m-20 text-3xl font-extrabold tracking-tight lg:text-4xl"
+-        {...props}
+-      >
+-        {children}
+-      </h1>
+-    ),
+-    h2: ({ children, ...props }: any) => (
+-      <h2
+-        className="text-primary mt-10 mb-4 scroll-m-20 border-b pb-2 text-2xl font-semibold tracking-tight first:mt-0"
+-        {...props}
+-      >
+-        {children}
+-      </h2>
+-    ),
+-    h3: ({ children, ...props }: any) => (
+-      <h3
+-        className="text-primary mt-8 mb-4 scroll-m-20 text-xl font-semibold tracking-tight"
+-        {...props}
+-      >
+-        {children}
+-      </h3>
+-    ),
+-    h4: ({ children, ...props }: any) => (
+-      <h4
+-        className="text-primary mt-6 mb-2 scroll-m-20 text-lg font-semibold tracking-tight"
+-        {...props}
+-      >
+-        {children}
+-      </h4>
+-    ),
+-    p: ({ children, ...props }: any) => (
+-      <p className="leading-7 [&:not(:first-child)]:mt-6" {...props}>
+-        {children}
+-      </p>
+-    ),
+-    a: ({ href, children, ...props }: any) => {
+-      const isOriginLink =
+-        typeof children[0] === 'string' &&
+-        (children[0] as string).startsWith('原片 @')
+-
+-      if (isOriginLink) {
+-        const timeMatch = (children[0] as string).match(/原片 @ (\d{2}:\d{2})/)
+-        const timeText = timeMatch ? timeMatch[1] : '原片'
+-
+-        return (
+-          <span className="origin-link my-2 inline-flex">
+-            <a
+-              href={href}
+-              target="_blank"
+-              rel="noopener noreferrer"
+-              className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+-              {...props}
+-            >
+-              <Play className="h-3.5 w-3.5" />
+-              <span>原片（{timeText}）</span>
+-            </a>
+-          </span>
+-        )
+-      }
+-
+-      // 处理笔记内部锚点链接（如目录跳转）
+-      if (href?.startsWith('#')) {
+-        const handleAnchorClick = (e: React.MouseEvent) => {
+-          e.preventDefault()
+-          const id = decodeURIComponent(href.slice(1))
+-
+-          // 1. 优先精确匹配 id
+-          let target = document.getElementById(id)
+-
+-          // 2. 精确失败时按 heading 文本模糊匹配
+-          // LLM 生成的目录锚点可能和 heading 实际文本不完全一致
+-          //（例如 heading 带 *Content-[00:00]* 后缀，目录链接里没有）
+-          if (!target) {
+-            const normalize = (s: string) =>
+-              s.replace(/[-：:\s*\[\]]/g, '').toLowerCase()
+-            const search = normalize(id)
+-            const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6')
+-            for (const h of headings) {
+-              const text = h.textContent || ''
+-              if (normalize(text).includes(search) || search.includes(normalize(text))) {
+-                target = h
+-                break
+-              }
+-            }
+-          }
+-
+-          if (target) {
+-            target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+-          } else {
+-            toast.error('未找到对应章节')
+-          }
+-        }
+-
+-        return (
+-          <a
+-            href={href}
+-            onClick={handleAnchorClick}
+-            className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 font-medium underline underline-offset-4"
+-            {...props}
+-          >
+-            {children}
+-          </a>
+-        )
+-      }
+-
+-      return (
+-        <a
+-          href={href}
+-          target="_blank"
+-          rel="noopener noreferrer"
+-          className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 font-medium underline underline-offset-4"
+-          {...props}
+-        >
+-          {children}
+-          {href?.startsWith('http') && (
+-            <ExternalLink className="ml-0.5 inline-block h-3 w-3" />
+-          )}
+-        </a>
+-      )
+-    },
+-    img: ({ node, ...props }: any) => {
+-      let src = props.src
+-      if (src.startsWith('/')) {
+-        src = baseURL + src
+-      }
+-      props.src = src
+-
+-      return (
+-        <div className="my-8 flex justify-center">
+-          <Zoom>
+-            <img
+-              {...props}
+-              className="max-w-full cursor-zoom-in rounded-lg object-cover shadow-md transition-all hover:shadow-lg"
+-              style={{ maxHeight: '500px' }}
+-            />
+-          </Zoom>
+-        </div>
+-      )
+-    },
+-    strong: ({ children, ...props }: any) => (
+-      <strong className="text-primary font-bold" {...props}>
+-        {children}
+-      </strong>
+-    ),
+-    li: ({ children, ...props }: any) => {
+-      const rawText = String(children)
+-      const isFakeHeading = /^(\*\*.+\*\*)$/.test(rawText.trim())
+-
+-      if (isFakeHeading) {
+-        return (
+-          <div className="text-primary my-4 text-lg font-bold">{children}</div>
+-        )
+-      }
+-
+-      return (
+-        <li className="my-1" {...props}>
+-          {children}
+-        </li>
+-      )
+-    },
+-    ul: ({ children, ...props }: any) => (
+-      <ul className="my-6 ml-6 list-disc [&>li]:mt-2" {...props}>
+-        {children}
+-      </ul>
+-    ),
+-    ol: ({ children, ...props }: any) => (
+-      <ol className="my-6 ml-6 list-decimal [&>li]:mt-2" {...props}>
+-        {children}
+-      </ol>
+-    ),
+-    blockquote: ({ children, ...props }: any) => (
+-      <blockquote
+-        className="border-primary/20 text-muted-foreground mt-6 border-l-4 pl-4 italic"
+-        {...props}
+-      >
+-        {children}
+-      </blockquote>
+-    ),
+-    code: ({ inline, className, children, ...props }: any) => {
+-      const match = /language-(\w+)/.exec(className || '')
+-      const codeContent = String(children).replace(/\n$/, '')
+-
+-      if (!inline && match) {
+-        return (
+-          <div className="group bg-muted relative my-6 overflow-hidden rounded-lg border shadow-sm">
+-            <div className="bg-muted text-muted-foreground flex items-center justify-between px-4 py-1.5 text-sm font-medium">
+-              <div>{match[1].toUpperCase()}</div>
+-              <button
+-                onClick={() => {
+-                  navigator.clipboard.writeText(codeContent)
+-                  toast.success('代码已复制')
+-                }}
+-                className="bg-background/80 hover:bg-background flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors"
+-              >
+-                <Copy className="h-3.5 w-3.5" />
+-                复制
+-              </button>
+-            </div>
+-            <SyntaxHighlighter
+-              style={codeStyle}
+-              language={match[1]}
+-              PreTag="div"
+-              className="!bg-muted !m-0 !p-0"
+-              customStyle={{
+-                margin: 0,
+-                padding: '1rem',
+-                background: 'transparent',
+-                fontSize: '0.9rem',
+-              }}
+-              {...props}
+-            >
+-              {codeContent}
+-            </SyntaxHighlighter>
+-          </div>
+-        )
+-      }
+-
+-      return (
+-        <code
+-          className="bg-muted relative rounded px-[0.3rem] py-[0.2rem] font-mono text-sm"
+-          {...props}
+-        >
+-          {children}
+-        </code>
+-      )
+-    },
+-    table: ({ children, ...props }: any) => (
+-      <div className="my-6 w-full overflow-y-auto">
+-        <table className="w-full border-collapse text-sm" {...props}>
+-          {children}
+-        </table>
+-      </div>
+-    ),
+-    th: ({ children, ...props }: any) => (
+-      <th
+-        className="border-muted-foreground/20 border px-4 py-2 text-left font-medium [&[align=center]]:text-center [&[align=right]]:text-right"
+-        {...props}
+-      >
+-        {children}
+-      </th>
+-    ),
+-    td: ({ children, ...props }: any) => (
+-      <td
+-        className="border-muted-foreground/20 border px-4 py-2 text-left [&[align=center]]:text-center [&[align=right]]:text-right"
+-        {...props}
+-      >
+-        {children}
+-      </td>
+-    ),
+-    hr: ({ ...props }: any) => (
+-      <hr className="border-muted-foreground/20 my-8" {...props} />
+-    ),
+-  }
+-}
+-
+-const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
+-  const [copied, setCopied] = useState(false)
+-  const [currentVerId, setCurrentVerId] = useState<string>('')
+-  const [selectedContent, setSelectedContent] = useState<string>('')
+-  const [modelName, setModelName] = useState<string>('')
+-  const [style, setStyle] = useState<string>('')
+-  const [createTime, setCreateTime] = useState<string>('')
+-  // 确保baseURL没有尾部斜杠
+-  const baseURL = (String(import.meta.env.VITE_API_BASE_URL || '').replace('/api','') || '').replace(/\/$/, '')
+-  const getCurrentTask = useTaskStore.getState().getCurrentTask
+-  const currentTask = useTaskStore(state => state.getCurrentTask())
+-  const taskStatus = currentTask?.status || 'PENDING'
+-  const retryTask = useTaskStore.getState().retryTask
+-  const isMultiVersion = Array.isArray(currentTask?.markdown)
+-  const [showTranscribe, setShowTranscribe] = useState(false)
+-  const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
+-  const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
+-  const svgRef = useRef<SVGSVGElement>(null)
+-
+-  // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
+-  const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
+-
+-  // 多版本内容处理
+-  useEffect(() => {
+-    if (!currentTask) return
+-
+-    if (!isMultiVersion) {
+-      setCurrentVerId('') // 清空旧版本 ID
+-      setModelName(currentTask.formData.model_name)
+-      setStyle(currentTask.formData.style)
+-      setCreateTime(currentTask.createdAt)
+-      setSelectedContent(currentTask?.markdown)
+-    } else {
+-      const latestVersion = [...currentTask.markdown].sort(
+-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+-      )[0]
+-
+-      if (latestVersion) {
+-        setCurrentVerId(latestVersion.ver_id)
+-      }
+-    }
+-  }, [currentTask?.id, taskStatus])
+-  useEffect(() => {
+-    if (!currentTask || !isMultiVersion) return
+-
+-    const currentVer = currentTask.markdown.find(v => v.ver_id === currentVerId)
+-    if (currentVer) {
+-      setModelName(currentVer.model_name)
+-      setStyle(currentVer.style)
+-      setCreateTime(currentVer.created_at || '')
+-      setSelectedContent(currentVer.content)
+-    }
+-  }, [currentVerId, currentTask?.id])
+-  const handleCopy = async () => {
+-    try {
+-      await navigator.clipboard.writeText(selectedContent)
+-      setCopied(true)
+-      toast.success('已复制到剪贴板')
+-      setTimeout(() => setCopied(false), 2000)
+-    } catch (e) {
+-      toast.error('复制失败')
+-    }
+-  }
+-  const alertButton = {
+-    id: 'alert',
+-    title: '测试警告',
+-    content: '⚠️',
+-    onClick: () => alert('你点击了自定义按钮！'),
+-  }
+-  const exportButton = {
+-    id: 'export',
+-    title: '导出思维导图',
+-    content: '⤓',
+-    onClick: () => {
+-      const svgEl = svgRef.current
+-      if (!svgEl) return
+-      // 同上面的序列化逻辑
+-      const serializer = new XMLSerializer()
+-      const source = serializer.serializeToString(svgEl)
+-      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
+-        type: 'image/svg+xml;charset=utf-8',
+-      })
+-      const url = URL.createObjectURL(blob)
+-      const a = document.createElement('a')
+-      a.href = url
+-      a.download = 'mindmap.svg'
+-      a.click()
+-      URL.revokeObjectURL(url)
+-    },
+-  }
+-  const handleDownload = () => {
+-    const task = getCurrentTask()
+-    const name = task?.audioMeta.title || 'note'
+-    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
+-    const link = document.createElement('a')
+-    link.href = URL.createObjectURL(blob)
+-    link.download = `${name}.md`
+-    document.body.appendChild(link)
+-    link.click()
+-    document.body.removeChild(link)
+-  }
+-
+-  if (status === 'loading') {
+-    return (
+-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+-        <StepBar steps={steps} currentStep={taskStatus} />
+-        <Loading className="h-5 w-5" />
+-        <div className="text-center text-sm">
+-          <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
+-          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
+-        </div>
+-      </div>
+-    )
+-  }
+-
+-  if (status === 'idle') {
+-    return (
+-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
+-        <Idle />
+-        <div className="text-center">
+-          <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
+-          <p className="mt-2 text-xs text-neutral-500">支持哔哩哔哩、YouTube 、抖音等视频平台</p>
+-        </div>
+-      </div>
+-    )
+-  }
+-
+-  if (status === 'failed' && !isMultiVersion) {
+-    return (
+-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
+-        <Error />
+-        <div className="text-center">
+-          <p className="text-lg font-bold text-red-500">笔记生成失败</p>
+-          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
+-
+-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
+-            重试
+-          </Button>
+-        </div>
+-      </div>
+-    )
+-  }
+-
+-  return (
+-    <div className="flex h-screen w-full flex-col overflow-hidden">
+-      <MarkdownHeader
+-        currentTask={currentTask}
+-        isMultiVersion={isMultiVersion}
+-        currentVerId={currentVerId}
+-        setCurrentVerId={setCurrentVerId}
+-        modelName={modelName}
+-        style={style}
+-        noteStyles={noteStyles}
+-        onCopy={handleCopy}
+-        onDownload={handleDownload}
+-        createAt={createTime}
+-        showTranscribe={showTranscribe}
+-        setShowTranscribe={setShowTranscribe}
+-        showChat={showChat}
+-        setShowChat={setShowChat}
+-        viewMode={viewMode}
+-        setViewMode={setViewMode}
+-      />
+-
+-      {viewMode === 'map' ? (
+-        <div className="flex w-full flex-1 overflow-hidden bg-white">
+-          <div className={'w-full'}>
+-            <MarkmapEditor
+-              value={selectedContent}
+-              onChange={() => {}}
+-              height="100%" // 根据需求可以设定百分比或固定高度
+-              title={currentTask?.audioMeta?.title || '思维导图'}
+-            />
+-          </div>
+-        </div>
+-      ) : (
+-        <div className="flex flex-1 overflow-hidden bg-white py-2">
+-          {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
+-            <>
+-              {showChat === 'full' && currentTask ? (
+-                <div className="h-full w-full">
+-                  <ChatPanel taskId={currentTask.id} mode="full" onModeChange={setShowChat} />
+-                </div>
+-              ) : (
+-              <>
+-              <ScrollArea className="min-w-0 flex-1">
+-                <div className="px-2">
+-                  <VideoBanner
+-                    audioMeta={currentTask?.audioMeta}
+-                    videoUrl={currentTask?.formData?.video_url}
+-                  />
+-                </div>
+-                <div className={'markdown-body w-full px-2'}>
+-                  <ReactMarkdown
+-                    remarkPlugins={remarkPlugins}
+-                    rehypePlugins={rehypePlugins}
+-                    components={markdownComponents}
+-                  >
+-                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
+-                  </ReactMarkdown>
+-                </div>
+-              </ScrollArea>
+-              {showTranscribe && (
+-                <div className={'ml-2 w-2/4'}>
+-                  <TranscriptViewer />
+-                </div>
+-              )}
+-              {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}
+-              {showChat === 'half' && currentTask && (
+-                <div className="ml-2 h-full w-1/2 shrink-0">
+-                  <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
+-                </div>
+-              )}
+-              </>
+-              )}
+-            </>
+-          ) : (
+-            <div className="flex h-full w-full items-center justify-center">
+-              <div className="w-[300px] flex-col justify-items-center">
+-                <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
+-                  <ArrowRight className="text-primary h-8 w-8" />
+-                </div>
+-                <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
+-                <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
+-              </div>
+-            </div>
+-          )}
+-        </div>
+-      )}
+-    </div>
+-  )
+-})
+-
+-MarkdownViewer.displayName = 'MarkdownViewer'
+-
+-export default MarkdownViewer
 diff --git a/BillNote_frontend/src/pages/HomePage/components/NoteFormWrapper.tsx b/BillNote_frontend/src/pages/HomePage/components/NoteFormWrapper.tsx
 deleted file mode 100644
 index b47eafe..0000000
@@ -2553,13 +3138,13 @@ index 0000000..d4d6210
 +  }
 +}
 diff --git a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx b/BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
-similarity index 70%
+similarity index 66%
 rename from BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
 rename to BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
-index c81c06f..ce13f87 100644
+index c81c06f..26a386a 100644
 --- a/BillNote_frontend/src/pages/HomePage/components/ChatPanel.tsx
 +++ b/BillNote_frontend/src/pages/NotePage/components/ChatPanel.tsx
-@@ -1,17 +1,22 @@
+@@ -1,20 +1,28 @@
 -import { useState, useEffect, useCallback, useMemo } from 'react'
 +import { useState, useEffect, useCallback, useMemo, type ClipboardEvent } from 'react'
  import { Bubble, Sender } from '@ant-design/x'
@@ -2576,6 +3161,7 @@ index c81c06f..ce13f87 100644
  import { useTaskStore } from '@/store/taskStore'
  import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatus } from '@/services/chat'
 +import { normalizeMathDelimiters } from '@/utils/math'
++import { cn } from '@/lib/utils'
  
  type ChatMode = 'half' | 'full'
  
@@ -2584,10 +3170,16 @@ index c81c06f..ce13f87 100644
  interface ChatPanelProps {
    taskId: string
    mode: ChatMode
-@@ -48,8 +53,30 @@ function SourceBadges({ sources }: { sources: ChatSource[] }) {
++  /** 在参照 dock 里时由 dock 提供 tab 标题与左边框，这里不再重复画 */
++  embedded?: boolean
+   onModeChange: (mode: ChatMode) => void
+ }
+ 
+@@ -48,8 +56,30 @@ function SourceBadges({ sources }: { sources: ChatSource[] }) {
    )
  }
  
+-export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
 +function UserContent({ content, images }: { content: string; images?: string[] }) {
 +  if (!images || images.length === 0) {
 +    return <div className="whitespace-pre-wrap">{content}</div>
@@ -2609,13 +3201,13 @@ index c81c06f..ce13f87 100644
 +  )
 +}
 +
- export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
++export default function ChatPanel({ taskId, mode, embedded = false, onModeChange }: ChatPanelProps) {
    const [input, setInput] = useState('')
 +  const [images, setImages] = useState<string[]>([])
    const [loading, setLoading] = useState(false)
    const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
  
-@@ -98,10 +125,39 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -98,10 +128,39 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
      }
    }, [taskId])
  
@@ -2656,7 +3248,7 @@ index c81c06f..ce13f87 100644
  
        const providerId = currentTask?.formData?.provider_id
        const modelName = currentTask?.formData?.model_name
-@@ -110,8 +166,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -110,8 +169,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
          return
        }
  
@@ -2672,7 +3264,7 @@ index c81c06f..ce13f87 100644
        setLoading(true)
  
        try {
-@@ -122,6 +184,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -122,6 +187,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
            history,
            provider_id: providerId,
            model_name: modelName,
@@ -2680,7 +3272,7 @@ index c81c06f..ce13f87 100644
          })
          addMessage(taskId, {
            role: 'assistant',
-@@ -134,7 +197,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -134,7 +200,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
          setLoading(false)
        }
      },
@@ -2689,7 +3281,7 @@ index c81c06f..ce13f87 100644
    )
  
    // 转换为 Bubble.List 的数据格式
-@@ -142,7 +205,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -142,7 +208,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
      const items = messages.map((msg, i) => ({
        key: `msg-${i}`,
        role: msg.role === 'user' ? ('user' as const) : ('ai' as const),
@@ -2703,7 +3295,7 @@ index c81c06f..ce13f87 100644
        footer:
          msg.role === 'assistant' && msg.sources ? (
            <SourceBadges sources={msg.sources} />
-@@ -184,8 +252,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -184,8 +255,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
          variant: 'outlined' as const,
          contentRender: (content: any) => (
            <div className="markdown-body prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:my-2">
@@ -2714,7 +3306,29 @@ index c81c06f..ce13f87 100644
              </ReactMarkdown>
            </div>
          ),
-@@ -268,6 +336,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -230,17 +301,17 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+   }
+ 
+   return (
+-    <div className="flex h-full flex-col border-l">
++    <div className={cn('flex h-full flex-col', !embedded && 'border-l')}>
+       {/* 头部 */}
+-      <div className="flex items-center justify-between border-b px-3 py-2">
+-        <span className="text-sm font-medium">AI 问答</span>
++      <div className={cn('flex items-center border-b px-3 py-2', embedded ? 'justify-end' : 'justify-between')}>
++        {!embedded && <span className="text-sm font-medium">AI 问答</span>}
+         <div className="flex items-center gap-1">
+           <Button
+             variant="ghost"
+             size="sm"
+             className="h-7 px-2 text-neutral-400 hover:text-neutral-600"
+             onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
+-            title={mode === 'half' ? '全屏' : '半屏'}
++            title={mode === 'half' ? '加宽参照面板' : '恢复参照面板默认宽度'}
+           >
+             {mode === 'half' ? (
+               <Maximize2 className="h-3.5 w-3.5" />
+@@ -268,6 +339,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
              <div>
                <p>针对笔记内容提问</p>
                <p className="mt-1 text-xs">例如：这个视频的核心观点是什么？</p>
@@ -2722,7 +3336,7 @@ index c81c06f..ce13f87 100644
              </div>
            </div>
          ) : (
-@@ -280,15 +349,31 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
+@@ -280,15 +352,31 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
        </div>
  
        {/* 输入区域 */}
@@ -2760,10 +3374,10 @@ index c81c06f..ce13f87 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
 new file mode 100644
-index 0000000..e9dde48
+index 0000000..27bf51d
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,439 @@
 +'use client'
 +
 +import { useEffect, useState } from 'react'
@@ -2822,13 +3436,11 @@ index 0000000..e9dde48
 +  noteStyles: { value: string; label: string }[]
 +  createAt?: string | Date
 +
-+  /** 视图与右侧面板 */
++  /** 视图与参照 dock */
 +  viewMode: 'map' | 'preview'
 +  setViewMode: (mode: 'map' | 'preview') => void
-+  showTranscribe: boolean
-+  setShowTranscribe: (show: boolean) => void
-+  showChat?: false | 'half' | 'full'
-+  setShowChat?: (mode: false | 'half' | 'full') => void
++  dockTab: 'transcript' | 'chat' | null
++  onDockTab: (tab: 'transcript' | 'chat' | null) => void
 +
 +  /** 动作 */
 +  onCopy: () => void
@@ -2871,10 +3483,8 @@ index 0000000..e9dde48
 +  createAt,
 +  viewMode,
 +  setViewMode,
-+  showTranscribe,
-+  setShowTranscribe,
-+  showChat,
-+  setShowChat,
++  dockTab,
++  onDockTab,
 +  onCopy,
 +  onDownload,
 +  onEdit,
@@ -3125,27 +3735,43 @@ index 0000000..e9dde48
 +          </TooltipProvider>
 +        )}
 +
-+        <Button
-+          variant={showTranscribe ? 'secondary' : 'ghost'}
-+          size="sm"
-+          className="h-8"
-+          onClick={() => setShowTranscribe(!showTranscribe)}
-+        >
-+          <FileText className="h-4 w-4" />
-+          原文参照
-+        </Button>
++        <TooltipProvider>
++          <Tooltip>
++            <TooltipTrigger asChild>
++              <Button
++                variant={dockTab === 'transcript' ? 'secondary' : 'ghost'}
++                size="sm"
++                className="h-8"
++                onClick={() => onDockTab(dockTab === 'transcript' ? null : 'transcript')}
++              >
++                <FileText className="h-4 w-4" />
++                原文参照
++              </Button>
++            </TooltipTrigger>
++            <TooltipContent>
++              {dockTab === 'transcript' ? '再点一次关闭' : '在右侧打开视频转写原文'}
++            </TooltipContent>
++          </Tooltip>
++        </TooltipProvider>
 +
-+        {setShowChat && (
-+          <Button
-+            variant={showChat ? 'secondary' : 'ghost'}
-+            size="sm"
-+            className="h-8"
-+            onClick={() => setShowChat(showChat ? false : 'half')}
-+          >
-+            <MessageSquare className="h-4 w-4" />
-+            AI 问答
-+          </Button>
-+        )}
++        <TooltipProvider>
++          <Tooltip>
++            <TooltipTrigger asChild>
++              <Button
++                variant={dockTab === 'chat' ? 'secondary' : 'ghost'}
++                size="sm"
++                className="h-8"
++                onClick={() => onDockTab(dockTab === 'chat' ? null : 'chat')}
++              >
++                <MessageSquare className="h-4 w-4" />
++                AI 问答
++              </Button>
++            </TooltipTrigger>
++            <TooltipContent>
++              {dockTab === 'chat' ? '再点一次关闭' : '基于这篇笔记内容提问'}
++            </TooltipContent>
++          </Tooltip>
++        </TooltipProvider>
 +
 +        <Menu
 +          trigger={<MoreHorizontal className="h-4 w-4" />}
@@ -3191,120 +3817,343 @@ index 0000000..e9dde48
 +    </div>
 +  )
 +}
-diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-similarity index 54%
-rename from BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
-rename to BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-index c34a0e5..4495f59 100644
---- a/BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx
+diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
+new file mode 100644
+index 0000000..7018e90
+--- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-@@ -1,12 +1,13 @@
- import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+@@ -0,0 +1,827 @@
++import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 +import { useNavigate } from 'react-router-dom'
- import ReactMarkdown from 'react-markdown'
- import { Button } from '@/components/ui/button.tsx'
--import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
++import ReactMarkdown from 'react-markdown'
++import { Button } from '@/components/ui/button.tsx'
 +import { Copy, Download, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
- import { toast } from 'react-hot-toast'
- import Error from '@/components/Lottie/error.tsx'
- import Loading from '@/components/Lottie/Loading.tsx'
- import Idle from '@/components/Lottie/Idle.tsx'
--import StepBar from '@/pages/HomePage/components/StepBar.tsx'
++import { toast } from 'react-hot-toast'
++import Error from '@/components/Lottie/error.tsx'
++import Loading from '@/components/Lottie/Loading.tsx'
++import Idle from '@/components/Lottie/Idle.tsx'
 +import StepBar from '@/pages/NotePage/components/StepBar.tsx'
- import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
- import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
- import Zoom from 'react-medium-image-zoom'
-@@ -15,40 +16,41 @@ import gfm from 'remark-gfm'
- import remarkMath from 'remark-math'
- import rehypeKatex from 'rehype-katex'
- import rehypeSlug from 'rehype-slug'
++import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
++import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
++import Zoom from 'react-medium-image-zoom'
++import 'react-medium-image-zoom/dist/styles.css'
++import gfm from 'remark-gfm'
++import remarkMath from 'remark-math'
++import rehypeKatex from 'rehype-katex'
++import rehypeSlug from 'rehype-slug'
 +import rehypeFold from '@/lib/rehypeFold'
- import 'katex/dist/katex.min.css'
- import 'github-markdown-css/github-markdown-light.css'
- import { ScrollArea } from '@/components/ui/scroll-area.tsx'
- import { useTaskStore } from '@/store/taskStore'
--import { noteStyles } from '@/constant/note.ts'
--import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
--import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
--import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
--import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
--import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
--
--interface VersionNote {
--  ver_id: string
--  content: string
--  style: string
--  model_name: string
--  created_at?: string
--}
++import 'katex/dist/katex.min.css'
++import 'github-markdown-css/github-markdown-light.css'
++import { ScrollArea } from '@/components/ui/scroll-area.tsx'
++import { ResizablePanel, ResizablePanelGroup, ResizableHandle } from '@/components/ui/resizable'
++import type { ImperativePanelHandle } from 'react-resizable-panels'
++import { useTaskStore } from '@/store/taskStore'
 +import { update_note } from '@/services/note'
 +import { normalizeMathDelimiters } from '@/utils/math'
++import { scrollToHeading } from '@/utils/heading'
 +import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
 +import { MarkdownHeader } from '@/pages/NotePage/components/MarkdownHeader.tsx'
-+import TranscriptViewer from '@/pages/NotePage/components/transcriptViewer.tsx'
 +import MarkmapEditor from '@/pages/NotePage/components/MarkmapComponent.tsx'
-+import ChatPanel from '@/pages/NotePage/components/ChatPanel.tsx'
 +import VideoBanner from '@/pages/NotePage/components/VideoBanner.tsx'
++import OutlineNav from '@/pages/NotePage/components/OutlineNav.tsx'
++import ReferenceDock, { type DockTab } from '@/pages/NotePage/components/ReferenceDock.tsx'
 +import { NoteFormDialog } from '@/components/NoteFormDialog'
 +import { useNoteActions } from '@/hooks/useNoteActions'
 +import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 +import { useLibraryStore } from '@/store/libraryStore'
++import { useMediaQuery } from '@/hooks/useMediaQuery'
 +import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
- 
- interface MarkdownViewerProps {
--  content: string | VersionNote[]
-   status: 'idle' | 'loading' | 'success' | 'failed'
- }
- 
- const steps = [
-   { label: '解析链接', key: 'PARSING' },
--  { label: '下载音频', key: 'DOWNLOADING' },
++
++const OUTLINE_STORAGE_KEY = 'note-outline-collapsed'
++
++interface MarkdownViewerProps {
++  status: 'idle' | 'loading' | 'success' | 'failed'
++}
++
++const steps = [
++  { label: '解析链接', key: 'PARSING' },
 +  { label: '下载音视频', key: 'DOWNLOADING' },
 +  { label: '抽取画面', key: 'EXTRACTING' },
-   { label: '转写文字', key: 'TRANSCRIBING' },
-   { label: '总结内容', key: 'SUMMARIZING' },
-   { label: '保存完成', key: 'SUCCESS' },
- ]
- 
- const remarkPlugins = [gfm, remarkMath]
--const rehypePlugins = [rehypeKatex, rehypeSlug]
++  { label: '转写文字', key: 'TRANSCRIBING' },
++  { label: '总结内容', key: 'SUMMARIZING' },
++  { label: '保存完成', key: 'SUCCESS' },
++]
++
++const remarkPlugins = [gfm, remarkMath]
 +// rehypeFold 必须排在 rehypeSlug 之后：它要复用 slug 已经写到标题上的 id
 +const rehypePlugins = [rehypeKatex, rehypeSlug, rehypeFold]
- 
- /**
-  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
-@@ -99,7 +101,7 @@ function createMarkdownComponents(baseURL: string) {
-         (children[0] as string).startsWith('原片 @')
- 
-       if (isOriginLink) {
--        const timeMatch = (children[0] as string).match(/原片 @ (\d{2}:\d{2})/)
++
++/**
++ * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
++ * 使用函数 + useMemo 避免每次渲染都创建新的函数实例。
++ */
++function createMarkdownComponents(baseURL: string) {
++  return {
++    h1: ({ children, ...props }: any) => (
++      <h1
++        className="text-primary my-6 scroll-m-20 text-3xl font-extrabold tracking-tight lg:text-4xl"
++        {...props}
++      >
++        {children}
++      </h1>
++    ),
++    h2: ({ children, ...props }: any) => (
++      <h2
++        className="text-primary mt-10 mb-4 scroll-m-20 border-b pb-2 text-2xl font-semibold tracking-tight first:mt-0"
++        {...props}
++      >
++        {children}
++      </h2>
++    ),
++    h3: ({ children, ...props }: any) => (
++      <h3
++        className="text-primary mt-8 mb-4 scroll-m-20 text-xl font-semibold tracking-tight"
++        {...props}
++      >
++        {children}
++      </h3>
++    ),
++    h4: ({ children, ...props }: any) => (
++      <h4
++        className="text-primary mt-6 mb-2 scroll-m-20 text-lg font-semibold tracking-tight"
++        {...props}
++      >
++        {children}
++      </h4>
++    ),
++    p: ({ children, ...props }: any) => (
++      <p className="leading-7 [&:not(:first-child)]:mt-6" {...props}>
++        {children}
++      </p>
++    ),
++    a: ({ href, children, ...props }: any) => {
++      const isOriginLink =
++        typeof children[0] === 'string' &&
++        (children[0] as string).startsWith('原片 @')
++
++      if (isOriginLink) {
 +        const timeMatch = (children[0] as string).match(/原片 @ (\d{1,3}:\d{2})/)
-         const timeText = timeMatch ? timeMatch[1] : '原片'
- 
-         return (
-@@ -145,6 +147,10 @@ function createMarkdownComponents(baseURL: string) {
-           }
- 
-           if (target) {
-+            // 目标可能藏在折叠起来的章节里，先把祖先全部展开，否则滚过去是一片空白
-+            for (let sec = target.closest('.md-section'); sec; sec = sec.parentElement?.closest('.md-section') || null) {
-+              sec.classList.remove('md-collapsed')
-+            }
-             target.scrollIntoView({ behavior: 'smooth', block: 'start' })
-           } else {
-             toast.error('未找到对应章节')
-@@ -330,11 +336,62 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-   const [showTranscribe, setShowTranscribe] = useState(false)
-   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
-   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
--  const svgRef = useRef<SVGSVGElement>(null)
++        const timeText = timeMatch ? timeMatch[1] : '原片'
++
++        return (
++          <span className="origin-link my-2 inline-flex">
++            <a
++              href={href}
++              target="_blank"
++              rel="noopener noreferrer"
++              className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
++              {...props}
++            >
++              <Play className="h-3.5 w-3.5" />
++              <span>原片（{timeText}）</span>
++            </a>
++          </span>
++        )
++      }
++
++      // 处理笔记内部锚点链接（如目录跳转）；章节导航也走同一份匹配规则
++      if (href?.startsWith('#')) {
++        const handleAnchorClick = (e: React.MouseEvent) => {
++          e.preventDefault()
++          if (!scrollToHeading(decodeURIComponent(href.slice(1)))) {
++            toast.error('未找到对应章节')
++          }
++        }
++
++        return (
++          <a
++            href={href}
++            onClick={handleAnchorClick}
++            className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 font-medium underline underline-offset-4"
++            {...props}
++          >
++            {children}
++          </a>
++        )
++      }
++
++      return (
++        <a
++          href={href}
++          target="_blank"
++          rel="noopener noreferrer"
++          className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 font-medium underline underline-offset-4"
++          {...props}
++        >
++          {children}
++          {href?.startsWith('http') && (
++            <ExternalLink className="ml-0.5 inline-block h-3 w-3" />
++          )}
++        </a>
++      )
++    },
++    img: ({ node, ...props }: any) => {
++      let src = props.src
++      if (src.startsWith('/')) {
++        src = baseURL + src
++      }
++      props.src = src
++
++      return (
++        <div className="my-8 flex justify-center">
++          <Zoom>
++            <img
++              {...props}
++              className="max-w-full cursor-zoom-in rounded-lg object-cover shadow-md transition-all hover:shadow-lg"
++              style={{ maxHeight: '500px' }}
++            />
++          </Zoom>
++        </div>
++      )
++    },
++    strong: ({ children, ...props }: any) => (
++      <strong className="text-primary font-bold" {...props}>
++        {children}
++      </strong>
++    ),
++    li: ({ children, ...props }: any) => {
++      const rawText = String(children)
++      const isFakeHeading = /^(\*\*.+\*\*)$/.test(rawText.trim())
++
++      if (isFakeHeading) {
++        return (
++          <div className="text-primary my-4 text-lg font-bold">{children}</div>
++        )
++      }
++
++      return (
++        <li className="my-1" {...props}>
++          {children}
++        </li>
++      )
++    },
++    ul: ({ children, ...props }: any) => (
++      <ul className="my-6 ml-6 list-disc [&>li]:mt-2" {...props}>
++        {children}
++      </ul>
++    ),
++    ol: ({ children, ...props }: any) => (
++      <ol className="my-6 ml-6 list-decimal [&>li]:mt-2" {...props}>
++        {children}
++      </ol>
++    ),
++    blockquote: ({ children, ...props }: any) => (
++      <blockquote
++        className="border-primary/20 text-muted-foreground mt-6 border-l-4 pl-4 italic"
++        {...props}
++      >
++        {children}
++      </blockquote>
++    ),
++    code: ({ inline, className, children, ...props }: any) => {
++      const match = /language-(\w+)/.exec(className || '')
++      const codeContent = String(children).replace(/\n$/, '')
++
++      if (!inline && match) {
++        return (
++          <div className="group bg-muted relative my-6 overflow-hidden rounded-lg border shadow-sm">
++            <div className="bg-muted text-muted-foreground flex items-center justify-between px-4 py-1.5 text-sm font-medium">
++              <div>{match[1].toUpperCase()}</div>
++              <button
++                onClick={() => {
++                  navigator.clipboard.writeText(codeContent)
++                  toast.success('代码已复制')
++                }}
++                className="bg-background/80 hover:bg-background flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors"
++              >
++                <Copy className="h-3.5 w-3.5" />
++                复制
++              </button>
++            </div>
++            <SyntaxHighlighter
++              style={codeStyle}
++              language={match[1]}
++              PreTag="div"
++              className="!bg-muted !m-0 !p-0"
++              customStyle={{
++                margin: 0,
++                padding: '1rem',
++                background: 'transparent',
++                fontSize: '0.9rem',
++              }}
++              {...props}
++            >
++              {codeContent}
++            </SyntaxHighlighter>
++          </div>
++        )
++      }
++
++      return (
++        <code
++          className="bg-muted relative rounded px-[0.3rem] py-[0.2rem] font-mono text-sm"
++          {...props}
++        >
++          {children}
++        </code>
++      )
++    },
++    table: ({ children, ...props }: any) => (
++      <div className="my-6 w-full overflow-y-auto">
++        <table className="w-full border-collapse text-sm" {...props}>
++          {children}
++        </table>
++      </div>
++    ),
++    th: ({ children, ...props }: any) => (
++      <th
++        className="border-muted-foreground/20 border px-4 py-2 text-left font-medium [&[align=center]]:text-center [&[align=right]]:text-right"
++        {...props}
++      >
++        {children}
++      </th>
++    ),
++    td: ({ children, ...props }: any) => (
++      <td
++        className="border-muted-foreground/20 border px-4 py-2 text-left [&[align=center]]:text-center [&[align=right]]:text-right"
++        {...props}
++      >
++        {children}
++      </td>
++    ),
++    hr: ({ ...props }: any) => (
++      <hr className="border-muted-foreground/20 my-8" {...props} />
++    ),
++  }
++}
++
++const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
++  const [copied, setCopied] = useState(false)
++  const [currentVerId, setCurrentVerId] = useState<string>('')
++  const [selectedContent, setSelectedContent] = useState<string>('')
++  const [modelName, setModelName] = useState<string>('')
++  const [style, setStyle] = useState<string>('')
++  const [createTime, setCreateTime] = useState<string>('')
++  // 确保baseURL没有尾部斜杠
++  const baseURL = (String(import.meta.env.VITE_API_BASE_URL || '').replace('/api','') || '').replace(/\/$/, '')
++  const getCurrentTask = useTaskStore.getState().getCurrentTask
++  const currentTask = useTaskStore(state => state.getCurrentTask())
++  const taskStatus = currentTask?.status || 'PENDING'
++  const retryTask = useTaskStore.getState().retryTask
++  const isMultiVersion = Array.isArray(currentTask?.markdown)
++  // 原文参照 / AI 问答合并成一个 dock 的两个 tab，null = 关闭。
++  // 以前是两个并列 state + 硬编码宽度，且 AI 切"全屏"会把原文参照整个替换掉再也打不开。
++  const [dockTab, setDockTab] = useState<DockTab | null>(null)
++  const dockRef = useRef<ImperativePanelHandle>(null)
++  const [outlineCollapsed, setOutlineCollapsed] = useState(
++    () => localStorage.getItem(OUTLINE_STORAGE_KEY) === '1',
++  )
++  // 用户自己的折叠偏好。dock 打开时章节栏临时让位，关掉要恢复成这个值而不是写死的 false
++  const outlinePrefRef = useRef(outlineCollapsed)
++  const isNarrow = useMediaQuery('(max-width: 1100px)')
++  const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
 +  const [editing, setEditing] = useState(false)
 +  const [draft, setDraft] = useState('')
 +  const [saving, setSaving] = useState(false)
- 
-   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
-   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
- 
++
++  // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
++  const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
++
 +  // ---- 两级导航：返回书架 / 同文件夹切换 / 笔记级操作 ----
 +  const navigate = useNavigate()
 +  const shelfItems = useShelfItems()
@@ -3354,13 +4203,69 @@ index c34a0e5..4495f59 100644
 +    </>
 +  )
 +
-   // 多版本内容处理
-   useEffect(() => {
-     if (!currentTask) return
-@@ -366,6 +423,56 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-       setSelectedContent(currentVer.content)
-     }
-   }, [currentVerId, currentTask?.id])
++  const dockOpen = dockTab !== null
++
++  const setOutlineCollapsedPersist = (value: boolean) => {
++    setOutlineCollapsed(value)
++    outlinePrefRef.current = value
++    localStorage.setItem(OUTLINE_STORAGE_KEY, value ? '1' : '0')
++  }
++
++  // 窄屏横向空间本来就不够，章节栏默认让位
++  useEffect(() => {
++    if (isNarrow) setOutlineCollapsedPersist(true)
++  }, [isNarrow])
++
++  // dock 占掉横向空间时章节栏收成竖条；关掉恢复用户之前的偏好
++  useEffect(() => {
++    if (dockOpen) setOutlineCollapsed(true)
++    else setOutlineCollapsed(outlinePrefRef.current)
++  }, [dockOpen])
++
++  useEffect(() => {
++    if (dockOpen) dockRef.current?.expand()
++    else dockRef.current?.collapse()
++  }, [dockOpen])
++
++  // ChatPanel 的放大/缩小按钮现在只负责调 dock 宽度，不再有"全屏替换正文"。
++  // 宽窄状态必须存在这一层：ChatPanel 自己只认 mode prop，写死 'half' 会让按钮永远朝一个方向切。
++  const [dockWide, setDockWide] = useState(false)
++  const handleChatResize = (mode: 'half' | 'full') => {
++    setDockWide(mode === 'full')
++    dockRef.current?.resize(mode === 'full' ? 65 : 38)
++  }
++
++  // 多版本内容处理
++  useEffect(() => {
++    if (!currentTask) return
++
++    if (!isMultiVersion) {
++      setCurrentVerId('') // 清空旧版本 ID
++      setModelName(currentTask.formData.model_name)
++      setStyle(currentTask.formData.style)
++      setCreateTime(currentTask.createdAt)
++      setSelectedContent(currentTask?.markdown)
++    } else {
++      const latestVersion = [...currentTask.markdown].sort(
++        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
++      )[0]
++
++      if (latestVersion) {
++        setCurrentVerId(latestVersion.ver_id)
++      }
++    }
++  }, [currentTask?.id, taskStatus])
++  useEffect(() => {
++    if (!currentTask || !isMultiVersion) return
++
++    const currentVer = currentTask.markdown.find(v => v.ver_id === currentVerId)
++    if (currentVer) {
++      setModelName(currentVer.model_name)
++      setStyle(currentVer.style)
++      setCreateTime(currentVer.created_at || '')
++      setSelectedContent(currentVer.content)
++    }
++  }, [currentVerId, currentTask?.id])
 +  // ---- 章节折叠 ----
 +  // 折叠状态用 DOM class 存（不用 React state）：一节一节展开/收起是纯视觉状态，
 +  // 走事件委托改 class 既不用给每个标题挂状态，也不会和 React 的重渲染打架
@@ -3411,47 +4316,28 @@ index c34a0e5..4495f59 100644
 +    toast.success('已删除该版本')
 +  }
 +
-   const handleCopy = async () => {
-     try {
-       await navigator.clipboard.writeText(selectedContent)
-@@ -376,33 +483,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-       toast.error('复制失败')
-     }
-   }
--  const alertButton = {
--    id: 'alert',
--    title: '测试警告',
--    content: '⚠️',
--    onClick: () => alert('你点击了自定义按钮！'),
--  }
--  const exportButton = {
--    id: 'export',
--    title: '导出思维导图',
--    content: '⤓',
--    onClick: () => {
--      const svgEl = svgRef.current
--      if (!svgEl) return
--      // 同上面的序列化逻辑
--      const serializer = new XMLSerializer()
--      const source = serializer.serializeToString(svgEl)
--      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
--        type: 'image/svg+xml;charset=utf-8',
--      })
--      const url = URL.createObjectURL(blob)
--      const a = document.createElement('a')
--      a.href = url
--      a.download = 'mindmap.svg'
--      a.click()
--      URL.revokeObjectURL(url)
--    },
--  }
-   const handleDownload = () => {
-     const task = getCurrentTask()
-     const name = task?.audioMeta.title || 'note'
-@@ -415,14 +495,84 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-     document.body.removeChild(link)
-   }
- 
++  const handleCopy = async () => {
++    try {
++      await navigator.clipboard.writeText(selectedContent)
++      setCopied(true)
++      toast.success('已复制到剪贴板')
++      setTimeout(() => setCopied(false), 2000)
++    } catch (e) {
++      toast.error('复制失败')
++    }
++  }
++  const handleDownload = () => {
++    const task = getCurrentTask()
++    const name = task?.audioMeta.title || 'note'
++    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
++    const link = document.createElement('a')
++    link.href = URL.createObjectURL(blob)
++    link.download = `${name}.md`
++    document.body.appendChild(link)
++    link.click()
++    document.body.removeChild(link)
++  }
++
 +  const handleStartEdit = () => {
 +    if (!selectedContent || selectedContent === 'loading' || selectedContent === 'empty') return
 +    setDraft(selectedContent)
@@ -3520,45 +4406,39 @@ index c34a0e5..4495f59 100644
 +    })
 +  }
 +
-   if (status === 'loading') {
-     return (
--      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
++  if (status === 'loading') {
++    return (
 +      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
-         <StepBar steps={steps} currentStep={taskStatus} />
-         <Loading className="h-5 w-5" />
-         <div className="text-center text-sm">
--          <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
--          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
++        <StepBar steps={steps} currentStep={taskStatus} />
++        <Loading className="h-5 w-5" />
++        <div className="text-center text-sm">
 +          <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
 +          <p className="mt-2 text-xs text-neutral-500">
 +            长视频要抽帧并分批送给模型，可能需要几分钟；按钮已锁定，无需重复点击
 +          </p>
-         </div>
-       </div>
-     )
-@@ -430,7 +580,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
- 
-   if (status === 'idle') {
-     return (
--      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
++        </div>
++      </div>
++    )
++  }
++
++  if (status === 'idle') {
++    return (
 +      <div className="flex h-full w-full flex-col items-center justify-center space-y-3 text-neutral-500">
-         <Idle />
-         <div className="text-center">
-           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
-@@ -442,23 +592,40 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
- 
-   if (status === 'failed' && !isMultiVersion) {
-     return (
--      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
++        <Idle />
++        <div className="text-center">
++          <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
++          <p className="mt-2 text-xs text-neutral-500">支持哔哩哔哩、YouTube 、抖音等视频平台</p>
++        </div>
++      </div>
++    )
++  }
++
++  if (status === 'failed' && !isMultiVersion) {
++    return (
 +      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
-         <Error />
-         <div className="text-center">
-           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
--          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
--
--          <Button onClick={() => retryTask(currentTask.id)} size="lg">
--            重试
--          </Button>
++        <Error />
++        <div className="text-center">
++          <p className="text-lg font-bold text-red-500">笔记生成失败</p>
 +          <p className="mt-2 mb-4 text-xs text-red-400">可以直接重试，也可以先换个模型或笔记风格</p>
 +          <div className="flex justify-center gap-2">
 +            <Button onClick={() => retryTask(currentTask.id)} size="lg">
@@ -3571,16 +4451,49 @@ index c34a0e5..4495f59 100644
 +              返回书架
 +            </Button>
 +          </div>
-         </div>
++        </div>
 +        {overlays}
-       </div>
-     )
-   }
- 
-   return (
--    <div className="flex h-screen w-full flex-col overflow-hidden">
-+    <div className="flex h-full w-full flex-col overflow-hidden">
-       <MarkdownHeader
++      </div>
++    )
++  }
++
++  const noteColumn =
++    selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
++      <ScrollArea className="h-full min-w-0 bg-white py-2">
++        {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
++            成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
++        <div className="mx-auto w-full max-w-[1200px] px-2">
++          <VideoBanner
++            audioMeta={currentTask?.audioMeta}
++            videoUrl={currentTask?.formData?.video_url}
++          />
++          <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
++            <ReactMarkdown
++              remarkPlugins={remarkPlugins}
++              rehypePlugins={rehypePlugins}
++              components={markdownComponents}
++            >
++              {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
++            </ReactMarkdown>
++          </div>
++        </div>
++      </ScrollArea>
++    ) : (
++      <div className="flex h-full w-full items-center justify-center bg-white">
++        <div className="w-[300px] flex-col justify-items-center">
++          <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
++            <ArrowRight className="text-primary h-8 w-8" />
++          </div>
++          <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
++          <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
++        </div>
++      </div>
++    )
++
++  return (
++    <div className="flex h-full w-full overflow-hidden">
++      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
++      <MarkdownHeader
 +        title={noteTitle}
 +        onBack={() => goShelf()}
 +        folderName={folderName}
@@ -3590,26 +4503,39 @@ index c34a0e5..4495f59 100644
 +        onBackToShelf={() => goShelf()}
 +        onRegenerate={() => setRegenerateOpen(true)}
 +        noteEntries={noteEntries}
-         currentTask={currentTask}
-         isMultiVersion={isMultiVersion}
-         currentVerId={currentVerId}
-@@ -475,6 +642,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-         setShowChat={setShowChat}
-         viewMode={viewMode}
-         setViewMode={setViewMode}
++        currentTask={currentTask}
++        isMultiVersion={isMultiVersion}
++        currentVerId={currentVerId}
++        setCurrentVerId={setCurrentVerId}
++        modelName={modelName}
++        style={style}
++        noteStyles={noteStyles}
++        onCopy={handleCopy}
++        onDownload={handleDownload}
++        createAt={createTime}
++        dockTab={dockTab}
++        onDockTab={setDockTab}
++        viewMode={viewMode}
++        setViewMode={setViewMode}
 +        foldAll={foldAll}
 +        onFoldAll={handleToggleFoldAll}
 +        onDeleteVersion={handleDeleteVersion}
 +        canDeleteVersion={isMultiVersion && (currentTask?.markdown as unknown[])?.length > 1}
 +        onEdit={handleStartEdit}
 +        editing={editing}
-       />
- 
-       {viewMode === 'map' ? (
-@@ -488,6 +661,57 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-             />
-           </div>
-         </div>
++      />
++
++      {viewMode === 'map' ? (
++        <div className="flex w-full flex-1 overflow-hidden bg-white">
++          <div className={'w-full'}>
++            <MarkmapEditor
++              value={selectedContent}
++              onChange={() => {}}
++              height="100%" // 根据需求可以设定百分比或固定高度
++              title={currentTask?.audioMeta?.title || '思维导图'}
++            />
++          </div>
++        </div>
 +      ) : editing ? (
 +        <div className="flex flex-1 flex-col overflow-hidden bg-white px-3 py-2">
 +          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -3661,50 +4587,69 @@ index c34a0e5..4495f59 100644
 +            className="min-h-0 w-full flex-1 resize-none rounded-md border p-3 font-mono text-sm leading-6 focus:outline-none"
 +          />
 +        </div>
-       ) : (
-         <div className="flex flex-1 overflow-hidden bg-white py-2">
-           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
-@@ -499,20 +723,22 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-               ) : (
-               <>
-               <ScrollArea className="min-w-0 flex-1">
--                <div className="px-2">
-+                {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
-+                    成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
-+                <div className="mx-auto w-full max-w-[1200px] px-2">
-                   <VideoBanner
-                     audioMeta={currentTask?.audioMeta}
-                     videoUrl={currentTask?.formData?.video_url}
-                   />
--                </div>
--                <div className={'markdown-body w-full px-2'}>
--                  <ReactMarkdown
--                    remarkPlugins={remarkPlugins}
--                    rehypePlugins={rehypePlugins}
--                    components={markdownComponents}
--                  >
--                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
--                  </ReactMarkdown>
-+                  <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
-+                    <ReactMarkdown
-+                      remarkPlugins={remarkPlugins}
-+                      rehypePlugins={rehypePlugins}
-+                      components={markdownComponents}
-+                    >
-+                      {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
-+                    </ReactMarkdown>
-+                  </div>
-                 </div>
-               </ScrollArea>
-               {showTranscribe && (
-@@ -542,6 +768,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-           )}
-         </div>
-       )}
++      ) : (
++        <div className="relative flex min-h-0 flex-1 overflow-hidden bg-white">
++          {isNarrow ? (
++            <>
++              {noteColumn}
++              {/* 窄屏不挤正文：dock 作为右侧浮层盖在上面 */}
++              {dockTab && currentTask && (
++                <div className="border-l shadow-xl absolute inset-y-0 right-0 z-30 w-[min(440px,92vw)] bg-white">
++                  <ReferenceDock
++                    tab={dockTab}
++                    onTab={setDockTab}
++                    taskId={currentTask.id}
++                    wide={dockWide}
++                    onResize={handleChatResize}
++                    onClose={() => setDockTab(null)}
++                  />
++                </div>
++              )}
++            </>
++          ) : (
++            <ResizablePanelGroup direction="horizontal" className="min-h-0 flex-1">
++              <ResizablePanel defaultSize={100} minSize={45}>
++                {noteColumn}
++              </ResizablePanel>
++              <ResizableHandle />
++              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变 */}
++              <ResizablePanel
++                ref={dockRef}
++                collapsible
++                collapsedSize={0}
++                defaultSize={38}
++                minSize={25}
++                maxSize={70}
++              >
++                {currentTask && (
++                  <ReferenceDock
++                    tab={dockTab ?? 'transcript'}
++                    onTab={setDockTab}
++                    taskId={currentTask.id}
++                    wide={dockWide}
++                    onResize={handleChatResize}
++                  />
++                )}
++              </ResizablePanel>
++            </ResizablePanelGroup>
++          )}
++        </div>
++      )}
 +      {overlays}
-     </div>
-   )
- })
++      </div>
++      <OutlineNav
++        containerRef={bodyRef}
++        contentKey={viewMode === 'preview' && !editing ? selectedContent : ''}
++        collapsed={outlineCollapsed}
++        onCollapsedChange={setOutlineCollapsedPersist}
++      />
++    </div>
++  )
++})
++
++MarkdownViewer.displayName = 'MarkdownViewer'
++
++export default MarkdownViewer
 diff --git a/BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkmapComponent.tsx
 similarity index 99%
 rename from BillNote_frontend/src/pages/HomePage/components/MarkmapComponent.tsx
@@ -3960,6 +4905,266 @@ index 8a04b7c..e9b7243 100644
          </form>
        </Form>
      </div>
+diff --git a/BillNote_frontend/src/pages/NotePage/components/OutlineNav.tsx b/BillNote_frontend/src/pages/NotePage/components/OutlineNav.tsx
+new file mode 100644
+index 0000000..13b1c33
+--- /dev/null
++++ b/BillNote_frontend/src/pages/NotePage/components/OutlineNav.tsx
+@@ -0,0 +1,178 @@
++import { useEffect, useRef, useState } from 'react'
++import { ListTree, PanelRightClose } from 'lucide-react'
++import { cn } from '@/lib/utils'
++import { scrollToHeading } from '@/utils/heading'
++
++interface OutlineEntry {
++  id: string
++  text: string
++  level: number
++}
++
++interface OutlineNavProps {
++  /** 指向 .markdown-body 的 ref，章节表与滚动监听都从它出发 */
++  containerRef: React.RefObject<HTMLDivElement | null>
++  /** 正文内容标识，变了就重建章节表 */
++  contentKey: string
++  collapsed: boolean
++  onCollapsedChange: (collapsed: boolean) => void
++}
++
++/**
++ * 详情页右侧常驻章节导航。
++ *
++ * 章节树从渲染后的 DOM 抓（rehypeFold 已经把标题包成 .md-section[data-level] > .md-section-head > hN），
++ * 所以和折叠状态天然同步；折叠章节里的标题照样列出——点进去会自动展开，这正是导航的价值。
++ * scroll-spy 的滚动事件要绑 radix ScrollArea 的 viewport（window 上没有），
++ * 且折叠会改变坐标，所以元素引用建表时缓存、rect 每次实时读，绝不缓存位置。
++ */
++export function OutlineNav({ containerRef, contentKey, collapsed, onCollapsedChange }: OutlineNavProps) {
++  const [entries, setEntries] = useState<OutlineEntry[]>([])
++  const [activeId, setActiveId] = useState<string | null>(null)
++  const scrollTimer = useRef<number | null>(null)
++
++  useEffect(() => {
++    const container = containerRef.current
++    if (!container) {
++      setEntries([])
++      return
++    }
++
++    const rebuild = () => {
++      const next: OutlineEntry[] = []
++      container.querySelectorAll('.md-section').forEach(section => {
++        const heading = section.querySelector(
++          ':scope > .md-section-head > h1, :scope > .md-section-head > h2, :scope > .md-section-head > h3, :scope > .md-section-head > h4',
++        )
++        if (!heading?.id) return
++        next.push({
++          id: heading.id,
++          text: (heading.textContent || '').trim(),
++          level: Number(section.getAttribute('data-level') || 1),
++        })
++      })
++      // 内容没变就别换数组引用，否则 scroll-spy 的 effect 会跟着白跑
++      setEntries(prev =>
++        prev.length === next.length && prev.every((p, i) => p.id === next[i].id) ? prev : next,
++      )
++    }
++
++    // 先同步建一次表：后台标签页会暂停 requestAnimationFrame，只靠 rAF 的话
++    // 切回前台之前章节栏一直是空的（实测踩过）。rAF 与 MutationObserver 兜后续：
++    // 正文分帧提交、懒加载图片、KaTeX 注入节点等结构变化
++    rebuild()
++    const raf = requestAnimationFrame(rebuild)
++    let scheduled = false
++    const observer = new MutationObserver(() => {
++      if (scheduled) return
++      scheduled = true
++      // 观察回调里不用 rAF（后台页同样会停），用微任务之后的同步重建
++      queueMicrotask(rebuild)
++    })
++    observer.observe(container, { childList: true, subtree: true })
++
++    return () => {
++      cancelAnimationFrame(raf)
++      observer.disconnect()
++    }
++  }, [contentKey, containerRef])
++
++  useEffect(() => {
++    const update = () => {
++      // 每次现找滚动容器：正文节点可能在重渲染中被替换，闭包里攥着旧节点就再也收不到 scroll
++      const viewport = containerRef.current?.closest('[data-radix-scroll-area-viewport]')
++      if (!viewport) return
++      const threshold = viewport.getBoundingClientRect().top + 96
++      // 滚在顶部时还没有任何标题越过阈值，高亮第一条而不是谁都不亮
++      let current: string | null = entries.length ? entries[0].id : null
++      for (const entry of entries) {
++        // 按 id 现取元素：正文重渲染后旧的节点引用可能已失效，攥着它 rect 全是 0
++        const el = document.getElementById(entry.id)
++        if (!el) continue
++        const rect = el.getBoundingClientRect()
++        // 藏在折叠章节里的标题 rect 全 0，位置无意义，跳过
++        if (rect.height === 0) continue
++        if (rect.top <= threshold) current = entry.id
++      }
++      setActiveId(current)
++    }
++    // 节流用 setTimeout 而不是 rAF：后台标签页会暂停 rAF，高亮会冻住
++    const onScroll = () => {
++      if (scrollTimer.current !== null) return
++      scrollTimer.current = window.setTimeout(() => {
++        scrollTimer.current = null
++        update()
++      }, 80)
++    }
++
++    // 用 window 捕获阶段听 scroll：scroll 事件不冒泡，但捕获阶段能收到任意后代滚动容器的；
++    // 这样不必依赖"找到正确的那个 viewport 节点"
++    window.addEventListener('scroll', onScroll, { passive: true, capture: true })
++    update()
++    return () => {
++      window.removeEventListener('scroll', onScroll, { capture: true })
++      if (scrollTimer.current !== null) window.clearTimeout(scrollTimer.current)
++    }
++  }, [entries, containerRef])
++
++  if (collapsed) {
++    return (
++      <div className="flex w-7 shrink-0 flex-col items-center border-l bg-white py-2">
++        <button
++          type="button"
++          aria-label="展开章节导航"
++          title="展开章节导航"
++          onClick={() => onCollapsedChange(false)}
++          className="text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer rounded p-1"
++        >
++          <ListTree className="h-4 w-4" />
++        </button>
++      </div>
++    )
++  }
++
++  return (
++    <aside className="flex w-[200px] shrink-0 flex-col border-l bg-white">
++      <div className="flex h-10 shrink-0 items-center justify-between border-b px-3">
++        <span className="text-sm font-medium text-neutral-700">章节</span>
++        <button
++          type="button"
++          aria-label="收起章节导航"
++          title="收起章节导航"
++          onClick={() => onCollapsedChange(true)}
++          className="text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer rounded p-1"
++        >
++          <PanelRightClose className="h-4 w-4" />
++        </button>
++      </div>
++      <div className="min-h-0 flex-1 overflow-y-auto py-2">
++        {entries.length === 0 ? (
++          <p className="px-3 text-xs text-neutral-400">暂无章节</p>
++        ) : (
++          entries.map(entry => (
++            <button
++              key={entry.id}
++              type="button"
++              title={entry.text}
++              aria-current={activeId === entry.id ? 'location' : undefined}
++              onClick={() => {
++                if (scrollToHeading(entry.id)) setActiveId(entry.id)
++              }}
++              style={{ paddingLeft: (entry.level - 1) * 12 + 10 }}
++              className={cn(
++                'block w-full cursor-pointer truncate border-l-2 py-1 pr-2 text-left text-xs leading-4',
++                activeId === entry.id
++                  ? 'border-primary bg-blue-50 font-medium text-primary'
++                  : 'border-transparent text-neutral-600 hover:bg-neutral-100',
++              )}
++            >
++              {entry.text}
++            </button>
++          ))
++        )}
++      </div>
++    </aside>
++  )
++}
++
++export default OutlineNav
+diff --git a/BillNote_frontend/src/pages/NotePage/components/ReferenceDock.tsx b/BillNote_frontend/src/pages/NotePage/components/ReferenceDock.tsx
+new file mode 100644
+index 0000000..17ada80
+--- /dev/null
++++ b/BillNote_frontend/src/pages/NotePage/components/ReferenceDock.tsx
+@@ -0,0 +1,70 @@
++import { X } from 'lucide-react'
++import { cn } from '@/lib/utils'
++import ChatPanel from './ChatPanel'
++import TranscriptViewer from './transcriptViewer'
++
++export type DockTab = 'transcript' | 'chat'
++
++interface ReferenceDockProps {
++  tab: DockTab
++  onTab: (tab: DockTab) => void
++  taskId: string
++  /** ChatPanel 的放大/缩小按钮当前该显示哪个图标（由 dock 宽度状态决定） */
++  wide: boolean
++  /** ChatPanel 的放大/缩小按钮：语义是调 dock 宽度，不再是"全屏替换正文" */
++  onResize: (mode: 'half' | 'full') => void
++  /** 窄屏浮层模式下给一个关闭按钮 */
++  onClose?: () => void
++}
++
++/**
++ * 原文参照 / AI 问答合并后的参照 dock。
++ *
++ * 两个面板都挂载、用 hidden 切换：保留各自的滚动位置与聊天历史，
++ * 切 tab 不会把问了一半的对话弄丢。以前是两个并列 state + 硬编码宽度，
++ * 而且 AI 切"全屏"会把原文参照整个替换掉、再也打不开。
++ */
++export function ReferenceDock({ tab, onTab, taskId, wide, onResize, onClose }: ReferenceDockProps) {
++  return (
++    <div className="flex h-full min-w-0 flex-col bg-white">
++      <div role="tablist" aria-label="参照面板" className="flex h-10 shrink-0 items-center gap-1 border-b px-2">
++        {(['transcript', 'chat'] as const).map(key => (
++          <button
++            key={key}
++            type="button"
++            role="tab"
++            aria-selected={tab === key}
++            onClick={() => onTab(key)}
++            className={cn(
++              'cursor-pointer rounded px-2.5 py-1 text-sm',
++              tab === key ? 'bg-primary text-white' : 'text-muted-foreground hover:bg-neutral-100',
++            )}
++          >
++            {key === 'transcript' ? '原文参照' : 'AI 问答'}
++          </button>
++        ))}
++        {onClose && (
++          <button
++            type="button"
++            aria-label="关闭参照面板"
++            title="关闭参照面板"
++            onClick={onClose}
++            className="text-muted-foreground hover:bg-accent hover:text-foreground ml-auto cursor-pointer rounded p-1"
++          >
++            <X className="h-4 w-4" />
++          </button>
++        )}
++      </div>
++
++      {/* TranscriptViewer 自带卡片边框，垫一点内边距让它在 dock 里看着是故意的 */}
++      <div role="tabpanel" hidden={tab !== 'transcript'} className="h-full min-h-0 flex-1 overflow-hidden p-2">
++        <TranscriptViewer />
++      </div>
++      <div role="tabpanel" hidden={tab !== 'chat'} className="h-full min-h-0 flex-1 overflow-hidden">
++        <ChatPanel taskId={taskId} mode={wide ? 'full' : 'half'} onModeChange={onResize} embedded />
++      </div>
++    </div>
++  )
++}
++
++export default ReferenceDock
 diff --git a/BillNote_frontend/src/pages/HomePage/components/StepBar.tsx b/BillNote_frontend/src/pages/NotePage/components/StepBar.tsx
 similarity index 100%
 rename from BillNote_frontend/src/pages/HomePage/components/StepBar.tsx
@@ -3989,10 +5194,10 @@ rename from BillNote_frontend/src/pages/HomePage/components/transcriptViewer.tsx
 rename to BillNote_frontend/src/pages/NotePage/components/transcriptViewer.tsx
 diff --git a/BillNote_frontend/src/pages/NotePage/index.tsx b/BillNote_frontend/src/pages/NotePage/index.tsx
 new file mode 100644
-index 0000000..5a79762
+index 0000000..323f29a
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/index.tsx
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,135 @@
 +import { FC, useEffect, useRef, useState } from 'react'
 +import { Navigate, useNavigate, useParams } from 'react-router-dom'
 +import { Loader2 } from 'lucide-react'
@@ -4063,7 +5268,22 @@ index 0000000..5a79762
 +          created_at: indexed?.created_at ?? null,
 +        })
 +      })
-+      .catch(() => setRestoreFailed(true))
++      .catch(() => {
++        // 后端对 FAILED 的任务返回业务错误（R.error），会走到这里。
++        // 但"生成失败"和"找不到"是两回事：索引里写着 FAILED 就按失败态恢复，
++        // 让用户看到失败页和重新生成入口，而不是一句误导的"找不到这篇笔记"
++        const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
++        if (indexed?.status === 'FAILED') {
++          hydrateTask({
++            task_id: taskId,
++            status: 'FAILED',
++            form_data: indexed.form_data ?? null,
++            created_at: indexed.created_at ?? null,
++          })
++        } else {
++          setRestoreFailed(true)
++        }
++      })
 +      .finally(() => setRestoring(false))
 +  }, [taskId, currentTask, libraryLoaded, hydrateTask])
 +
@@ -4135,10 +5355,10 @@ index 32f541f..3ef58d0 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/services/library.ts b/BillNote_frontend/src/services/library.ts
 new file mode 100644
-index 0000000..13a0fc5
+index 0000000..18a1bf1
 --- /dev/null
 +++ b/BillNote_frontend/src/services/library.ts
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,62 @@
 +import request from '@/utils/request'
 +
 +export interface LibraryFolder {
@@ -4169,7 +5389,6 @@ index 0000000..13a0fc5
 +export interface LibraryPayload {
 +  folders: LibraryFolder[]
 +  notes: LibraryNote[]
-+  uncategorized: number
 +}
 +
 +export type DeleteFolderMode = 'move' | 'delete'
@@ -4290,10 +5509,10 @@ index 51baa57..12a03bb 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/store/libraryStore.ts b/BillNote_frontend/src/store/libraryStore.ts
 new file mode 100644
-index 0000000..0fed00d
+index 0000000..9dc9b13
 --- /dev/null
 +++ b/BillNote_frontend/src/store/libraryStore.ts
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,160 @@
 +import { create } from 'zustand'
 +import { persist, createJSONStorage } from 'zustand/middleware'
 +import { del, get, set } from 'idb-keyval'
@@ -4305,7 +5524,6 @@ index 0000000..0fed00d
 +interface LibraryState {
 +  folders: LibraryFolder[]
 +  notes: LibraryNote[]
-+  uncategorized: number
 +  viewMode: ShelfViewMode
 +  loaded: boolean
 +  loading: boolean
@@ -4330,7 +5548,6 @@ index 0000000..0fed00d
 +    (set, get) => ({
 +      folders: [],
 +      notes: [],
-+      uncategorized: 0,
 +      viewMode: 'card',
 +      loaded: false,
 +      loading: false,
@@ -4343,7 +5560,6 @@ index 0000000..0fed00d
 +          set({
 +            folders: data?.folders ?? [],
 +            notes: data?.notes ?? [],
-+            uncategorized: data?.uncategorized ?? 0,
 +            loaded: true,
 +          })
 +        } catch {
@@ -4754,6 +5970,46 @@ index f511f78..4ccf5c3 100644
        storage: createJSONStorage(() => ({
          getItem: async (name: string): Promise<string | null> => {
            const value = await get(name)
+diff --git a/BillNote_frontend/src/utils/heading.ts b/BillNote_frontend/src/utils/heading.ts
+new file mode 100644
+index 0000000..7941290
+--- /dev/null
++++ b/BillNote_frontend/src/utils/heading.ts
+@@ -0,0 +1,34 @@
++/**
++ * 目录链接与章节导航共用的跳转逻辑。
++ *
++ * LLM 生成的目录锚点可能和标题实际文本不完全一致（例如标题带 *Content-[00:00]* 后缀、
++ * 目录链接里没有），所以精确 id 失败后要按文本模糊匹配；目标还可能藏在折叠起来的章节里，
++ * 不先展开祖先滚过去就是一片空白。
++ */
++export function scrollToHeading(id: string): boolean {
++  let target: HTMLElement | null = document.getElementById(id)
++
++  if (!target) {
++    const normalize = (s: string) => s.replace(/[-：:\s*\[\]]/g, '').toLowerCase()
++    const search = normalize(id)
++    for (const heading of document.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
++      const text = heading.textContent || ''
++      if (normalize(text).includes(search) || search.includes(normalize(text))) {
++        target = heading as HTMLElement
++        break
++      }
++    }
++  }
++
++  if (!target) return false
++
++  for (
++    let section = target.closest('.md-section');
++    section;
++    section = section.parentElement?.closest('.md-section') || null
++  ) {
++    section.classList.remove('md-collapsed')
++  }
++  target.scrollIntoView({ behavior: 'smooth', block: 'start' })
++  return true
++}
 diff --git a/BillNote_frontend/src/utils/math.ts b/BillNote_frontend/src/utils/math.ts
 new file mode 100644
 index 0000000..b4fd56a
@@ -5495,7 +6751,7 @@ index 1e08c22..16deb4b 100644
                  "preprocessor_config.json",
 diff --git a/backend/app/routers/library.py b/backend/app/routers/library.py
 new file mode 100644
-index 0000000..12433f0
+index 0000000..3dd2536
 --- /dev/null
 +++ b/backend/app/routers/library.py
 @@ -0,0 +1,131 @@
@@ -5548,7 +6804,7 @@ index 0000000..12433f0
 +            counts[key] = counts.get(key, 0) + 1
 +        for folder in folders:
 +            folder["note_count"] = counts.get(folder["id"], 0)
-+        return R.success(data={"folders": folders, "notes": notes, "uncategorized": counts.get("", 0)})
++        return R.success(data={"folders": folders, "notes": notes})
 +    except Exception as e:
 +        logger.error(f"读取笔记库失败: {e}", exc_info=True)
 +        return R.error(msg=f"读取笔记库失败: {e}")
