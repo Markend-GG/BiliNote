@@ -22,6 +22,10 @@ from sqlalchemy.orm import sessionmaker
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from tests.stub_deps import install_missing_stubs  # noqa: E402
+
+install_missing_stubs()
+
 _TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-library-test-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
 os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()

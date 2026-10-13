@@ -27,60 +27,16 @@ os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
 os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
 
 
-class _StubMeta(type):
-    def __iter__(cls):
-        return iter(())
+from tests.stub_deps import install_missing_stubs  # noqa: E402
 
-    def __getitem__(cls, _k):
-        return _Stub
-
-    def __getattr__(cls, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _Stub
-
-
-class _Stub(metaclass=_StubMeta):
-    def __init__(self, *a, **k):
-        pass
-
-    def __call__(self, *a, **k):
-        return _Stub()
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _Stub()
-
-    def __iter__(self):
-        return iter(())
-
-    def __getitem__(self, _k):
-        return _Stub()
-
-
-def _install_missing_stubs():
-    for _ in range(80):
-        try:
-            importlib.import_module("app")
-            return
-        except ModuleNotFoundError as e:
-            mod = types.ModuleType(e.name)
-            mod.__getattr__ = lambda name: _Stub
-            sys.modules[e.name] = mod
-        except Exception:
-            raise
-
-
-import types  # noqa: E402  (stub 安装器需要)
-
-_install_missing_stubs()
+install_missing_stubs()
 
 from app import create_app  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import library_dao, search_dao  # noqa: E402
+from app.services import library_service  # noqa: E402
 
 
 @asynccontextmanager
@@ -111,6 +67,12 @@ def _make_note(task_id: str, markdown: str, shots=()) -> None:
 
 
 class TestLibraryHttp(unittest.TestCase):
+    def setUp(self):
+        # library_service 的路径常量是 import 时读死 env 的；多模块同进程跑时
+        # 别的模块会把它改到自己的临时目录，这里每个用例前绑回本模块的
+        library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
+        library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
+
     def test_library_shape(self):
         res = client.get("/api/library").json()
         self.assertEqual(res["code"], 0)
