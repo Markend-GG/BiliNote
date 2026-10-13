@@ -18,7 +18,7 @@ from tests.isolation import IsolatedEnv  # noqa: E402
 
 ENV = IsolatedEnv("bilinote-storage-test-")
 
-from app.db import search_dao  # noqa: E402
+from app.db import library_dao, search_dao  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
 from app.services import library_service  # noqa: E402
 
@@ -33,6 +33,10 @@ SHOT_C = "screenshot_003_33333333-3333-4333-8333-333333333333.jpg"  # 孤儿
 # 回填/引用扫描的正则只认这种名字，测试不能用 n1/n2 这类短名
 NOTE_1 = "aaaaaaaa-0000-4000-8000-000000000001"
 NOTE_2 = "aaaaaaaa-0000-4000-8000-000000000002"
+# 回填相关用例的笔记：一篇是"库里没有、要新增"，一篇是"库里已有、只缺全文索引"
+NOTE_NEW = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+NOTE_LEGACY = "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
+_FTS_IDS = ("s1", "s2", NOTE_NEW, NOTE_LEGACY)
 
 MD = (
     "## 题型一：基期倍比与两期比重差\n"
@@ -64,8 +68,8 @@ class TestSearchIndex(unittest.TestCase):
 
     def setUp(self):
         ENV.bind()
-        search_dao.delete_note("s1")
-        search_dao.delete_note("s2")
+        for tid in _FTS_IDS:
+            search_dao.delete_note(tid)
 
     def test_rebuild_and_trigram_search(self):
         n = search_dao.rebuild_note("s1", MD)
@@ -110,9 +114,9 @@ class TestStorageScan(unittest.TestCase):
         # 用例里的文件都是刚写的，宽限期会让它们全部"太新"而跳过清理；
         # 归零后测的是引用逻辑本身，宽限期单独有 test_recent_files_are_protected
         library_service._ORPHAN_GRACE_MS = 0
-        # TestSearchIndex 用完的 s1/s2 索引行要清掉，否则搜索命中数会串
-        search_dao.delete_note("s1")
-        search_dao.delete_note("s2")
+        # 别的用例留下的索引行要清掉，否则"恩格尔系数"这种关键词的命中数会串
+        for tid in _FTS_IDS:
+            search_dao.delete_note(tid)
         for name in (SHOT_A, SHOT_B, SHOT_C):
             (SHOT_DIR / name).write_bytes(b"x" * 100)
         _write_note(NOTE_1, MD, manifest=[SHOT_A])
@@ -148,11 +152,20 @@ class TestStorageScan(unittest.TestCase):
 
     def test_backfill_rebuilds_search_index(self):
         ENV.reset_dirs()
-        _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", MD)
+        _write_note(NOTE_NEW, MD)
         self.assertEqual(library_service.backfill_library(), 1)
         hits = search_dao.search("恩格尔系数")
         self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0]["task_id"], "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        self.assertEqual(hits[0]["task_id"], NOTE_NEW)
+
+    def test_backfill_indexes_notes_already_in_library(self):
+        """全文索引上线之前就已经进库的笔记：backfill 不会"新增"它，但必须补建索引，
+        否则书架页搜索对这些老笔记永远 0 命中（部署后实测就是这个现象）。"""
+        ENV.reset_dirs()
+        _write_note(NOTE_LEGACY, MD)
+        library_dao.upsert_note(NOTE_LEGACY, status="SUCCESS")
+        self.assertEqual(library_service.backfill_library(), 0)  # 库里已有，不算新增
+        self.assertEqual([h["task_id"] for h in search_dao.search("恩格尔系数")], [NOTE_LEGACY])
 
     def test_recent_files_are_protected(self):
         """生成中的笔记：截图先落盘、note json 最后才写，这段窗口不能被当成孤儿删掉。"""

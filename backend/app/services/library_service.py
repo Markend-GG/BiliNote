@@ -126,6 +126,28 @@ def delete_note_artifacts(task_id: str) -> dict:
     return {"deleted_files": deleted_files, "deleted_screenshots": deleted_screenshots}
 
 
+def _fts_missing(task_id: str) -> bool:
+    try:
+        return search_dao.count_note(task_id) == 0
+    except Exception:
+        # 索引表本身有问题时别在启动路径上刷一堆日志，搜索接口自己会报错
+        return False
+
+
+def _reindex_from_file(path: Path, task_id: str) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"补建全文索引时读取失败 {path.name}: {e}")
+        return False
+    try:
+        search_dao.rebuild_note(task_id, data.get("markdown", "") or "")
+        return True
+    except Exception as e:
+        logger.warning(f"补建全文索引失败 {task_id}: {e}")
+        return False
+
+
 def backfill_library() -> int:
     """启动时把 note_results/ 里已有但没进 notes 表的笔记补进去。
 
@@ -138,11 +160,16 @@ def backfill_library() -> int:
 
     existing = {n["task_id"] for n in library_dao.list_notes()}
     added = 0
+    reindexed = 0
     for path in sorted(note_dir.iterdir()):
         if not _NOTE_FILE_RE.match(path.name):
             continue
         task_id = path.stem
         if task_id in existing:
+            # 库里已经有了，但可能是"全文索引这个功能上线之前"就进来的：那批笔记在
+            # note_fts 里一行都没有，搜索永远搜不到它们。缺索引才读 json，补建一次
+            if _fts_missing(task_id) and _reindex_from_file(path, task_id):
+                reindexed += 1
             continue
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -187,6 +214,8 @@ def backfill_library() -> int:
 
     if added:
         logger.info(f"已回填 {added} 篇历史笔记到笔记库索引")
+    if reindexed:
+        logger.info(f"已为 {reindexed} 篇存量笔记补建全文索引")
     return added
 
 

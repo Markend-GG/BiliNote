@@ -20,10 +20,17 @@ backend/note_results
 backend/bin/
 
 # 依赖和构建缓存
+# 必须带 **/ ：只写 node_modules/ 只匹配顶层，BillNote_frontend/node_modules 会被整个
+# COPY 进镜像盖掉容器里 pnpm 装的那份——本地是 Windows 装的符号链接（指向 /g/work/...），
+# 进容器全断，表现为 "Cannot find module /app/node_modules/typescript/bin/tsc"，
+# 顺带把构建上下文从 30MB 撑到 480MB。
 node_modules/
+**/node_modules
 __pycache__/
+**/__pycache__
 *.py[cod]
 dist/
+**/dist
 build/
 *.tar
 *.egg-info/

@@ -48,6 +48,15 @@ def delete_note(task_id: str) -> None:
         conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
 
 
+def count_note(task_id: str) -> int:
+    """这篇笔记有几个索引块。启动回填靠它判断存量笔记要不要补建索引。"""
+    with get_engine().connect() as conn:
+        row = conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM {_TABLE} WHERE task_id = ?", (task_id,)
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def search(query: str, limit: int = 30) -> list[dict]:
     q = (query or "").strip()
     if not q:
