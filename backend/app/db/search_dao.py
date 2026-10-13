@@ -6,7 +6,7 @@
 不足 3 个字符（trigram 的下限）时退化为 LIKE 扫表——索引总量只有几百行，扫得起。
 """
 
-from app.db.engine import engine
+from app.db.engine import get_engine  # 每次调用取全局引擎：import 期绑死会让测试没法换库
 from app.utils.logger import get_logger
 from app.utils.markdown_chunks import chunk_markdown
 
@@ -17,7 +17,7 @@ _TABLE = "note_fts"
 
 def init_search_table() -> None:
     """建 FTS5 虚拟表。create_all 建不了虚拟表，所以单独用原生 SQL；已存在则跳过。"""
-    with engine.begin() as conn:
+    with get_engine().begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (_TABLE,)
         ).fetchone()
@@ -33,7 +33,7 @@ def init_search_table() -> None:
 def rebuild_note(task_id: str, markdown: str) -> int:
     """重建一篇笔记的索引块，返回块数。生成成功/编辑保存/启动回填时调用。"""
     chunks = chunk_markdown(markdown or "")
-    with engine.begin() as conn:
+    with get_engine().begin() as conn:
         conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
         for chunk in chunks:
             conn.exec_driver_sql(
@@ -44,7 +44,7 @@ def rebuild_note(task_id: str, markdown: str) -> int:
 
 
 def delete_note(task_id: str) -> None:
-    with engine.begin() as conn:
+    with get_engine().begin() as conn:
         conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
 
 
@@ -52,7 +52,7 @@ def search(query: str, limit: int = 30) -> list[dict]:
     q = (query or "").strip()
     if not q:
         return []
-    with engine.connect() as conn:
+    with get_engine().connect() as conn:
         if len(q) >= 3:
             expr = '"' + q.replace('"', '""') + '"'
             # 高亮标记用控制字符而不是 <mark>：snippet 里是笔记原文，

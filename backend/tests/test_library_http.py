@@ -3,16 +3,14 @@
 DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
 响应包装、错误码、删除真的落盘。
 
-重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、这段 stub 逻辑是 no-op；
+重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、stub 逻辑是 no-op；
 本地无 Docker 跑时缺哪些就 stub 哪些（只 stub 真正找不到的模块，不污染有真包的环境）。
+DB 与目录由 tests.isolation 统一指到临时位置。
 """
 
-import importlib
 import json
-import os
 import pathlib
 import sys
-import tempfile
 import unittest
 import uuid
 from contextlib import asynccontextmanager
@@ -20,23 +18,14 @@ from contextlib import asynccontextmanager
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-http-test-"))
-os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
+from tests.isolation import IsolatedEnv  # noqa: E402
 
-
-from tests.stub_deps import install_missing_stubs  # noqa: E402
-
-install_missing_stubs()
+ENV = IsolatedEnv("bilinote-http-test-")
 
 from app import create_app  # noqa: E402
-from app.db.init_db import init_db  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import library_dao, search_dao  # noqa: E402
-from app.services import library_service  # noqa: E402
 
 
 @asynccontextmanager
@@ -44,11 +33,10 @@ async def _noop_lifespan(_app):
     yield
 
 
-init_db()
 client = TestClient(create_app(lifespan=_noop_lifespan))
 
-NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
+NOTE_DIR = ENV.note_dir
+SHOT_DIR = ENV.shot_dir
 
 
 def _make_note(task_id: str, markdown: str, shots=()) -> None:
@@ -68,10 +56,9 @@ def _make_note(task_id: str, markdown: str, shots=()) -> None:
 
 class TestLibraryHttp(unittest.TestCase):
     def setUp(self):
-        # library_service 的路径常量是 import 时读死 env 的；多模块同进程跑时
-        # 别的模块会把它改到自己的临时目录，这里每个用例前绑回本模块的
-        library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-        library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
+        # 多模块同进程跑时，别的模块会把全局引擎和路径常量换到它自己的临时目录，
+        # 每个用例前绑回本模块的
+        ENV.bind()
 
     def test_library_shape(self):
         res = client.get("/api/library").json()

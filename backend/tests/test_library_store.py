@@ -1,74 +1,39 @@
 """笔记库（文件夹 + 笔记索引）的数据层与删除逻辑测试。
 
-app.db.engine / app.services.library_service / app.services.vector_store 都在 import 时读环境变量。
-但 unittest discover 会先把所有测试模块导入一遍，别的模块很可能已经用默认值把这几个模块导入过了，
-所以光设 os.environ 不够——必须在导入之后把模块里的常量直接改指到临时目录，
-否则会往真实的 bili_note.db 和 note_results/ 里写。
+DB / 笔记目录 / 截图目录 / 向量库全部由 tests.isolation 指到临时位置：
+app.db.engine 在 import 期就把 DATABASE_URL 读死了，事后改 os.environ 不可靠，
+落到默认值就会写进仓库里的 backend/bili_note.db（在跑着的容器里那更是生产库）。
 """
 
-import atexit
 import json
 import pathlib
-import shutil
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timezone
-
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from tests.stub_deps import install_missing_stubs  # noqa: E402
+from tests.isolation import IsolatedEnv  # noqa: E402
 
-install_missing_stubs()
-
-_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-library-test-"))
-os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
-
-import app.db.engine as db_engine  # noqa: E402
-
-# 把全局 engine / SessionLocal 换成测试库：library_dao 与 video_task_dao 都是
-# 通过 app.db.engine.get_db() 拿会话，而 get_db 在调用时才查模块全局 SessionLocal。
-_TEST_ENGINE = create_engine(os.environ["DATABASE_URL"], connect_args={"check_same_thread": False})
-db_engine.engine = _TEST_ENGINE
-db_engine.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_TEST_ENGINE)
+ENV = IsolatedEnv("bilinote-library-test-")
 
 from app.db.engine import Base, get_engine  # noqa: E402
 from app.db import library_dao  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
 from app.services import library_service  # noqa: E402
 
-NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
-
-# 删笔记时会顺带删向量索引；不指到临时目录就会去动真实的 vector_db
-try:
-    from app.services import vector_store as _vector_store
-
-    _vector_store.VECTOR_DB_DIR = os.environ["VECTOR_DB_DIR"]
-except Exception:  # chromadb 不在环境里时跳过，delete_note_artifacts 自己会吞掉异常
-    pass
+NOTE_DIR = ENV.note_dir
+SHOT_DIR = ENV.shot_dir
 
 
-def _point_library_service_at_tmp():
-    """library_service 的路径常量在 import 时就读死了 env。
+def _truncate_all() -> None:
+    """每个用例从空库开始，避免相互干扰；顺带把全局引擎抢回本模块的临时库。"""
+    ENV.bind()
+    for table in reversed(Base.metadata.sorted_tables):
+        with get_engine().begin() as conn:
+            conn.execute(table.delete())
 
-    单进程跑多个测试模块时，后导入的模块改 env 也影响不了先导入的常量，
-    所以每个用到文件路径的用例在 setUp 里显式重绑，与导入顺序解耦。
-    """
-    library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-    library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
-
-
-init_db()
-atexit.register(shutil.rmtree, _TMP, True)
 
 # utils/video_helper.py:22 的命名规则：screenshot_{index:03}_{uuid4}.jpg
 SHOT_A = "screenshot_003_11111111-1111-4111-8111-111111111111.jpg"
@@ -96,14 +61,11 @@ def _write_note(task_id: str, markdown: str, title: str = "某个视频") -> Non
 class TestLibraryDao(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        init_db()
+        ENV.bind()
+        init_db()  # 再建一次：建表必须幂等
 
     def setUp(self):
-        # 每个用例从空库开始，避免相互干扰
-        engine = get_engine()
-        for table in reversed(Base.metadata.sorted_tables):
-            with engine.begin() as conn:
-                conn.execute(table.delete())
+        _truncate_all()
 
     def test_folder_crud_and_duplicate_name(self):
         folder = library_dao.create_folder("行测")
@@ -211,15 +173,9 @@ class TestLibraryDao(unittest.TestCase):
 
 class TestDeleteNoteArtifacts(unittest.TestCase):
     def setUp(self):
-        _point_library_service_at_tmp()
-        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-        shutil.rmtree(SHOT_DIR, ignore_errors=True)
-        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-        SHOT_DIR.mkdir(parents=True, exist_ok=True)
-        engine = get_engine()
-        for table in reversed(Base.metadata.sorted_tables):
-            with engine.begin() as conn:
-                conn.execute(table.delete())
+        ENV.bind()
+        ENV.reset_dirs()
+        _truncate_all()
 
     def test_deletes_files_and_only_referenced_screenshots(self):
         """delete_task 以前是空壳，界面删了盘上什么都没少。
@@ -256,13 +212,9 @@ class TestDeleteNoteArtifacts(unittest.TestCase):
 
 class TestBackfill(unittest.TestCase):
     def setUp(self):
-        _point_library_service_at_tmp()
-        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-        engine = get_engine()
-        for table in reversed(Base.metadata.sorted_tables):
-            with engine.begin() as conn:
-                conn.execute(table.delete())
+        ENV.bind()
+        ENV.reset_dirs()
+        _truncate_all()
 
     def test_backfills_existing_notes_and_is_idempotent(self):
         _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "# 笔记", title="数量关系专项")
@@ -289,10 +241,7 @@ class TestBackfill(unittest.TestCase):
 
 class TestNoteVersions(unittest.TestCase):
     def setUp(self):
-        engine = get_engine()
-        for table in reversed(Base.metadata.sorted_tables):
-            with engine.begin() as conn:
-                conn.execute(table.delete())
+        _truncate_all()
 
     def test_add_list_delete_version(self):
         first = library_dao.add_version("t1", "t1-v1", "内容一", style="minimal", model_name="m",

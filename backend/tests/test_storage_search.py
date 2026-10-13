@@ -1,36 +1,27 @@
 """V3.2 后端测试：存储扫描/孤儿截图清理 + FTS5 全文搜索。
 
 只 import app.db / app.services.library_service（不碰 routers，避免拉 fastapi/chromadb），
-这样没有 Docker 也能在宿主上用 stub runner 跑。
+这样没有 Docker 也能在宿主上用 stub runner 跑。DB 与目录全部由 tests.isolation 指到临时位置。
 """
 
 import json
-import os
 import pathlib
-import shutil
 import sys
-import tempfile
 import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from tests.stub_deps import install_missing_stubs  # noqa: E402
+from tests.isolation import IsolatedEnv  # noqa: E402
 
-install_missing_stubs()
-
-_TMP = pathlib.Path(tempfile.mkdtemp(prefix="bilinote-storage-test-"))
-os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
-os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
-os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
-os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
+ENV = IsolatedEnv("bilinote-storage-test-")
 
 from app.db import search_dao  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
 from app.services import library_service  # noqa: E402
 
-NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
-SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
+NOTE_DIR = ENV.note_dir
+SHOT_DIR = ENV.shot_dir
 
 SHOT_A = "screenshot_001_11111111-1111-4111-8111-111111111111.jpg"  # 清单引用
 SHOT_B = "screenshot_002_22222222-2222-4222-8222-222222222222.jpg"  # 仅 markdown 正则引用
@@ -62,19 +53,15 @@ def _write_note(task_id: str, markdown: str, manifest=None) -> None:
     (NOTE_DIR / f"{task_id}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def _point_library_service_at_tmp():
-    # 与 test_library_store 同理：路径常量 import 时读死，setUp 里重绑才能多模块同进程跑
-    library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-    library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
-
-
 class TestSearchIndex(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        ENV.bind()
         init_db()
         init_db()  # 再跑一次：建表必须幂等
 
     def setUp(self):
+        ENV.bind()
         search_dao.delete_note("s1")
         search_dao.delete_note("s2")
 
@@ -116,14 +103,11 @@ class TestSearchIndex(unittest.TestCase):
 
 class TestStorageScan(unittest.TestCase):
     def setUp(self):
-        _point_library_service_at_tmp()
+        ENV.bind()
+        ENV.reset_dirs()
         # TestSearchIndex 用完的 s1/s2 索引行要清掉，否则搜索命中数会串
         search_dao.delete_note("s1")
         search_dao.delete_note("s2")
-        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-        shutil.rmtree(SHOT_DIR, ignore_errors=True)
-        NOTE_DIR.mkdir(parents=True, exist_ok=True)
-        SHOT_DIR.mkdir(parents=True, exist_ok=True)
         for name in (SHOT_A, SHOT_B, SHOT_C):
             (SHOT_DIR / name).write_bytes(b"x" * 100)
         _write_note(NOTE_1, MD, manifest=[SHOT_A])
@@ -158,8 +142,7 @@ class TestStorageScan(unittest.TestCase):
         self.assertTrue((SHOT_DIR / SHOT_C).exists())
 
     def test_backfill_rebuilds_search_index(self):
-        shutil.rmtree(NOTE_DIR, ignore_errors=True)
-        NOTE_DIR.mkdir(parents=True, exist_ok=True)
+        ENV.reset_dirs()
         _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", MD)
         self.assertEqual(library_service.backfill_library(), 1)
         hits = search_dao.search("恩格尔系数")
@@ -171,4 +154,4 @@ if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)
     finally:
-        shutil.rmtree(_TMP, ignore_errors=True)
+        ENV.cleanup()
