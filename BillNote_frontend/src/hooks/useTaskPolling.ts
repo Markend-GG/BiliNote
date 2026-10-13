@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useTaskStore } from '@/store/taskStore'
 import { useLibraryStore } from '@/store/libraryStore'
-import { get_task_status } from '@/services/note.ts'
+import { getTaskStatus } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
 export const useTaskPolling = (interval = 3000) => {
@@ -26,7 +26,7 @@ export const useTaskPolling = (interval = 3000) => {
 
       for (const task of pendingTasks) {
         try {
-          const res = await get_task_status(task.id)
+          const res = await getTaskStatus(task.id)
           const { status } = res
 
           if (status && status !== task.status) {

@@ -17,7 +17,9 @@ function Checkbox({ className, checked, onChange, ...props }: React.ComponentPro
   const handleCheckChange = (newChecked: boolean) => {
     setIsChecked(newChecked);
     if (onChange) {
-      onChange({} as React.FormEvent<HTMLButtonElement>);
+      // 这个组件把 radix 的 checked 回调适配成受控 onChange，调用方只关心"变了"，
+      // 事件对象是凑出来的，类型上只能放宽
+      onChange({} as any);
     }
   };
   

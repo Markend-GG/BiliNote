@@ -11,5 +11,5 @@ import * as katex from 'katex'
 
 export const transformer = new Transformer()
 const { scripts, styles } = transformer.getAssets()
-loadCSS(styles)
-loadJS(scripts, { getMarkmap: () => markmap })
+loadCSS(styles ?? [])
+loadJS(scripts ?? [], { getMarkmap: () => markmap })

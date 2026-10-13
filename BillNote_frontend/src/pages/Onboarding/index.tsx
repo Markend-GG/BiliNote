@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { addProvider, addModel, testConnection, getProviderList, updateProviderById } from '@/services/model'
-import { getTranscriberConfig, updateTranscriberConfig } from '@/services/transcriber'
+import { updateTranscriberConfig } from '@/services/transcriber'
 import logo from '@/assets/icon.svg'
 
 // 后端 R.error / ProviderError 的形状是 { code, msg, data }，没有 .message。
@@ -62,7 +62,7 @@ const Onboarding = () => {
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
   const [modelName, setModelName] = useState('gpt-4o-mini')
-  const [providerId, setProviderId] = useState<string | null>(null)
+  const [, setProviderId] = useState<string | null>(null)
   const [savingProvider, setSavingProvider] = useState(false)
 
   // step 3

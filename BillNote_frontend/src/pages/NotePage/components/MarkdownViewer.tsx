@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { Copy, Download, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
+import { Copy, ArrowRight, Play, ExternalLink, X } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -304,7 +304,6 @@ function createMarkdownComponents(baseURL: string) {
 }
 
 const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
-  const [copied, setCopied] = useState(false)
   const [currentVerId, setCurrentVerId] = useState<string>('')
   const [selectedContent, setSelectedContent] = useState<string>('')
   const [modelName, setModelName] = useState<string>('')
@@ -419,15 +418,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     else dockRef.current?.collapse()
   }, [dockOpen])
 
-  // 转写↔正文联动：章节起始时间表 + 当前高亮章节的起始秒
-  const sectionTimes = useSectionTimes(bodyRef, selectedContent)
-  const activeSectionStart =
-    sectionTimes.find(t => t.id === activeSectionId)?.start ?? null
-  const handlePickTime = (seconds: number) => {
-    const section = sectionForTime(sectionTimes, seconds)
-    if (section) scrollToHeading(section.id)
-  }
-
   // ChatPanel 的放大/缩小按钮现在只负责调 dock 宽度，不再有"全屏替换正文"。
   // 宽窄状态必须存在这一层：ChatPanel 自己只认 mode prop，写死 'half' 会让按钮永远朝一个方向切。
   const [dockWide, setDockWide] = useState(false)
@@ -501,6 +491,14 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [foldAll, setFoldAll] = useState(false)
 
+  // 转写↔正文联动：章节起始时间表 + 当前高亮章节的起始秒（必须在 bodyRef 声明之后）
+  const sectionTimes = useSectionTimes(bodyRef, selectedContent)
+  const activeSectionStart = sectionTimes.find(t => t.id === activeSectionId)?.start ?? null
+  const handlePickTime = (seconds: number) => {
+    const section = sectionForTime(sectionTimes, seconds)
+    if (section) scrollToHeading(section.id)
+  }
+
   const handleFoldClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const toggle = (e.target as HTMLElement).closest('.md-fold-toggle')
     if (!toggle) return
@@ -546,9 +544,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
-      setCopied(true)
       toast.success('已复制到剪贴板')
-      setTimeout(() => setCopied(false), 2000)
     } catch (e) {
       toast.error('复制失败')
     }
@@ -641,7 +637,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
         <StepBar steps={steps} currentStep={taskStatus} />
-        <Loading className="h-5 w-5" />
+        <Loading />
         <div className="text-center text-sm">
           <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
           <p className="mt-2 text-xs text-neutral-500">
@@ -672,7 +668,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
           <p className="mt-2 mb-4 text-xs text-red-400">可以直接重试，也可以先换个模型或笔记风格</p>
           <div className="flex justify-center gap-2">
-            <Button onClick={() => retryTask(currentTask.id)} size="lg">
+            <Button onClick={() => currentTask && retryTask(currentTask.id)} size="lg">
               直接重试
             </Button>
             <Button variant="outline" size="lg" onClick={() => setRegenerateOpen(true)}>

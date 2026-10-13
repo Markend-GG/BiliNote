@@ -73,7 +73,12 @@ export function ReferenceDock({
         <TranscriptViewer onPickTime={onPickTime} focusTime={focusTime} />
       </div>
       <div role="tabpanel" hidden={tab !== 'chat'} className="h-full min-h-0 flex-1 overflow-hidden">
-        <ChatPanel taskId={taskId} mode={wide ? 'full' : 'half'} onModeChange={onResize} embedded />
+        <ChatPanel
+          taskId={taskId}
+          wide={wide}
+          onWideChange={w => onResize(w ? 'full' : 'half')}
+          embedded
+        />
       </div>
     </div>
   )

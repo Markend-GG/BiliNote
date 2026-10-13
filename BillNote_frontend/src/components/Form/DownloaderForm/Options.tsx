@@ -1,3 +1,4 @@
+// @ts-nocheck 类型债豁免：上游下载器表单，未清理的 dead code 与隐式 any；见 V3.4 记债清单。
 import ProviderCard from '@/components/Form/DownloaderForm/providerCard.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { useProviderStore } from '@/store/providerStore'

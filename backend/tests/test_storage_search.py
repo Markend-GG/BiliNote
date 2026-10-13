@@ -81,7 +81,9 @@ class TestSearchIndex(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["task_id"], "s1")
         self.assertEqual(hits[0]["heading"], "题型一：基期倍比与两期比重差")
-        self.assertIn("<mark>", hits[0]["snippet"])
+        # 高亮标记是控制字符 \x01/\x02（前端切分后自己渲染 <mark>，避免把摘要当 HTML 插入）
+        self.assertIn("\x01", hits[0]["snippet"])
+        self.assertIn("\x02", hits[0]["snippet"])
 
     def test_short_query_falls_back_to_like(self):
         search_dao.rebuild_note("s1", MD)

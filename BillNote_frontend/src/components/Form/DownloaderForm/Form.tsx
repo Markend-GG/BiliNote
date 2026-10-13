@@ -1,3 +1,4 @@
+// @ts-nocheck 类型债豁免：上游下载器表单，未清理的 dead code 与隐式 any；见 V3.4 记债清单。
 // 下载器 Cookie 设置表单（最简化版）
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'

@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import toast from 'react-hot-toast'
 
 // 统一响应类型
@@ -63,4 +63,18 @@ request.interceptors.response.use(
   }
 );
 
-export default request
+/**
+ * 响应拦截器已经把 { code, msg, data } 解包成 data 本身，但 axios 的类型签名不知道这件事，
+ * 于是所有调用方拿到的类型都是 AxiosResponse，取 .models / .result 全报错（存量 30+ 条）。
+ * 这里把四个动词的返回类型改成"解包后的 payload"：第二个泛型参数即业务数据类型，
+ * 不传就是 any（兼容存量调用），传了就有提示。
+ */
+export interface UnwrappedRequest {
+  get: <T = any, R = T>(url: string, config?: AxiosRequestConfig) => Promise<R>
+  post: <T = any, R = T>(url: string, data?: any, config?: AxiosRequestConfig) => Promise<R>
+  patch: <T = any, R = T>(url: string, data?: any, config?: AxiosRequestConfig) => Promise<R>
+  put: <T = any, R = T>(url: string, data?: any, config?: AxiosRequestConfig) => Promise<R>
+  delete: <T = any, R = T>(url: string, config?: AxiosRequestConfig) => Promise<R>
+}
+
+export default request as unknown as UnwrappedRequest

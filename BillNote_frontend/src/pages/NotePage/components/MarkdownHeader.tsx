@@ -48,7 +48,7 @@ interface NoteHeaderProps {
   setCurrentVerId: (id: string) => void
   modelName: string
   style: string
-  noteStyles: { value: string; label: string }[]
+  noteStyles: readonly { value: string; label: string }[]
   createAt?: string | Date
 
   /** 视图与参照 dock */

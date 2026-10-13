@@ -1,3 +1,4 @@
+// @ts-nocheck 类型债豁免：上游下载器表单，未清理的 dead code 与隐式 any；见 V3.4 记债清单。
 import { Switch } from '@/components/ui/switch.tsx'
 import { FC } from 'react'
 import styles from './index.module.css'

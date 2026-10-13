@@ -14,16 +14,15 @@ import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatu
 import { normalizeMathDelimiters } from '@/utils/math'
 import { cn } from '@/lib/utils'
 
-type ChatMode = 'half' | 'full'
-
 const MAX_IMAGES = 4
 
 interface ChatPanelProps {
   taskId: string
-  mode: ChatMode
+  /** 参照 dock 是否处于加宽档；按钮只负责在两档宽度间切换 */
+  wide: boolean
   /** 在参照 dock 里时由 dock 提供 tab 标题与左边框，这里不再重复画 */
   embedded?: boolean
-  onModeChange: (mode: ChatMode) => void
+  onWideChange: (wide: boolean) => void
 }
 
 function SourceBadges({ sources }: { sources: ChatSource[] }) {
@@ -77,7 +76,7 @@ function UserContent({ content, images }: { content: string; images?: string[] }
   )
 }
 
-export default function ChatPanel({ taskId, mode, embedded = false, onModeChange }: ChatPanelProps) {
+export default function ChatPanel({ taskId, wide, embedded = false, onWideChange }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
@@ -310,14 +309,10 @@ export default function ChatPanel({ taskId, mode, embedded = false, onModeChange
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-neutral-400 hover:text-neutral-600"
-            onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
-            title={mode === 'half' ? '加宽参照面板' : '恢复参照面板默认宽度'}
+            onClick={() => onWideChange(!wide)}
+            title={wide ? '恢复参照面板默认宽度' : '加宽参照面板'}
           >
-            {mode === 'half' ? (
-              <Maximize2 className="h-3.5 w-3.5" />
-            ) : (
-              <Minimize2 className="h-3.5 w-3.5" />
-            )}
+            {wide ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
           </Button>
           {messages.length > 0 && (
             <Button

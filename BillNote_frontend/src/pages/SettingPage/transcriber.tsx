@@ -35,7 +35,7 @@ export default function Transcriber() {
   const [selectedModelSize, setSelectedModelSize] = useState('')
   const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([])
   const [mlxModelStatuses, setMlxModelStatuses] = useState<ModelStatus[]>([])
-  const [mlxAvailable, setMlxAvailable] = useState(false)
+  const [, setMlxAvailable] = useState(false)
   // 自定义模型表单
   const [newModelName, setNewModelName] = useState('')
   const [newModelTarget, setNewModelTarget] = useState('')

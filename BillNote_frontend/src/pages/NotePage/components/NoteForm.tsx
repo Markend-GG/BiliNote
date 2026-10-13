@@ -8,7 +8,7 @@ import {
   FormMessage,
 } from '@/components/ui/form.tsx'
 import { useEffect, useMemo, useState } from 'react'
-import { useForm, useWatch } from 'react-hook-form'
+import { useForm, useWatch, type FieldErrors, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
@@ -36,7 +36,6 @@ import {
 import { Input } from '@/components/ui/input.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx'
 import { noteStyles, noteFormats, videoPlatforms, isTaskRunning, taskStatusLabels } from '@/constant/note.ts'
-import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 
@@ -147,11 +146,13 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
   /* ---- 全局状态 ---- */
   const { addPendingTask, currentTaskId, retryTask } = useTaskStore()
   const tasks = useTaskStore(state => state.tasks)
-  const { loadEnabledModels, modelList, showFeatureHint, setShowFeatureHint } = useModelStore()
+  const { loadEnabledModels, modelList } = useModelStore()
 
   /* ---- 表单 ---- */
   const form = useForm<NoteFormValues>({
-    resolver: zodResolver(formSchema),
+    // zod 的 input/output 推断与 NoteFormValues 在可选字段上不一致，
+    // 显式声明 resolver 泛型，避免十几个 TS2719 连锁报错
+    resolver: zodResolver(formSchema) as Resolver<NoteFormValues>,
     defaultValues: {
       platform: 'bilibili',
       quality: 'medium',
@@ -199,7 +200,7 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
       video_interval: formData.video_interval ?? 6,
       grid_size: formData.grid_size ?? [2, 2],
       format: formData.format ?? [],
-    })
+    } as NoteFormValues)
   }, [
     // 当下面任意一个变了，就重新 reset
     targetId,
@@ -247,7 +248,7 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
           values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
         provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
         task_id: currentTask?.id || '',
-      }
+      } as NoteFormValues & { provider_id: string; task_id: string }
       if (currentTask) {
         // 必须 await：retryTask 内部会先把状态置成 PENDING，锁才接得上
         const ok = await retryTask(currentTask.id, payload)
@@ -409,7 +410,6 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
             {
 
              modelList.length>0?(     <FormField
-               className="w-full"
                control={form.control}
                name="model_name"
                render={({ field }) => (
@@ -452,7 +452,6 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
 
             {/* 笔记风格 */}
             <FormField
-              className="w-full"
               control={form.control}
               name="style"
               render={({ field }) => (
@@ -487,13 +486,13 @@ const NoteForm = ({ taskId, onSubmitted }: NoteFormProps) => {
             <FormField
               control={form.control}
               name="video_understanding"
-              render={({ field }) => (
+              render={() => (
                 <FormItem>
                   <div className="flex items-center gap-2">
                     <FormLabel>启用</FormLabel>
                     <Checkbox
                       checked={videoUnderstandingEnabled}
-                      onCheckedChange={v => form.setValue('video_understanding', v)}
+                      onCheckedChange={v => form.setValue('video_understanding', v === true)}
                     />
                   </div>
                   <FormMessage />

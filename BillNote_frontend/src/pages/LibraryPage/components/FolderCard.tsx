@@ -19,7 +19,6 @@ interface FolderCardProps {
 export const FolderCard = memo(function FolderCard({
   name,
   count,
-  virtual = false,
   active = false,
   onOpen,
   onDropNote,

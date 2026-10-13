@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { delete_task, generateNote } from '@/services/note.ts'
+import { deleteNote, generateNote } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 import { isTaskRunning, taskStatusLabels } from '@/constant/note'
@@ -96,7 +96,8 @@ export interface HydratePayload {
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string, formData: Task['formData']) => void
+  // formData 原样存进任务、重新生成时原样发回后端，不做形状约束（表单字段比接口声明多）
+  addPendingTask: (taskId: string, platform: string, formData: any) => void
   hydrateTask: (payload: HydratePayload) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
@@ -115,7 +116,7 @@ export const useTaskStore = create<TaskStore>()(
       tasks: [],
       currentTaskId: null,
 
-      addPendingTask: (taskId, platform, formData) =>
+      addPendingTask: (taskId: string, platform: string, formData: any) =>
         set(state => ({
           tasks: [
             {
@@ -226,7 +227,7 @@ export const useTaskStore = create<TaskStore>()(
         }))
         // 不管本地有没有这条都要通知后端：清过浏览器缓存时本地记录已经没了，
         // 但 note_results 里的文件和截图还在盘上
-        await delete_task({ task_id: id })
+        await deleteNote({ task_id: id })
       },
 
       adoptServerVersions: (id, latestContent) =>

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { IProvider, IResponse } from '@/types'
+import { IProvider } from '@/types'
 import {
   addProvider,
   getProviderById,
@@ -7,15 +7,26 @@ import {
   updateProviderById,
 } from '@/services/model.ts'
 
+/** loadProviderById 返回的是给设置表单用的快照形状 */
+export interface ProviderSnapshot {
+  id: string
+  name: string
+  logo: string
+  apiKey: string | undefined
+  baseUrl: string
+  type: string
+  enabled: unknown
+}
+
 interface ProviderStore {
   provider: IProvider[]
   setProvider: (provider: IProvider) => void
   setAllProviders: (providers: IProvider[]) => void
-  getProviderById: (id: number) => IProvider | undefined
+  getProviderById: (id: string) => IProvider | undefined
   getProviderList: () => IProvider[]
   fetchProviderList: () => Promise<void>
-  loadProviderById: (id: string) => Promise<void>
-  addNewProvider: (provider: IProvider) => Promise<void>
+  loadProviderById: (id: string) => Promise<ProviderSnapshot>
+  addNewProvider: (provider: IProvider) => Promise<IProvider | undefined>
   updateProvider: (provider: IProvider) => Promise<void>
 }
 
@@ -38,9 +49,9 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
   // 设置整个 provider 列表
   setAllProviders: providers => set({ provider: providers }),
   loadProviderById: async (id: string) => {
-    const res:IResponse<IProvider> = await getProviderById(id)
+    // 拦截器已解包：拿到的就是 IProvider 本身，不是 { code, msg, data }
+    const item = await getProviderById(id)
 
-      const item = res
       return {
         id: item.id,
         name: item.name,
@@ -59,20 +70,18 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
       base_url: provider.baseUrl,
     }
     try {
-      const res = await addProvider(payload)
-      if (res.data.code === 0) {
-        const item = res.data.data
-        console.log('Provider ', item)
-
+      const item = await addProvider(payload)
+      if (item) {
         await get().fetchProviderList()
-        return  item
+        return item
       }
+      return undefined
     } catch (error) {
       console.error('Error fetching provider:', error)
     }
   },
   // 按 id 获取单个 provider
-  getProviderById: id => get().provider.find(p => p.id === id),
+  getProviderById: (id: string) => get().provider.find(p => p.id === id),
   updateProvider: async (provider: IProvider) => {
     try {
       const existing = get().provider.find(p => p.id === provider.id)

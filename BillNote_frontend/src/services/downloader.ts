@@ -1,6 +1,6 @@
 import request from '@/utils/request.ts'
 
-export const getDownloaderCookie = async id => {
+export const getDownloaderCookie = async (id: string) => {
   return await request.get('/get_downloader_cookie/' + id)
 }
 

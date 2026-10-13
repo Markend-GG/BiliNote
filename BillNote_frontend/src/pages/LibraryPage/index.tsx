@@ -33,6 +33,7 @@ import { NoteFormDialog } from '@/components/NoteFormDialog'
 import { useLibraryStore, type LibraryFolder } from '@/store/libraryStore'
 import { useTaskStore } from '@/store/taskStore'
 import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
+import { searchNotes, type SearchHit } from '@/services/library'
 import { NoteCard, NoteRow } from './components/NoteCard'
 import { FolderCard } from './components/FolderCard'
 import { PromptDialog } from '@/components/PromptDialog'
@@ -62,6 +63,8 @@ const LibraryPage = () => {
   const location = useLocation()
   const folders = useLibraryStore(state => state.folders)
   const viewMode = useLibraryStore(state => state.viewMode)
+  const sortMode = useLibraryStore(state => state.sortMode)
+  const setSortMode = useLibraryStore(state => state.setSortMode)
   const loaded = useLibraryStore(state => state.loaded)
   const loading = useLibraryStore(state => state.loading)
   const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
@@ -385,6 +388,29 @@ const LibraryPage = () => {
 
       {/* ── 内容区 ───────────────────────────────────────── */}
       <main className="flex-1 overflow-y-auto px-4 py-4">
+        {searching && bodyHits.length > 0 && (
+          <div className="mb-4 overflow-hidden rounded-lg border bg-white">
+            <div className="text-muted-foreground border-b px-3 py-2 text-xs">
+              正文命中 {bodyHits.length} 条（点击跳到对应章节）
+            </div>
+            {bodyHits.map((hit, i) => (
+              <button
+                key={`${hit.task_id}-${i}`}
+                type="button"
+                onClick={() => navigate(`/note/${hit.task_id}`, { state: { heading: hit.heading } })}
+                className="hover:bg-neutral-50 block w-full cursor-pointer border-b px-3 py-2 text-left last:border-b-0"
+              >
+                <div className="truncate text-sm font-medium">
+                  {hit.title || '未命名笔记'}
+                  <span className="text-muted-foreground font-normal"> · {hit.heading}</span>
+                </div>
+                <div className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
+                  {renderSnippet(hit.snippet)}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
         {showFolders && recent.length > 0 && (
           <div className="mb-4 flex items-center gap-2 text-sm">
             <Clock className="text-muted-foreground h-4 w-4 shrink-0" />
@@ -584,6 +610,19 @@ const LibraryPage = () => {
       </Dialog>
     </div>
   )
+}
+
+/** 后端 snippet 用 \x01/\x02 包命中词；切分后自己渲染 <mark>，绝不把摘要当 HTML 插入 */
+function renderSnippet(snippet: string) {
+  return snippet.split('\x01').map((part, i) => {
+    const [text, hit] = part.split('\x02')
+    return (
+      <span key={i}>
+        {text}
+        {hit !== undefined && <mark className="rounded-sm bg-yellow-200 px-0.5">{hit}</mark>}
+      </span>
+    )
+  })
 }
 
 function FilterChip({

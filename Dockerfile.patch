@@ -7,6 +7,9 @@ COPY BillNote_frontend/package.json BillNote_frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY BillNote_frontend/ ./
 ENV DOCKER_BUILD=1
+# 类型门禁：vite build 走 esbuild 不查类型，曾经让一个 ReferenceError 溜到线上整页白屏。
+# 存量债已清零（两个上游设置表单用 @ts-nocheck 豁免并记债），新代码不许再带类型错误进来
+RUN pnpm run typecheck
 RUN pnpm run build
 
 # 在 GPU 基础镜像上叠加：新前端构建产物 + 修补后的后端

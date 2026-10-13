@@ -2,7 +2,6 @@
 
 import { useTaskStore } from "@/store/taskStore"
 import { useEffect, useState, useRef } from "react"
-import { Play } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {ScrollArea} from "@/components/ui/scroll-area.tsx";
 
@@ -10,7 +9,7 @@ interface Segment {
   start: number
   end: number
   text: string
-
+  speaker?: string
 }
 
 interface Task {
@@ -88,7 +87,9 @@ const TranscriptViewer = ({ onPickTime, focusTime = null }: TranscriptViewerProp
                 {task.transcript.segments.map((segment, index) => (
                     <div
                         key={index}
-                        ref={(el) => (segmentRefs.current[index] = el)}
+                        ref={(el) => {
+                          segmentRefs.current[index] = el
+                        }}
                         className={cn(
                             "group grid grid-cols-[80px_1fr] gap-2 rounded-md p-2 transition-colors hover:bg-slate-50",
                             activeSegment === index && "bg-slate-100",
@@ -125,10 +126,12 @@ const TranscriptViewer = ({ onPickTime, focusTime = null }: TranscriptViewerProp
         )}
 
 
-        {task?.transcript?.segments?.length > 0 && (
+        {(task?.transcript?.segments?.length ?? 0) > 0 && (
             <div className="mt-4 flex justify-between border-t pt-3 text-xs text-slate-500">
-              <span>共 {task.transcript.segments.length} 条片段</span>
-              <span>总时长: {formatTime(task.transcript.segments[task.transcript.segments.length - 1]?.end || 0)}</span>
+              <span>共 {task?.transcript?.segments?.length} 条片段</span>
+              <span>
+                总时长: {formatTime(task?.transcript?.segments?.[task.transcript.segments.length - 1]?.end || 0)}
+              </span>
             </div>
         )}
       </div>

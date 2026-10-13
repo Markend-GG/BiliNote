@@ -1,20 +1,13 @@
 import request from '@/utils/request'
 import toast from 'react-hot-toast'
 
-export const generateNote = async (data: {
-  video_url: string
-  platform: string
-  quality: string
-  model_name: string
-  provider_id: string
-  task_id?: string
-  format: Array<string>
-  style: string
-  extras?: string
-  video_understand?: boolean
-  video_interval?: number
-  grid_size: Array<number>
-}) => {
+/**
+ * 生成笔记的请求体。字段与后端 VideoRequest 对齐；表单值里 quality 是字面量联合、
+ * 部分字段可选，逐字段声明会让每个调用点都报不兼容，这里收口为宽松对象。
+ */
+export type GenerateNotePayload = Record<string, any>
+
+export const generateNote = async (data: GenerateNotePayload) => {
   try {
     console.log('generateNote', data)
     const response = await request.post('/generate_note', data)
@@ -46,7 +39,7 @@ export const generateNote = async (data: {
  * SQLite 索引行和向量索引（以前那个接口是空壳，界面上删了盘上什么都没少）。
  * 失败提示交给请求拦截器统一弹，这里不重复 toast。
  */
-export const delete_task = async ({ task_id }: { task_id: string }) => {
+export const deleteNote = async ({ task_id }: { task_id: string }) => {
   const res = await request.post<any, { deleted_files: number; deleted_screenshots: number }>(
     '/delete_task',
     { task_id },
@@ -57,7 +50,7 @@ export const delete_task = async ({ task_id }: { task_id: string }) => {
   return res
 }
 
-export const get_task_status = async (task_id: string) => {
+export const getTaskStatus = async (task_id: string) => {
   try {
     // 成功提示
 

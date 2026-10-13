@@ -20,9 +20,13 @@ const AILogo = ({ name, style = 'Color', size = 24 }: AILogoProps) => {
     )
   }
 
-  const Variant = Icon[style as keyof typeof Icon]
+  // @lobehub/icons 的类型把图标声明成常量对象而非组件，这里按组件用
+  const IconComp = Icon as unknown as React.ComponentType<{ size?: number }>
+  const Variant = IconComp[style as keyof typeof IconComp] as
+    | React.ComponentType<{ size?: number }>
+    | undefined
   if (!Variant) {
-    return <Icon size={size} />
+    return <IconComp size={size} />
   }
 
   return <Variant size={size} />

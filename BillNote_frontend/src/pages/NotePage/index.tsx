@@ -4,7 +4,7 @@ import { scrollToHeading } from '@/utils/heading'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import MarkdownViewer from '@/pages/NotePage/components/MarkdownViewer'
-import { get_task_status } from '@/services/note'
+import { getTaskStatus } from '@/services/note'
 import { useLibraryStore } from '@/store/libraryStore'
 import { useTaskStore } from '@/store/taskStore'
 
@@ -56,7 +56,7 @@ const NotePage: FC = () => {
     attemptedRef.current = taskId
     setRestoring(true)
     const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
-    get_task_status(taskId)
+    getTaskStatus(taskId)
       .then(res => {
         if (!res?.status) {
           setRestoreFailed(true)

@@ -1,5 +1,5 @@
 import styles from './index.module.css'
-import { FC, JSX } from 'react'
+import { JSX } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 
 export interface IMenuProps {
@@ -7,10 +7,6 @@ export interface IMenuProps {
   name: string
   icon: JSX.Element
   path: string
-}
-
-interface IMenuItem {
-  menuItem: IMenuProps
 }
 
 const MenuBar: ({ menuItem }: { menuItem: any }) => JSX.Element = ({ menuItem }) => {
