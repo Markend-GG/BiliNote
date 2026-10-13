@@ -1,9 +1,13 @@
 """library / storage / search / delete_task 的 HTTP 层测试（FastAPI TestClient）。
 
 DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
-状态码包装、错误码、删除真的落盘。运行环境需要 fastapi+httpx（容器镜像里有）。
+响应包装、错误码、删除真的落盘。
+
+重依赖（yt_dlp/chromadb/openai/...）在容器镜像里齐全、这段 stub 逻辑是 no-op；
+本地无 Docker 跑时缺哪些就 stub 哪些（只 stub 真正找不到的模块，不污染有真包的环境）。
 """
 
+import importlib
 import json
 import os
 import pathlib
@@ -22,11 +26,61 @@ os.environ["NOTE_OUTPUT_DIR"] = (_TMP / "note_results").as_posix()
 os.environ["OUT_DIR"] = (_TMP / "screenshots").as_posix()
 os.environ["VECTOR_DB_DIR"] = (_TMP / "vector_db").as_posix()
 
-from fastapi.testclient import TestClient  # noqa: E402
+
+class _StubMeta(type):
+    def __iter__(cls):
+        return iter(())
+
+    def __getitem__(cls, _k):
+        return _Stub
+
+    def __getattr__(cls, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub
+
+
+class _Stub(metaclass=_StubMeta):
+    def __init__(self, *a, **k):
+        pass
+
+    def __call__(self, *a, **k):
+        return _Stub()
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub()
+
+    def __iter__(self):
+        return iter(())
+
+    def __getitem__(self, _k):
+        return _Stub()
+
+
+def _install_missing_stubs():
+    for _ in range(80):
+        try:
+            importlib.import_module("app")
+            return
+        except ModuleNotFoundError as e:
+            mod = types.ModuleType(e.name)
+            mod.__getattr__ = lambda name: _Stub
+            sys.modules[e.name] = mod
+        except Exception:
+            raise
+
+
+import types  # noqa: E402  (stub 安装器需要)
+
+_install_missing_stubs()
 
 from app import create_app  # noqa: E402
-from app.db import search_dao  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.db import library_dao, search_dao  # noqa: E402
 
 
 @asynccontextmanager
@@ -144,6 +198,8 @@ class TestLibraryHttp(unittest.TestCase):
         task_id = str(uuid.uuid4())
         _make_note(task_id, "## 搜索章节\n恩格尔系数变式计算出现在这里足够长的正文正文正文\n")
         search_dao.rebuild_note(task_id, "## 搜索章节\n恩格尔系数变式计算出现在这里足够长的正文正文正文\n")
+        # 标题由 notes 索引表富化，模拟启动回填登记
+        library_dao.upsert_note(task_id, video_title="http-test-note", status="SUCCESS")
         res = client.get("/api/search", params={"q": "恩格尔系数"}).json()
         self.assertEqual(res["code"], 0)
         self.assertTrue(any(h["task_id"] == task_id for h in res["data"]))
