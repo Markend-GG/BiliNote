@@ -47,7 +47,7 @@ def get_library():
             counts[key] = counts.get(key, 0) + 1
         for folder in folders:
             folder["note_count"] = counts.get(folder["id"], 0)
-        return R.success(data={"folders": folders, "notes": notes, "uncategorized": counts.get("", 0)})
+        return R.success(data={"folders": folders, "notes": notes})
     except Exception as e:
         logger.error(f"读取笔记库失败: {e}", exc_info=True)
         return R.error(msg=f"读取笔记库失败: {e}")

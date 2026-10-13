@@ -20,20 +20,26 @@ import rehypeFold from '@/lib/rehypeFold'
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+import { ResizablePanel, ResizablePanelGroup, ResizableHandle } from '@/components/ui/resizable'
+import type { ImperativePanelHandle } from 'react-resizable-panels'
 import { useTaskStore } from '@/store/taskStore'
 import { update_note } from '@/services/note'
 import { normalizeMathDelimiters } from '@/utils/math'
+import { scrollToHeading } from '@/utils/heading'
 import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/NotePage/components/MarkdownHeader.tsx'
-import TranscriptViewer from '@/pages/NotePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/NotePage/components/MarkmapComponent.tsx'
-import ChatPanel from '@/pages/NotePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/NotePage/components/VideoBanner.tsx'
+import OutlineNav from '@/pages/NotePage/components/OutlineNav.tsx'
+import ReferenceDock, { type DockTab } from '@/pages/NotePage/components/ReferenceDock.tsx'
 import { NoteFormDialog } from '@/components/NoteFormDialog'
 import { useNoteActions } from '@/hooks/useNoteActions'
 import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 import { useLibraryStore } from '@/store/libraryStore'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import type { NoteSibling } from '@/pages/NotePage/components/MarkdownHeader.tsx'
+
+const OUTLINE_STORAGE_KEY = 'note-outline-collapsed'
 
 interface MarkdownViewerProps {
   status: 'idle' | 'loading' | 'success' | 'failed'
@@ -120,39 +126,11 @@ function createMarkdownComponents(baseURL: string) {
         )
       }
 
-      // 处理笔记内部锚点链接（如目录跳转）
+      // 处理笔记内部锚点链接（如目录跳转）；章节导航也走同一份匹配规则
       if (href?.startsWith('#')) {
         const handleAnchorClick = (e: React.MouseEvent) => {
           e.preventDefault()
-          const id = decodeURIComponent(href.slice(1))
-
-          // 1. 优先精确匹配 id
-          let target = document.getElementById(id)
-
-          // 2. 精确失败时按 heading 文本模糊匹配
-          // LLM 生成的目录锚点可能和 heading 实际文本不完全一致
-          //（例如 heading 带 *Content-[00:00]* 后缀，目录链接里没有）
-          if (!target) {
-            const normalize = (s: string) =>
-              s.replace(/[-：:\s*\[\]]/g, '').toLowerCase()
-            const search = normalize(id)
-            const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6')
-            for (const h of headings) {
-              const text = h.textContent || ''
-              if (normalize(text).includes(search) || search.includes(normalize(text))) {
-                target = h
-                break
-              }
-            }
-          }
-
-          if (target) {
-            // 目标可能藏在折叠起来的章节里，先把祖先全部展开，否则滚过去是一片空白
-            for (let sec = target.closest('.md-section'); sec; sec = sec.parentElement?.closest('.md-section') || null) {
-              sec.classList.remove('md-collapsed')
-            }
-            target.scrollIntoView({ behavior: 'smooth', block: 'start' })
-          } else {
+          if (!scrollToHeading(decodeURIComponent(href.slice(1)))) {
             toast.error('未找到对应章节')
           }
         }
@@ -333,8 +311,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
   const isMultiVersion = Array.isArray(currentTask?.markdown)
-  const [showTranscribe, setShowTranscribe] = useState(false)
-  const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
+  // 原文参照 / AI 问答合并成一个 dock 的两个 tab，null = 关闭。
+  // 以前是两个并列 state + 硬编码宽度，且 AI 切"全屏"会把原文参照整个替换掉再也打不开。
+  const [dockTab, setDockTab] = useState<DockTab | null>(null)
+  const dockRef = useRef<ImperativePanelHandle>(null)
+  const [outlineCollapsed, setOutlineCollapsed] = useState(
+    () => localStorage.getItem(OUTLINE_STORAGE_KEY) === '1',
+  )
+  // 用户自己的折叠偏好。dock 打开时章节栏临时让位，关掉要恢复成这个值而不是写死的 false
+  const outlinePrefRef = useRef(outlineCollapsed)
+  const isNarrow = useMediaQuery('(max-width: 1100px)')
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -391,6 +377,38 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       {noteDialogs}
     </>
   )
+
+  const dockOpen = dockTab !== null
+
+  const setOutlineCollapsedPersist = (value: boolean) => {
+    setOutlineCollapsed(value)
+    outlinePrefRef.current = value
+    localStorage.setItem(OUTLINE_STORAGE_KEY, value ? '1' : '0')
+  }
+
+  // 窄屏横向空间本来就不够，章节栏默认让位
+  useEffect(() => {
+    if (isNarrow) setOutlineCollapsedPersist(true)
+  }, [isNarrow])
+
+  // dock 占掉横向空间时章节栏收成竖条；关掉恢复用户之前的偏好
+  useEffect(() => {
+    if (dockOpen) setOutlineCollapsed(true)
+    else setOutlineCollapsed(outlinePrefRef.current)
+  }, [dockOpen])
+
+  useEffect(() => {
+    if (dockOpen) dockRef.current?.expand()
+    else dockRef.current?.collapse()
+  }, [dockOpen])
+
+  // ChatPanel 的放大/缩小按钮现在只负责调 dock 宽度，不再有"全屏替换正文"。
+  // 宽窄状态必须存在这一层：ChatPanel 自己只认 mode prop，写死 'half' 会让按钮永远朝一个方向切。
+  const [dockWide, setDockWide] = useState(false)
+  const handleChatResize = (mode: 'half' | 'full') => {
+    setDockWide(mode === 'full')
+    dockRef.current?.resize(mode === 'full' ? 65 : 38)
+  }
 
   // 多版本内容处理
   useEffect(() => {
@@ -614,8 +632,42 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
+  const noteColumn =
+    selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
+      <ScrollArea className="h-full min-w-0 bg-white py-2">
+        {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
+            成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
+        <div className="mx-auto w-full max-w-[1200px] px-2">
+          <VideoBanner
+            audioMeta={currentTask?.audioMeta}
+            videoUrl={currentTask?.formData?.video_url}
+          />
+          <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
+            <ReactMarkdown
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={rehypePlugins}
+              components={markdownComponents}
+            >
+              {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
+            </ReactMarkdown>
+          </div>
+        </div>
+      </ScrollArea>
+    ) : (
+      <div className="flex h-full w-full items-center justify-center bg-white">
+        <div className="w-[300px] flex-col justify-items-center">
+          <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
+            <ArrowRight className="text-primary h-8 w-8" />
+          </div>
+          <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
+          <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
+        </div>
+      </div>
+    )
+
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       <MarkdownHeader
         title={noteTitle}
         onBack={() => goShelf()}
@@ -636,10 +688,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         onCopy={handleCopy}
         onDownload={handleDownload}
         createAt={createTime}
-        showTranscribe={showTranscribe}
-        setShowTranscribe={setShowTranscribe}
-        showChat={showChat}
-        setShowChat={setShowChat}
+        dockTab={dockTab}
+        onDockTab={setDockTab}
         viewMode={viewMode}
         setViewMode={setViewMode}
         foldAll={foldAll}
@@ -713,62 +763,61 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           />
         </div>
       ) : (
-        <div className="flex flex-1 overflow-hidden bg-white py-2">
-          {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
+        <div className="relative flex min-h-0 flex-1 overflow-hidden bg-white">
+          {isNarrow ? (
             <>
-              {showChat === 'full' && currentTask ? (
-                <div className="h-full w-full">
-                  <ChatPanel taskId={currentTask.id} mode="full" onModeChange={setShowChat} />
-                </div>
-              ) : (
-              <>
-              <ScrollArea className="min-w-0 flex-1">
-                {/* 正文限宽居中：2560px 屏上一行横跨全屏根本没法读，
-                    成熟笔记软件（Notion / 语雀）都是给内容列一个最大宽度 */}
-                <div className="mx-auto w-full max-w-[1200px] px-2">
-                  <VideoBanner
-                    audioMeta={currentTask?.audioMeta}
-                    videoUrl={currentTask?.formData?.video_url}
+              {noteColumn}
+              {/* 窄屏不挤正文：dock 作为右侧浮层盖在上面 */}
+              {dockTab && currentTask && (
+                <div className="border-l shadow-xl absolute inset-y-0 right-0 z-30 w-[min(440px,92vw)] bg-white">
+                  <ReferenceDock
+                    tab={dockTab}
+                    onTab={setDockTab}
+                    taskId={currentTask.id}
+                    wide={dockWide}
+                    onResize={handleChatResize}
+                    onClose={() => setDockTab(null)}
                   />
-                  <div className={'markdown-body w-full'} ref={bodyRef} onClick={handleFoldClick}>
-                    <ReactMarkdown
-                      remarkPlugins={remarkPlugins}
-                      rehypePlugins={rehypePlugins}
-                      components={markdownComponents}
-                    >
-                      {normalizeMathDelimiters(selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''))}
-                    </ReactMarkdown>
-                  </div>
                 </div>
-              </ScrollArea>
-              {showTranscribe && (
-                <div className={'ml-2 w-2/4'}>
-                  <TranscriptViewer />
-                </div>
-              )}
-              {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}
-              {showChat === 'half' && currentTask && (
-                <div className="ml-2 h-full w-1/2 shrink-0">
-                  <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
-                </div>
-              )}
-              </>
               )}
             </>
           ) : (
-            <div className="flex h-full w-full items-center justify-center">
-              <div className="w-[300px] flex-col justify-items-center">
-                <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
-                  <ArrowRight className="text-primary h-8 w-8" />
-                </div>
-                <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
-                <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
-              </div>
-            </div>
+            <ResizablePanelGroup direction="horizontal" className="min-h-0 flex-1">
+              <ResizablePanel defaultSize={100} minSize={45}>
+                {noteColumn}
+              </ResizablePanel>
+              <ResizableHandle />
+              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变 */}
+              <ResizablePanel
+                ref={dockRef}
+                collapsible
+                collapsedSize={0}
+                defaultSize={38}
+                minSize={25}
+                maxSize={70}
+              >
+                {currentTask && (
+                  <ReferenceDock
+                    tab={dockTab ?? 'transcript'}
+                    onTab={setDockTab}
+                    taskId={currentTask.id}
+                    wide={dockWide}
+                    onResize={handleChatResize}
+                  />
+                )}
+              </ResizablePanel>
+            </ResizablePanelGroup>
           )}
         </div>
       )}
       {overlays}
+      </div>
+      <OutlineNav
+        containerRef={bodyRef}
+        contentKey={viewMode === 'preview' && !editing ? selectedContent : ''}
+        collapsed={outlineCollapsed}
+        onCollapsedChange={setOutlineCollapsedPersist}
+      />
     </div>
   )
 })

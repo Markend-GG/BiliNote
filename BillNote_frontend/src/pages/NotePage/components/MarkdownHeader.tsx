@@ -56,13 +56,11 @@ interface NoteHeaderProps {
   noteStyles: { value: string; label: string }[]
   createAt?: string | Date
 
-  /** 视图与右侧面板 */
+  /** 视图与参照 dock */
   viewMode: 'map' | 'preview'
   setViewMode: (mode: 'map' | 'preview') => void
-  showTranscribe: boolean
-  setShowTranscribe: (show: boolean) => void
-  showChat?: false | 'half' | 'full'
-  setShowChat?: (mode: false | 'half' | 'full') => void
+  dockTab: 'transcript' | 'chat' | null
+  onDockTab: (tab: 'transcript' | 'chat' | null) => void
 
   /** 动作 */
   onCopy: () => void
@@ -105,10 +103,8 @@ export function MarkdownHeader({
   createAt,
   viewMode,
   setViewMode,
-  showTranscribe,
-  setShowTranscribe,
-  showChat,
-  setShowChat,
+  dockTab,
+  onDockTab,
   onCopy,
   onDownload,
   onEdit,
@@ -359,27 +355,43 @@ export function MarkdownHeader({
           </TooltipProvider>
         )}
 
-        <Button
-          variant={showTranscribe ? 'secondary' : 'ghost'}
-          size="sm"
-          className="h-8"
-          onClick={() => setShowTranscribe(!showTranscribe)}
-        >
-          <FileText className="h-4 w-4" />
-          原文参照
-        </Button>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={dockTab === 'transcript' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-8"
+                onClick={() => onDockTab(dockTab === 'transcript' ? null : 'transcript')}
+              >
+                <FileText className="h-4 w-4" />
+                原文参照
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {dockTab === 'transcript' ? '再点一次关闭' : '在右侧打开视频转写原文'}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
-        {setShowChat && (
-          <Button
-            variant={showChat ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-8"
-            onClick={() => setShowChat(showChat ? false : 'half')}
-          >
-            <MessageSquare className="h-4 w-4" />
-            AI 问答
-          </Button>
-        )}
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={dockTab === 'chat' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="h-8"
+                onClick={() => onDockTab(dockTab === 'chat' ? null : 'chat')}
+              >
+                <MessageSquare className="h-4 w-4" />
+                AI 问答
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {dockTab === 'chat' ? '再点一次关闭' : '基于这篇笔记内容提问'}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
         <Menu
           trigger={<MoreHorizontal className="h-4 w-4" />}

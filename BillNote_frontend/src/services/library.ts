@@ -28,7 +28,6 @@ export interface LibraryNote {
 export interface LibraryPayload {
   folders: LibraryFolder[]
   notes: LibraryNote[]
-  uncategorized: number
 }
 
 export type DeleteFolderMode = 'move' | 'delete'

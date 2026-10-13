@@ -68,7 +68,22 @@ const NotePage: FC = () => {
           created_at: indexed?.created_at ?? null,
         })
       })
-      .catch(() => setRestoreFailed(true))
+      .catch(() => {
+        // 后端对 FAILED 的任务返回业务错误（R.error），会走到这里。
+        // 但"生成失败"和"找不到"是两回事：索引里写着 FAILED 就按失败态恢复，
+        // 让用户看到失败页和重新生成入口，而不是一句误导的"找不到这篇笔记"
+        const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
+        if (indexed?.status === 'FAILED') {
+          hydrateTask({
+            task_id: taskId,
+            status: 'FAILED',
+            form_data: indexed.form_data ?? null,
+            created_at: indexed.created_at ?? null,
+          })
+        } else {
+          setRestoreFailed(true)
+        }
+      })
       .finally(() => setRestoring(false))
   }, [taskId, currentTask, libraryLoaded, hydrateTask])
 

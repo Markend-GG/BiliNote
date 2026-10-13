@@ -9,7 +9,6 @@ export type ShelfViewMode = 'card' | 'list'
 interface LibraryState {
   folders: LibraryFolder[]
   notes: LibraryNote[]
-  uncategorized: number
   viewMode: ShelfViewMode
   loaded: boolean
   loading: boolean
@@ -34,7 +33,6 @@ export const useLibraryStore = create<LibraryState>()(
     (set, get) => ({
       folders: [],
       notes: [],
-      uncategorized: 0,
       viewMode: 'card',
       loaded: false,
       loading: false,
@@ -47,7 +45,6 @@ export const useLibraryStore = create<LibraryState>()(
           set({
             folders: data?.folders ?? [],
             notes: data?.notes ?? [],
-            uncategorized: data?.uncategorized ?? 0,
             loaded: true,
           })
         } catch {

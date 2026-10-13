@@ -12,6 +12,7 @@ import { useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
 import { askQuestion, getChatStatus, indexTask, type ChatSource, type IndexStatus } from '@/services/chat'
 import { normalizeMathDelimiters } from '@/utils/math'
+import { cn } from '@/lib/utils'
 
 type ChatMode = 'half' | 'full'
 
@@ -20,6 +21,8 @@ const MAX_IMAGES = 4
 interface ChatPanelProps {
   taskId: string
   mode: ChatMode
+  /** 在参照 dock 里时由 dock 提供 tab 标题与左边框，这里不再重复画 */
+  embedded?: boolean
   onModeChange: (mode: ChatMode) => void
 }
 
@@ -74,7 +77,7 @@ function UserContent({ content, images }: { content: string; images?: string[] }
   )
 }
 
-export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
+export default function ChatPanel({ taskId, mode, embedded = false, onModeChange }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
@@ -298,17 +301,17 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
   }
 
   return (
-    <div className="flex h-full flex-col border-l">
+    <div className={cn('flex h-full flex-col', !embedded && 'border-l')}>
       {/* 头部 */}
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className="text-sm font-medium">AI 问答</span>
+      <div className={cn('flex items-center border-b px-3 py-2', embedded ? 'justify-end' : 'justify-between')}>
+        {!embedded && <span className="text-sm font-medium">AI 问答</span>}
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-neutral-400 hover:text-neutral-600"
             onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
-            title={mode === 'half' ? '全屏' : '半屏'}
+            title={mode === 'half' ? '加宽参照面板' : '恢复参照面板默认宽度'}
           >
             {mode === 'half' ? (
               <Maximize2 className="h-3.5 w-3.5" />

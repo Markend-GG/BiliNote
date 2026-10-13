@@ -2,6 +2,9 @@ import { useMemo } from 'react'
 import { useLibraryStore } from '@/store/libraryStore'
 import { useTaskStore } from '@/store/taskStore'
 
+/** 终态：本地与后端都写完后不会再变。非终态以本地轮询值为准，终态冲突时信后端 */
+const TERMINAL = new Set(['SUCCESS', 'FAILED'])
+
 export interface ShelfItem {
   taskId: string
   title: string
@@ -32,11 +35,14 @@ export function useShelfItems(): ShelfItem[] {
 
     const fromIndex = notes.map(note => {
       const local = localById.get(note.task_id)
+      // 本地还停留在 FAILED 而后端已经重跑成功时，书架不该继续显示失败徽章
+      const status =
+        local && !TERMINAL.has(local.status) ? local.status : note.status || local?.status || 'PENDING'
       return {
         taskId: note.task_id,
         title: note.title || note.video_title || local?.audioMeta?.title || '未命名笔记',
         folderId: note.folder_id,
-        status: local?.status || note.status || 'PENDING',
+        status,
         platform: note.platform || local?.platform || null,
         coverUrl: note.cover_url || local?.audioMeta?.cover_url || null,
         duration: note.duration ?? local?.audioMeta?.duration ?? null,
