@@ -10,13 +10,14 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.db import library_dao, video_task_dao
+from app.db import library_dao, search_dao, video_task_dao
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 IMAGE_OUTPUT_DIR = Path(os.getenv("OUT_DIR", "./static/screenshots"))
+VECTOR_DB_DIR = os.getenv("VECTOR_DB_DIR", "vector_db")
 
 # 截图文件名形如 screenshot_003_<uuid4>.jpg（utils/video_helper.py:22），uuid4 保证全局唯一，
 # 所以能靠 markdown 里的引用反查某篇笔记拥有哪些截图。
@@ -98,6 +99,11 @@ def delete_note_artifacts(task_id: str) -> dict:
     library_dao.delete_note_row(task_id)
 
     try:
+        search_dao.delete_note(task_id)
+    except Exception as e:
+        logger.warning(f"删除全文索引失败 {task_id}: {e}")
+
+    try:
         from app.services.vector_store import VectorStoreManager
 
         VectorStoreManager().delete_index(task_id)
@@ -163,8 +169,96 @@ def backfill_library() -> int:
                 "platform": meta.get("platform") or "",
             },
         )
+        try:
+            search_dao.rebuild_note(task_id, data.get("markdown", "") or "")
+        except Exception as e:
+            logger.warning(f"回填全文索引失败 {task_id}: {e}")
         added += 1
 
     if added:
         logger.info(f"已回填 {added} 篇历史笔记到笔记库索引")
     return added
+
+
+# ── 存储扫描 / 孤儿截图清理 ────────────────────────────────────
+
+
+def _dir_bytes(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+
+def referenced_screenshot_names() -> set:
+    """所有笔记真正引用的截图文件名：清单为主、正则兜底。"""
+    refs = set()
+    note_dir = Path(NOTE_OUTPUT_DIR)
+    if not note_dir.is_dir():
+        return refs
+    for path in note_dir.iterdir():
+        if not _NOTE_FILE_RE.match(path.name):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        manifest = data.get("screenshots")
+        if isinstance(manifest, list):
+            refs.update(
+                name for name in manifest
+                if isinstance(name, str) and _SCREENSHOT_NAME_RE.fullmatch(name)
+            )
+        refs.update(_SCREENSHOT_NAME_RE.findall(data.get("markdown", "") or ""))
+    return refs
+
+
+def scan_storage() -> dict:
+    """设置页「存储」的数据源：截图目录占用、孤儿清单、笔记/向量库体积。"""
+    refs = referenced_screenshot_names()
+    files = []
+    if IMAGE_OUTPUT_DIR.is_dir():
+        for path in IMAGE_OUTPUT_DIR.iterdir():
+            if path.is_file() and _SCREENSHOT_NAME_RE.fullmatch(path.name):
+                stat = path.stat()
+                files.append({
+                    "name": path.name,
+                    "size": stat.st_size,
+                    "mtime": int(stat.st_mtime * 1000),
+                    "referenced": path.name in refs,
+                })
+    orphans = sorted((f for f in files if not f["referenced"]), key=lambda f: -f["size"])
+    return {
+        "screenshots": {
+            "count": len(files),
+            "bytes": sum(f["size"] for f in files),
+            "orphan_count": len(orphans),
+            "orphan_bytes": sum(f["size"] for f in orphans),
+        },
+        "orphans": orphans,
+        "note_results_bytes": _dir_bytes(Path(NOTE_OUTPUT_DIR)),
+        "vector_db_bytes": _dir_bytes(Path(VECTOR_DB_DIR)),
+    }
+
+
+def delete_orphan_screenshots(names: list) -> dict:
+    """删除孤儿截图。删除前重算引用集：界面上扫完到点删除之间可能又生成了新笔记。"""
+    refs = referenced_screenshot_names()
+    deleted, skipped = [], []
+    for name in names:
+        # 名字形态校验是第一道闸（防路径穿越），引用校验是第二道
+        if not isinstance(name, str) or not _SCREENSHOT_NAME_RE.fullmatch(name):
+            skipped.append(name)
+            continue
+        if name in refs:
+            skipped.append(name)
+            continue
+        target = IMAGE_OUTPUT_DIR / name
+        if not target.resolve().is_relative_to(IMAGE_OUTPUT_DIR.resolve()):
+            skipped.append(name)
+            continue
+        if _unlink(target):
+            deleted.append(name)
+        else:
+            skipped.append(name)
+    logger.info(f"孤儿截图清理：删除 {len(deleted)} 张，跳过 {len(skipped)} 张")
+    return {"deleted": deleted, "skipped": skipped}

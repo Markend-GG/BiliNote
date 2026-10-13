@@ -8,3 +8,7 @@ def init_db():
     engine = get_engine()
 
     Base.metadata.create_all(bind=engine)
+
+    # FTS5 是虚拟表，create_all 建不了，单独初始化
+    from app.db import search_dao
+    search_dao.init_search_table()

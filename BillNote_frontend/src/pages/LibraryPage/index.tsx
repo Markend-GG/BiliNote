@@ -66,6 +66,7 @@ const LibraryPage = () => {
   const items = useShelfItems()
 
   const [search, setSearch] = useState('')
+  const [bodyHits, setBodyHits] = useState<SearchHit[]>([])
   // 从详情页点面包屑回来时，直接落在那篇笔记所在的文件夹里
   const [activeFolder, setActiveFolder] = useState<FolderFilter>(
     () => (location.state as { folder?: string | null } | null)?.folder ?? null,
@@ -81,6 +82,21 @@ const LibraryPage = () => {
   }, [fetchLibrary])
 
   const fuse = useMemo(() => new Fuse(items, { keys: ['title'], threshold: 0.4 }), [items])
+
+  // 标题走本地 Fuse，正文走后端 FTS5；两个字符起才值得打后端
+  useEffect(() => {
+    const keyword = search.trim()
+    if (keyword.length < 2) {
+      setBodyHits([])
+      return
+    }
+    const timer = setTimeout(() => {
+      searchNotes(keyword)
+        .then(setBodyHits)
+        .catch(() => setBodyHits([]))
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [search])
 
   const keyword = search.trim()
   const searching = !!keyword

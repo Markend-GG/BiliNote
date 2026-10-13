@@ -1,5 +1,6 @@
 import { FC, useEffect, useRef, useState } from 'react'
-import { Navigate, useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { scrollToHeading } from '@/utils/heading'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import MarkdownViewer from '@/pages/NotePage/components/MarkdownViewer'
@@ -18,6 +19,9 @@ type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
 const NotePage: FC = () => {
   const { taskId } = useParams<{ taskId: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
+  const jumpHeading = (location.state as { heading?: string } | null)?.heading
+  const jumpedRef = useRef<string | null>(null)
   const tasks = useTaskStore(state => state.tasks)
   const setCurrentTask = useTaskStore(state => state.setCurrentTask)
   const hydrateTask = useTaskStore(state => state.hydrateTask)
@@ -99,6 +103,15 @@ const NotePage: FC = () => {
       setStatus('loading')
     }
   }, [currentTask?.id, currentTask?.status])
+
+  // 从书架的"正文命中"进来时，等正文渲染出来再跳到对应章节
+  useEffect(() => {
+    if (!jumpHeading || !currentTask || status !== 'success') return
+    if (jumpedRef.current === jumpHeading + taskId) return
+    jumpedRef.current = jumpHeading + taskId
+    const timer = setTimeout(() => scrollToHeading(jumpHeading), 350)
+    return () => clearTimeout(timer)
+  }, [jumpHeading, currentTask, status, taskId])
 
   if (!taskId) return <Navigate to="/" replace />
 

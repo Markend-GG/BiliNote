@@ -14,21 +14,9 @@ NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 VECTOR_DB_DIR = os.getenv("VECTOR_DB_DIR", "vector_db")
 
 
-def _chunk_markdown(markdown: str) -> list[dict]:
-    """按 H2/H3 标题拆分 markdown 为语义块。"""
-    sections = re.split(r'(?=^#{2,3}\s)', markdown, flags=re.MULTILINE)
-    chunks = []
-    for section in sections:
-        section = section.strip()
-        if not section or len(section) < 30:
-            continue
-        heading_match = re.match(r'^(#{2,3})\s+(.+)', section)
-        title = heading_match.group(2).strip() if heading_match else "intro"
-        chunks.append({
-            "text": section,
-            "metadata": {"source_type": "markdown", "section_title": title},
-        })
-    return chunks
+# 分块规则抽到 utils/markdown_chunks.py：FTS5 全文搜索要复用同一套切法，
+# 但那个模块不能 import chromadb（本文件顶部就要），所以逻辑放中立位置
+from app.utils.markdown_chunks import chunk_markdown as _chunk_markdown
 
 
 def _chunk_transcript(segments: list[dict], window_size: int = 15, overlap: int = 3) -> list[dict]:

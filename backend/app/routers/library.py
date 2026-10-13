@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from app.db import library_dao
+from app.db import library_dao, search_dao
 from app.services.library_service import delete_note_artifacts
 from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
@@ -47,6 +47,22 @@ class VersionItem(BaseModel):
 class VersionsSyncRequest(BaseModel):
     task_id: str
     versions: list[VersionItem]
+
+
+@router.get("/search")
+def search_notes(q: str = "", limit: int = 30):
+    """正文全文搜索（FTS5 trigram，中文子串可命中）。返回命中块 + 所属笔记标题。"""
+    try:
+        hits = search_dao.search(q, limit=min(max(limit, 1), 50))
+        notes = {n["task_id"]: n for n in library_dao.list_notes()}
+        for hit in hits:
+            note = notes.get(hit["task_id"]) or {}
+            hit["title"] = note.get("title") or note.get("video_title")
+            hit["folder_id"] = note.get("folder_id")
+        return R.success(data=hits)
+    except Exception as e:
+        logger.error(f"全文搜索失败: {e}", exc_info=True)
+        return R.error(msg=f"搜索失败: {e}")
 
 
 @router.get("/library")

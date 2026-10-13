@@ -26,6 +26,7 @@ import { useTaskStore } from '@/store/taskStore'
 import { update_note } from '@/services/note'
 import { normalizeMathDelimiters } from '@/utils/math'
 import { scrollToHeading } from '@/utils/heading'
+import { exportNoteAsHtml } from '@/utils/exportHtml'
 import { noteStyles, taskStatusLabels } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/NotePage/components/MarkdownHeader.tsx'
 import MarkmapEditor from '@/pages/NotePage/components/MarkmapComponent.tsx'
@@ -537,6 +538,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       toast.error('复制失败')
     }
   }
+  const handleExportHtml = async () => {
+    try {
+      await exportNoteAsHtml(bodyRef.current, noteTitle)
+      toast.success('已导出离线 HTML')
+    } catch (e) {
+      console.error('导出 HTML 失败：', e)
+      toast.error('导出失败')
+    }
+  }
+
   const handleDownload = () => {
     const task = getCurrentTask()
     const name = task?.audioMeta.title || 'note'
@@ -717,6 +728,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         noteStyles={noteStyles}
         onCopy={handleCopy}
         onDownload={handleDownload}
+        onExportHtml={handleExportHtml}
+        onPrint={() => window.print()}
         createAt={createTime}
         dockTab={dockTab}
         onDockTab={setDockTab}

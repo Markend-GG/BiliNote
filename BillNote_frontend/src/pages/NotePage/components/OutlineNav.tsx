@@ -117,7 +117,7 @@ export function OutlineNav({ containerRef, contentKey, collapsed, onCollapsedCha
 
   if (collapsed) {
     return (
-      <div className="flex w-7 shrink-0 flex-col items-center border-l bg-white py-2">
+      <div className="flex w-7 shrink-0 flex-col items-center border-l bg-white py-2 print:hidden">
         <button
           type="button"
           aria-label="展开章节导航"
@@ -132,7 +132,7 @@ export function OutlineNav({ containerRef, contentKey, collapsed, onCollapsedCha
   }
 
   return (
-    <aside className="flex w-[200px] shrink-0 flex-col border-l bg-white">
+    <aside className="flex w-[200px] shrink-0 flex-col border-l bg-white print:hidden">
       <div className="flex h-10 shrink-0 items-center justify-between border-b px-3">
         <span className="text-sm font-medium text-neutral-700">章节</span>
         <button

@@ -13,8 +13,10 @@ import {
   FileText,
   Folder,
   MessageSquare,
+  FileCode2,
   MoreHorizontal,
   Pencil,
+  Printer,
   RefreshCw,
   Trash2,
 } from 'lucide-react'
@@ -65,6 +67,8 @@ interface NoteHeaderProps {
   onDeleteVersion?: () => void
   canDeleteVersion?: boolean
   onRegenerate?: () => void
+  onExportHtml?: () => void
+  onPrint?: () => void
 
   /** 两级导航：返回书架、所在文件夹、同文件夹的其他笔记 */
   title: string
@@ -107,6 +111,8 @@ export function MarkdownHeader({
   onDeleteVersion,
   canDeleteVersion,
   onRegenerate,
+  onExportHtml,
+  onPrint,
   title,
   onBack,
   folderName,
@@ -204,6 +210,26 @@ export function MarkdownHeader({
       icon: <Download className="h-4 w-4" />,
       onSelect: onDownload,
     },
+    ...(onExportHtml
+      ? [
+          {
+            key: 'download-html',
+            label: '导出 HTML（离线单文件）',
+            icon: <FileCode2 className="h-4 w-4" />,
+            onSelect: onExportHtml,
+          },
+        ]
+      : []),
+    ...(onPrint
+      ? [
+          {
+            key: 'print',
+            label: '打印 / 存为 PDF',
+            icon: <Printer className="h-4 w-4" />,
+            onSelect: onPrint,
+          },
+        ]
+      : []),
     {
       key: 'mindmap',
       label: viewMode === 'map' ? '返回笔记视图' : '思维导图',
@@ -237,7 +263,7 @@ export function MarkdownHeader({
   ]
 
   return (
-    <div className="sticky top-0 z-20 flex items-center gap-1.5 border-b bg-white/95 px-3 py-2 backdrop-blur-sm">
+    <div className="sticky top-0 z-20 flex items-center gap-1.5 border-b bg-white/95 px-3 py-2 backdrop-blur-sm print:hidden">
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>

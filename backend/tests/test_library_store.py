@@ -44,9 +44,6 @@ from app.services import library_service  # noqa: E402
 NOTE_DIR = pathlib.Path(os.environ["NOTE_OUTPUT_DIR"])
 SHOT_DIR = pathlib.Path(os.environ["OUT_DIR"])
 
-library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
-library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
-
 # 删笔记时会顺带删向量索引；不指到临时目录就会去动真实的 vector_db
 try:
     from app.services import vector_store as _vector_store
@@ -54,6 +51,17 @@ try:
     _vector_store.VECTOR_DB_DIR = os.environ["VECTOR_DB_DIR"]
 except Exception:  # chromadb 不在环境里时跳过，delete_note_artifacts 自己会吞掉异常
     pass
+
+
+def _point_library_service_at_tmp():
+    """library_service 的路径常量在 import 时就读死了 env。
+
+    单进程跑多个测试模块时，后导入的模块改 env 也影响不了先导入的常量，
+    所以每个用到文件路径的用例在 setUp 里显式重绑，与导入顺序解耦。
+    """
+    library_service.NOTE_OUTPUT_DIR = str(NOTE_DIR)
+    library_service.IMAGE_OUTPUT_DIR = SHOT_DIR
+
 
 init_db()
 atexit.register(shutil.rmtree, _TMP, True)
@@ -199,6 +207,7 @@ class TestLibraryDao(unittest.TestCase):
 
 class TestDeleteNoteArtifacts(unittest.TestCase):
     def setUp(self):
+        _point_library_service_at_tmp()
         shutil.rmtree(NOTE_DIR, ignore_errors=True)
         shutil.rmtree(SHOT_DIR, ignore_errors=True)
         NOTE_DIR.mkdir(parents=True, exist_ok=True)
@@ -243,6 +252,7 @@ class TestDeleteNoteArtifacts(unittest.TestCase):
 
 class TestBackfill(unittest.TestCase):
     def setUp(self):
+        _point_library_service_at_tmp()
         shutil.rmtree(NOTE_DIR, ignore_errors=True)
         NOTE_DIR.mkdir(parents=True, exist_ok=True)
         engine = get_engine()

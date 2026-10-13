@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from .routers import note, provider, model, config, chat, library
+from .routers import note, provider, model, config, chat, library, storage
 
 
 
@@ -12,5 +12,6 @@ def create_app(lifespan) -> FastAPI:
     app.include_router(config.router,  prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(library.router, prefix="/api")
+    app.include_router(storage.router, prefix="/api")
 
     return app

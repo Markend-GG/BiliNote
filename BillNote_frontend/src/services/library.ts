@@ -88,3 +88,16 @@ export const syncVersions = (taskId: string, versions: VersionUpload[]) =>
 
 export const deleteServerVersion = (taskId: string, verId: string) =>
   request.delete<any, null>(`/library/versions/${taskId}/${verId}`)
+
+export interface SearchHit {
+  task_id: string
+  heading: string
+  /** 摘要里 \x01/\x02 之间是命中词，前端切分后渲染高亮，不能直接当 HTML 用 */
+  snippet: string
+  title?: string | null
+  folder_id?: string | null
+}
+
+/** 正文全文搜索（FTS5 trigram，中文子串可命中） */
+export const searchNotes = (q: string) =>
+  request.get<any, SearchHit[]>('/search', { params: { q } })

@@ -26,7 +26,7 @@ interface ReferenceDockProps {
  */
 export function ReferenceDock({ tab, onTab, taskId, wide, onResize, onClose }: ReferenceDockProps) {
   return (
-    <div className="flex h-full min-w-0 flex-col bg-white">
+    <div className="flex h-full min-w-0 flex-col bg-white print:hidden">
       <div role="tablist" aria-label="参照面板" className="flex h-10 shrink-0 items-center gap-1 border-b px-2">
         {(['transcript', 'chat'] as const).map(key => (
           <button

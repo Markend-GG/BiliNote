@@ -1,6 +1,7 @@
 import {
   BotMessageSquare,
   Captions,
+  HardDrive,
   HardDriveDownload,
   Info,
   Activity,
@@ -34,6 +35,12 @@ const Menu = () => {
     //   icon: <SquareChevronRight />,
     //   path: '/settings/prompt',
     // },
+    {
+      id: 'storage',
+      name: '存储与清理',
+      icon: <HardDrive />,
+      path: '/settings/storage',
+    },
     {
       id: 'monitor',
       name: '部署监控',

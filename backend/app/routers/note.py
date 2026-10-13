@@ -14,7 +14,7 @@ from pydantic import BaseModel, validator, field_validator, model_validator
 from dataclasses import asdict
 
 from app.db.video_task_dao import get_task_by_video
-from app.db import library_dao
+from app.db import library_dao, search_dao
 from app.services.library_service import delete_note_artifacts
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
@@ -244,6 +244,10 @@ def _run_note_task_inner(task_id: str, video_url: str, platform: str, quality: D
         model_name=model_name,
         created_at_ms=int(time.time() * 1000),
     )
+    try:
+        search_dao.rebuild_note(task_id, note.markdown)
+    except Exception as e:
+        logger.warning(f"全文索引失败（不影响笔记）: {e}")
 
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
@@ -302,6 +306,10 @@ def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
             f.write(data.markdown)
 
         background_tasks.add_task(_reindex_note, data.task_id)
+        try:
+            search_dao.rebuild_note(data.task_id, data.markdown)
+        except Exception as e:
+            logger.warning(f"全文索引失败（不影响保存）: {e}")
         # 编辑保存也产生一个版本（风格/模型沿用上一版，编辑不改这两样）
         prev = library_dao.latest_version(data.task_id)
         ver = library_dao.add_version(
