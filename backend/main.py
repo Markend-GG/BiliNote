@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[startup 2/5] 笔记库回填失败（不影响启动）: {e}")
 
+        # 孤儿截图自动清理（后台线程：首次延迟 90s，之后每 24h 一次）。
+        # 必须排在回填之后——回填会把截图清单补写进老笔记的 json，引用集完整了再判孤儿才不会误删
+        from app.services.cleanup_service import start_scheduler
+        try:
+            start_scheduler()
+        except Exception as e:
+            logger.warning(f"[startup 2/5] 自动清理线程启动失败（不影响启动）: {e}")
+
         logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
         # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
         # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { RefreshCw, Trash2 } from 'lucide-react'
+import { Clock, RefreshCw, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -11,7 +13,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { deleteOrphans, scanStorage, type StorageScan } from '@/services/storage'
+import {
+  deleteOrphans,
+  getCleanupStatus,
+  runCleanup,
+  saveCleanupPolicy,
+  scanStorage,
+  type CleanupPolicy,
+  type CleanupStatus,
+  type StorageScan,
+} from '@/services/storage'
 import { formatDate } from '@/pages/LibraryPage/utils'
 
 const formatBytes = (bytes: number) => {
@@ -35,12 +46,23 @@ const StoragePage = () => {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState(false)
+  const [cleanup, setCleanup] = useState<CleanupStatus | null>(null)
+  // 表单用草稿态：改了数字还没保存时，不该让界面上的"当前策略"跟着变
+  const [draft, setDraft] = useState<CleanupPolicy>({
+    enabled: true,
+    keep_days: 14,
+    max_orphan_mb: 800,
+  })
+  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [running, setRunning] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await scanStorage()
+      const [data, status] = await Promise.all([scanStorage(), getCleanupStatus()])
       setScan(data)
+      setCleanup(status)
+      setDraft(status.policy)
       setSelected(new Set())
       setError(false)
     } catch {
@@ -54,6 +76,36 @@ const StoragePage = () => {
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  const handleSavePolicy = async () => {
+    setSavingPolicy(true)
+    try {
+      const policy = await saveCleanupPolicy(draft)
+      setCleanup(prev => (prev ? { ...prev, policy } : prev))
+      toast.success('自动清理设置已保存')
+    } catch {
+      // 拦截器已提示
+    } finally {
+      setSavingPolicy(false)
+    }
+  }
+
+  const handleRunNow = async () => {
+    setRunning(true)
+    try {
+      const res = await runCleanup()
+      toast.success(
+        res.deleted
+          ? `已清理 ${res.deleted} 张孤儿截图，释放 ${formatBytes(res.freed_bytes)}`
+          : '没有需要清理的孤儿截图',
+      )
+      await refresh()
+    } catch {
+      // 拦截器已提示
+    } finally {
+      setRunning(false)
+    }
+  }
 
   const orphans = useMemo(() => scan?.orphans ?? [], [scan])
   const allSelected = orphans.length > 0 && selected.size === orphans.length
@@ -136,6 +188,69 @@ const StoragePage = () => {
               <div className="mt-1 text-xl font-semibold">{formatBytes(scan.vector_db_bytes)}</div>
               <div className="text-muted-foreground mt-1 text-xs">删除笔记时会自动清理对应索引</div>
             </div>
+          </div>
+
+          <div className="rounded-lg border bg-white p-3">
+            <div className="flex items-center gap-2">
+              <Clock className="h-4 w-4 shrink-0 text-neutral-500" />
+              <span className="text-sm font-medium">自动清理孤儿截图</span>
+              <span className="text-muted-foreground text-xs">后台每天检查一次</span>
+              <Switch
+                className="ml-auto"
+                checked={draft.enabled}
+                onCheckedChange={enabled => setDraft(d => ({ ...d, enabled }))}
+                aria-label="启用自动清理"
+              />
+            </div>
+            <p className="text-muted-foreground mt-1.5 text-xs leading-relaxed">
+              只清理<b className="text-neutral-700">没有任何笔记引用</b>的截图。笔记里正在用的图既不计入容量、
+              也永远不会被删；生成中的笔记有 30 分钟保护期。填 0 表示关掉对应那条规则。
+            </p>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+              <label className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">孤儿超过</span>
+                <Input
+                  type="number"
+                  min={0}
+                  value={draft.keep_days}
+                  onChange={e => setDraft(d => ({ ...d, keep_days: Number(e.target.value) || 0 }))}
+                  className="h-7 w-16 text-xs"
+                  aria-label="保留天数"
+                />
+                <span className="text-muted-foreground">天自动删</span>
+              </label>
+              <label className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">孤儿总量超过</span>
+                <Input
+                  type="number"
+                  min={0}
+                  value={draft.max_orphan_mb}
+                  onChange={e => setDraft(d => ({ ...d, max_orphan_mb: Number(e.target.value) || 0 }))}
+                  className="h-7 w-20 text-xs"
+                  aria-label="孤儿总量上限 MB"
+                />
+                <span className="text-muted-foreground">MB 时从最旧的开始删</span>
+              </label>
+              <div className="ml-auto flex gap-2">
+                <Button variant="outline" size="sm" onClick={handleSavePolicy} disabled={savingPolicy}>
+                  {savingPolicy ? '保存中…' : '保存设置'}
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleRunNow} disabled={running}>
+                  {running ? '清理中…' : '立即清理一次'}
+                </Button>
+              </div>
+            </div>
+            {cleanup?.last_run && (
+              <div className="text-muted-foreground mt-2.5 border-t pt-2 text-xs">
+                上次清理：{formatDate(cleanup.last_run.at)}
+                （{cleanup.last_run.reason === 'manual' ? '手动' : '定时'}）· 删除{' '}
+                {cleanup.last_run.deleted} 张（超期 {cleanup.last_run.aged_deleted} / 超容量{' '}
+                {cleanup.last_run.over_cap_deleted}）· 释放{' '}
+                {formatBytes(cleanup.last_run.freed_bytes)} · 剩余孤儿{' '}
+                {cleanup.last_run.remaining_orphans} 张 /{' '}
+                {formatBytes(cleanup.last_run.remaining_orphan_bytes)}
+              </div>
+            )}
           </div>
 
           <div className="rounded-lg border bg-white">

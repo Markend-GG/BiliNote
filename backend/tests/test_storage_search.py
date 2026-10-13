@@ -20,7 +20,7 @@ ENV = IsolatedEnv("bilinote-storage-test-")
 
 from app.db import library_dao, search_dao  # noqa: E402
 from app.db.init_db import init_db  # noqa: E402
-from app.services import library_service  # noqa: E402
+from app.services import cleanup_service, library_service  # noqa: E402
 
 NOTE_DIR = ENV.note_dir
 SHOT_DIR = ENV.shot_dir
@@ -197,6 +197,85 @@ class TestStorageScan(unittest.TestCase):
         self.assertNotIn(broken, [o["name"] for o in library_service.scan_storage()["orphans"]])
         self.assertEqual(library_service.delete_orphan_screenshots([broken])["deleted"], [])
         self.assertTrue((SHOT_DIR / broken).exists())
+
+
+class TestAutoCleanup(unittest.TestCase):
+    """自动清理的两条规则（超期 / 超容量）都只作用于孤儿截图。
+
+    被笔记引用的截图不是"靠阈值保住"的，而是压根不进候选集——这条必须有测试钉住，
+    因为容量规则算的是孤儿总量，把被引用的大文件算进去就会引发连锁误删。
+    """
+
+    USED_OLD = "screenshot_020_aaaaaaaa-0000-4000-8000-00000000aa01.jpg"
+    ORPHAN_OLD = "screenshot_021_aaaaaaaa-0000-4000-8000-00000000aa02.jpg"
+    ORPHAN_MID = "screenshot_022_aaaaaaaa-0000-4000-8000-00000000aa03.jpg"
+    ORPHAN_NEW = "screenshot_023_aaaaaaaa-0000-4000-8000-00000000aa04.jpg"
+
+    def setUp(self):
+        ENV.bind()
+        ENV.reset_dirs()
+        library_service._ORPHAN_GRACE_MS = 0  # 宽限期另有专测，这里要把规则单独验清楚
+        for tid in _FTS_IDS:
+            search_dao.delete_note(tid)
+        _write_note(NOTE_1, f"## 节\n![](/static/screenshots/{self.USED_OLD})\n" + "正" * 40,
+                    manifest=[self.USED_OLD])
+        for name in (self.USED_OLD, self.ORPHAN_OLD, self.ORPHAN_NEW):
+            (SHOT_DIR / name).write_bytes(b"x" * 100)
+        self._age(self.USED_OLD, 30)
+        self._age(self.ORPHAN_OLD, 30)
+
+    @staticmethod
+    def _age(name: str, days: int) -> None:
+        old = time.time() - days * 86400
+        os.utime(SHOT_DIR / name, (old, old))
+
+    def test_age_rule_only_touches_orphans(self):
+        cleanup_service.save_policy({"enabled": True, "keep_days": 14, "max_orphan_mb": 0})
+        stats = cleanup_service.run_auto_cleanup("schedule")
+        self.assertEqual(stats["aged_deleted"], 1)
+        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists())
+        self.assertTrue((SHOT_DIR / self.ORPHAN_NEW).exists(), "没超期的孤儿不该被删")
+        self.assertTrue((SHOT_DIR / self.USED_OLD).exists(), "被笔记引用的截图绝不能删")
+
+    def test_cap_rule_counts_orphan_bytes_only(self):
+        # 3 张 400KB 孤儿 = 1.2MB，上限 1MB → 只需删掉最旧的那张就达标；
+        # 另有一张 5MB 的【被引用】截图，若被算进容量会引发连锁误删
+        for name in (self.ORPHAN_OLD, self.ORPHAN_MID, self.ORPHAN_NEW):
+            (SHOT_DIR / name).write_bytes(b"x" * 400 * 1024)
+        (SHOT_DIR / self.USED_OLD).write_bytes(b"x" * 5 * 1024 * 1024)
+        self._age(self.ORPHAN_OLD, 30)
+        self._age(self.ORPHAN_MID, 10)
+        cleanup_service.save_policy({"enabled": True, "keep_days": 0, "max_orphan_mb": 1})
+
+        stats = cleanup_service.run_auto_cleanup("schedule")
+
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(stats["over_cap_deleted"], 1)
+        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists(), "最旧的孤儿先走")
+        self.assertTrue((SHOT_DIR / self.ORPHAN_MID).exists())
+        self.assertTrue((SHOT_DIR / self.ORPHAN_NEW).exists())
+        self.assertTrue((SHOT_DIR / self.USED_OLD).exists(), "被引用的大图既不计入容量也不许删")
+        self.assertLessEqual(stats["remaining_orphan_bytes"], 1024 * 1024)
+
+    def test_switch_off_blocks_schedule_but_not_manual(self):
+        cleanup_service.save_policy({"enabled": False, "keep_days": 14, "max_orphan_mb": 0})
+        self.assertEqual(cleanup_service.run_auto_cleanup("schedule")["skipped"], "disabled")
+        self.assertTrue((SHOT_DIR / self.ORPHAN_OLD).exists())
+        # 界面上点"立即清理"是明确意图，不受开关限制
+        self.assertEqual(cleanup_service.run_auto_cleanup("manual")["deleted"], 1)
+        self.assertFalse((SHOT_DIR / self.ORPHAN_OLD).exists())
+
+    def test_policy_and_last_run_persist_outside_repo(self):
+        cleanup_service.save_policy({"keep_days": 7, "max_orphan_mb": 500})
+        self.assertEqual(cleanup_service.load_policy()["keep_days"], 7)
+        cleanup_service.run_auto_cleanup("manual")
+        status = cleanup_service.get_status()
+        self.assertEqual(status["policy"]["max_orphan_mb"], 500)
+        self.assertEqual(status["last_run"]["reason"], "manual")
+        self.assertEqual(status["last_run"]["deleted"], 1)
+        # 策略文件必须落在临时目录：写进仓库的 backend/config/ 就是又一次测试污染
+        self.assertIn(str(ENV.tmp), cleanup_service.POLICY_PATH)
+        self.assertTrue(pathlib.Path(cleanup_service.POLICY_PATH).is_file())
 
 
 if __name__ == "__main__":

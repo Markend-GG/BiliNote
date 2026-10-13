@@ -102,6 +102,13 @@ class IsolatedEnv:
         library_service.NOTE_OUTPUT_DIR = str(self.note_dir)
         library_service.IMAGE_OUTPUT_DIR = self.shot_dir
         try:
+            from app.services import cleanup_service
+
+            # 策略文件默认写 config/storage_cleanup.json（相对 CWD），不重绑就会写进仓库
+            cleanup_service.POLICY_PATH = str(self.tmp / "config" / "storage_cleanup.json")
+        except Exception:
+            pass
+        try:
             from app.services import vector_store
 
             vector_store.VECTOR_DB_DIR = str(self.vector_dir)

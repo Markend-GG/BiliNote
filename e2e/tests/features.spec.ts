@@ -85,3 +85,23 @@ test('点转写行会把正文滚到对应章节', async ({ page }) => {
   const after = await vp.evaluate(el => el.scrollTop)
   expect(after).toBeGreaterThan(before)
 })
+
+test('存储页能改自动清理策略并立即执行', async ({ page }) => {
+  await page.goto('/settings/storage')
+  const main = page.getByRole('main')
+  await expect(main.getByText('自动清理孤儿截图')).toBeVisible()
+  // 开关默认开着；策略存到服务端后刷新页面要还在
+  await expect(main.getByLabel('启用自动清理')).toBeVisible()
+  await main.getByLabel('保留天数').fill('14')
+  await main.getByLabel('孤儿总量上限 MB').fill('800')
+  await main.getByRole('button', { name: '保存设置' }).click()
+  await expect(page.getByText('自动清理设置已保存')).toBeVisible()
+
+  await page.reload()
+  await expect(main.getByLabel('保留天数')).toHaveValue('14')
+  await expect(main.getByLabel('孤儿总量上限 MB')).toHaveValue('800')
+
+  // 手动触发一次：14 天 / 800MB 的阈值下现存孤儿都不满足条件，所以断言"跑过并留下记录"而不是删除数量
+  await main.getByRole('button', { name: '立即清理一次' }).click()
+  await expect(main.getByText(/上次清理：/)).toBeVisible({ timeout: 30000 })
+})
