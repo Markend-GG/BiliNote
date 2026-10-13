@@ -102,6 +102,13 @@ class IsolatedEnv:
         library_service.NOTE_OUTPUT_DIR = str(self.note_dir)
         library_service.IMAGE_OUTPUT_DIR = self.shot_dir
         try:
+            from app.services import note_index
+
+            # 状态文件写在这里；不重绑就会往仓库里的 note_results/ 写
+            note_index.NOTE_OUTPUT_DIR = str(self.note_dir)
+        except Exception:
+            pass
+        try:
             from app.services import cleanup_service
 
             # 策略文件默认写 config/storage_cleanup.json（相对 CWD），不重绑就会写进仓库

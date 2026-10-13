@@ -63,4 +63,9 @@ test('新建笔记双击也只发一次提交请求', async ({ page }) => {
     throw new Error(`没有发出提交请求。对话框内容：${text}`)
   }
   expect(posts.length, `双击发出了 ${posts.length} 次提交请求`).toBe(1)
+
+  // 提交完留在书架（不把人锁进流程页），并且立刻多出一张"生成中"的卡片
+  await expect(page).toHaveURL(/\/$/)
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText(/排队中|生成中/).first()).toBeVisible({ timeout: 8000 })
 })

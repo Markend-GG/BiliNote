@@ -30,6 +30,7 @@ from app.models.model_config import ModelConfig
 from app.models.notes_model import AudioDownloadResult, NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.constant import SUPPORT_PLATFORM_MAP
+from app.services.note_index import write_status_file
 from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
@@ -100,10 +101,39 @@ class NoteGenerator:
         self.model_size: str = config_manager.get_whisper_model_size()
         self.device: Optional[str] = None
         self.transcriber_type: str = config_manager.get_transcriber_type()
-        self.transcriber: Transcriber = self._init_transcriber()
+        # 转写器懒加载：构造 NoteGenerator 不再把 Whisper 模型压进显存（实测 4.7s，冷启动 8.4s）。
+        # 提交接口只要写状态文件，后台任务也是先解析/下载/抽帧，好几分钟内用不到转写器
+        self._transcriber: Optional[Transcriber] = None
+        self._transcriber_lock = threading.Lock()
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
         logger.info("NoteGenerator 初始化完成")
+
+    @property
+    def transcriber(self) -> Transcriber:
+        """按需创建（双检锁）：模型上显存很贵，不该在构造时就付。"""
+        if self._transcriber is None:
+            with self._transcriber_lock:
+                if self._transcriber is None:
+                    self._transcriber = self._init_transcriber()
+        return self._transcriber
+
+    def _warm_up_transcriber_async(self) -> None:
+        """后台线程预加载模型，让它和"取字幕 + 下载音视频 + 抽帧"这几分钟并行。
+
+        只在确实要转写时调用（字幕/转写缓存命中就没必要白占 2.3GB 显存）；
+        预热失败也不影响流程——懒加载属性在真正转写时会再试一次。
+        """
+        if self._transcriber is not None:
+            return
+
+        def _warm() -> None:
+            try:
+                _ = self.transcriber
+            except Exception as e:
+                logger.warning(f"转写器预热失败（转写时会重新加载）: {e}")
+
+        threading.Thread(target=_warm, name="transcriber-warmup", daemon=True).start()
 
 
     # ---------------- 公有方法 ----------------
@@ -179,6 +209,11 @@ class NoteGenerator:
                     logger.info(f"已从缓存加载转写结果，共 {len(segments)} 段")
                 except Exception as e:
                     logger.warning(f"加载转写缓存失败: {e}")
+
+            # 缓存没有 → 大概率要本地转写：让模型加载与"取平台字幕 + 下载 + 抽帧"并行，
+            # 别串在关键路径上。（万一平台字幕命中，这份显存由闲置回收线程在 10 分钟后释放）
+            if transcript is None:
+                self._warm_up_transcriber_async()
 
             # 缓存没有，尝试获取平台字幕
             if transcript is None:
@@ -353,36 +388,9 @@ class NoteGenerator:
         :param status: TaskStatus 枚举或自定义状态字符串
         :param message: 可选消息，用于记录失败原因等
         """
-        if not task_id:
-            return
-
-        NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-        print(f"写入状态文件: {status_file} 当前状态: {status}")
-        data = {"status": status.value if isinstance(status, TaskStatus) else status}
-        if message:
-            data["message"] = message
-
-        try:
-            # First create a temporary file
-            temp_file = status_file.with_suffix('.tmp')
-
-            # Write to temporary file
-            with temp_file.open('w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            # Atomic rename operation
-            temp_file.replace(status_file)
-
-            print(f"状态文件写入成功: {status_file}")
-        except Exception as e:
-            logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")
-            # Try to write error to file directly as fallback
-            try:
-                with status_file.open('w', encoding='utf-8') as f:
-                    f.write(f"Error writing status: {str(e)}")
-            except:
-                logger.error(f"写入错误  {e}")
+        # 实现挪到 note_index.write_status_file：路由层也要写状态（提交时的 PENDING），
+        # 而它不该为此构造一个 NoteGenerator（那会把 Whisper 模型加载进显存）
+        write_status_file(task_id, status, message)
 
     def _handle_exception(self, task_id, exc):
         logger.error(f"任务异常 (task_id={task_id})", exc_info=True)

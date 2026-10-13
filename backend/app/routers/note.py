@@ -18,7 +18,7 @@ from app.db import library_dao
 from app.db.video_task_dao import get_task_by_video
 from app.db import search_dao
 from app.services.library_service import delete_note_artifacts
-from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file
+from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file, write_status_file
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
@@ -380,8 +380,11 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             logger.warning(f"同一视频同一风格的任务已在生成中（{duplicate_of}），忽略这次重复提交")
             return R.success({"task_id": duplicate_of, "deduped": True})
 
-        # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        # 统一先写入 PENDING，表示已进入队列等待串行执行。
+        # 这里绝不能用 NoteGenerator()._update_status()：那个构造函数会把 Whisper 模型
+        # 加载进显存（实测 4.7~8.4s），用户点完「生成笔记」就得干等，超过 10 分钟没生成时
+        # 更是必然撞上（闲置自动卸载后又要重新加载）。写状态文件用轻量函数就够了。
+        write_status_file(task_id, TaskStatus.PENDING)
         # 同步登记进笔记库索引，这样"生成中"的笔记立刻出现在书架页上
         _index_note(task_id, TaskStatus.PENDING.value, platform=data.platform, form_data=_form_snapshot(data))
 

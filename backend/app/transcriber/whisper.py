@@ -52,6 +52,7 @@ class WhisperTranscriber(Transcriber):
         self.model_size = model_size
 
         model_dir = get_model_dir("whisper")
+        self._model_dir = model_dir
         try:
             self.model = self._build_model(model_size, model_dir)
         except Exception as e:
@@ -59,6 +60,17 @@ class WhisperTranscriber(Transcriber):
             logger.warning(f"加载 whisper-{model_size} 失败：{e}；清理 cache 后重新下载")
             self._purge_cache(model_dir, model_size)
             self.model = self._build_model(model_size, model_dir)
+
+    def _ensure_model(self) -> WhisperModel:
+        """模型可能已被闲置回收线程卸载（unload 会把 self.model 置 None），按需重建。
+
+        长视频的下载 + 抽帧可能超过闲置阈值（默认 600s），而实例一直被任务持有，
+        等真要转写时模型已经没了——直接用就是 AttributeError: 'NoneType'。
+        """
+        if self.model is None:
+            logger.info("Whisper 模型已被闲置回收，转写前重新加载")
+            self.model = self._build_model(self.model_size, self._model_dir)
+        return self.model
 
     def _build_model(self, model_size: str, model_dir: str) -> WhisperModel:
         # resolve 把模型名映射成可加载标识：内置 size→Systran repo_id、自定义映射、
@@ -124,7 +136,7 @@ class WhisperTranscriber(Transcriber):
     def transcript(self, file_path: str) -> TranscriptResult:
         try:
 
-            segments_raw, info = self.model.transcribe(file_path)
+            segments_raw, info = self._ensure_model().transcribe(file_path)
 
             segments = []
             full_text = ""
@@ -158,8 +170,9 @@ class WhisperTranscriber(Transcriber):
     def unload(self) -> None:
         """释放显存：丢掉 CTranslate2 模型对象，下次 get_transcriber 会重新加载（约 8 秒）。
 
-        由 transcriber_provider 的闲置回收线程调用；正在跑的任务自己还持有实例引用，
-        所以卸载不会影响进行中的转写。
+        由 transcriber_provider 的闲置回收线程调用。注意正在跑的任务持有的是**实例**引用，
+        self.model 一样会被置 None，所以 transcript() 走 _ensure_model() 按需重建，
+        不能让调用方直接摸 self.model。
         """
         model, self.model = self.model, None
         if model is not None:

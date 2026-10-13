@@ -31,7 +31,9 @@ export const generateNote = async (data: GenerateNotePayload): Promise<GenerateN
     request.post<any, GenerateNoteResult>('/generate_note', data, { timeout: SUBMIT_TIMEOUT })
   const announce = (res: GenerateNoteResult) => {
     toast.success(
-      res?.deduped ? '这个视频的同风格笔记正在生成中，已接回那个任务' : '笔记生成任务已提交！',
+      res?.deduped
+        ? '这个视频的同风格笔记正在生成中，书架卡片会显示进度'
+        : '已开始生成，书架上的卡片会显示进度（可以点进去看，也可以先做别的）',
     )
     return res
   }

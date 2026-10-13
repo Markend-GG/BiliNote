@@ -86,5 +86,61 @@ class TestDuplicateSubmitGuard(unittest.TestCase):
         self.assertIsNot(note_service._download_lock("u1"), note_service._download_lock("u2"))
 
 
+class TestSubmitPathStaysLight(unittest.TestCase):
+    """提交接口不许构造 NoteGenerator。
+
+    它的构造函数会把 Whisper 模型压进显存（实测热态 4.7s、冷启动 8.4s），而提交只需要写一个
+    PENDING 状态文件。叠加"闲置 600s 自动卸载显存"之后，超过 10 分钟没生成，用户点一次
+    「生成笔记」就要干等这么久——旧的 10s 请求超时正好卡在这条线上，于是出现
+    "界面报错、后台其实在跑"，用户再点一次就把同一个视频生成两遍。
+    """
+
+    def setUp(self):
+        ENV.bind()
+        ENV.reset_dirs()
+
+    def tearDown(self):
+        note_router._inflight_keys.clear()
+        note_router._key_by_task.clear()
+        note_router._running_tasks.clear()
+
+    def test_generate_note_only_writes_status(self):
+        import json as _json
+
+        from fastapi import BackgroundTasks
+        from app.services.transcriber_config_manager import TranscriberConfigManager
+
+        constructions = []
+
+        class SpyGenerator:
+            def __init__(self):
+                constructions.append(1)
+
+        req = note_router.VideoRequest(
+            video_url="https://www.bilibili.com/video/BV1PYTD6uEEY",
+            platform="bilibili",
+            quality="medium",
+            model_name="m",
+            provider_id="p",
+            style="minimal",
+        )
+        with patch.object(note_router, "NoteGenerator", SpyGenerator), \
+                patch.object(TranscriberConfigManager, "is_model_ready",
+                             lambda self: {"ready": True, "transcriber_type": "fast-whisper",
+                                           "model_size": "tiny", "downloading": False}):
+            response = note_router.generate_note(req, BackgroundTasks())
+
+        self.assertEqual(constructions, [], "提交路径构造了 NoteGenerator（会顺带把模型加载进显存）")
+
+        body = _json.loads(response.body)
+        self.assertEqual(body["code"], 0)
+        task_id = body["data"]["task_id"]
+        status_file = ENV.note_dir / f"{task_id}.status.json"
+        self.assertTrue(status_file.is_file(), "PENDING 状态文件没写出来，前端轮询会看不到任务")
+        self.assertEqual(_json.loads(status_file.read_text(encoding="utf-8"))["status"], "PENDING")
+        # 后台任务只是排队，测试里不该真的跑起来
+        self.assertNotIn(task_id, note_router._running_tasks)
+
+
 if __name__ == "__main__":
     unittest.main()

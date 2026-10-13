@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 import { useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { ArrowRight } from 'lucide-react'
+import { ArrowLeft, ArrowRight } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -333,14 +333,31 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   // 编辑模式：解析草稿里的图片引用，生成缩略图列表（便于直观识别重复图片并删除）
   if (status === 'loading') {
     return (
-      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
-        <StepBar steps={steps} currentStep={taskStatus} />
-        <Loading />
-        <div className="text-center text-sm">
-          <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
-          <p className="mt-2 text-xs text-neutral-500">
-            长视频要抽帧并分批送给模型，可能需要几分钟；按钮已锁定，无需重复点击
-          </p>
+      <div className="flex h-full w-full flex-col">
+        {/* 生成中也要有出口：这一页以前没有任何返回入口，人被卡在这儿只能刷新或按浏览器后退，
+            很自然就会以为任务没成功、回去再新建一次（同一视频被生成两遍） */}
+        <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+          <Button variant="ghost" size="sm" onClick={() => goShelf(folderId)}>
+            <ArrowLeft className="h-4 w-4" />
+            返回书架
+          </Button>
+          <span className="text-muted-foreground min-w-0 truncate text-xs">
+            {currentTask?.audioMeta?.title ||
+              currentTask?.formData?.video_url ||
+              '新任务'}{' '}
+            · 生成中，可以随时离开这一页
+          </span>
+        </div>
+        <div className="flex flex-1 flex-col items-center justify-center space-y-4 text-neutral-500">
+          <StepBar steps={steps} currentStep={taskStatus} />
+          <Loading />
+          <div className="text-center text-sm">
+            <p className="text-lg font-bold">正在{taskStatusLabels[taskStatus] || '生成笔记'}，请稍候…</p>
+            <p className="text-muted-foreground mt-2 max-w-md text-xs">
+              长视频要抽帧并分批送给模型，可能需要几分钟。任务在后端跑着，
+              回书架做别的事也不影响，完成后那张卡片会变成「已完成」。
+            </p>
+          </div>
         </div>
       </div>
     )

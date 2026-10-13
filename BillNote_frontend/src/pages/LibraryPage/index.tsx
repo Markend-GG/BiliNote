@@ -543,9 +543,10 @@ const LibraryPage = () => {
         open={newNoteOpen}
         onOpenChange={setNewNoteOpen}
         taskId={null}
-        onSubmitted={taskId => {
+        onSubmitted={() => {
+          // 提交成功后留在书架：新卡片带着「生成中」排在最前，想看进度再点进去。
+          // 直接把人扔进流程页等于锁在那一页——用户明确要的是"不影响我做其他操作"
           fetchLibrary()
-          openNote(taskId)
         }}
       />
 

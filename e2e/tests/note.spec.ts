@@ -63,3 +63,55 @@ test('窄屏下 dock 是浮层且带关闭按钮', async ({ page }) => {
   await page.locator('button[aria-label="关闭参照面板"]').click()
   await expect(page.getByRole('tablist')).toBeHidden()
 })
+
+test('生成中的流程页有返回书架的出口', async ({ page }) => {
+  // 伪造一个"生成中"的任务：拦截笔记库与状态接口，不碰真实数据、也不会真跑一次生成。
+  // 回归的是用户明确提的问题——流程页以前没有任何返回入口，人被卡在这一页只能刷新或按
+  // 浏览器后退，很自然会以为任务没成功、回去再新建一次（同一视频就被生成两遍）。
+  const fakeId = 'e2e11111-2222-4222-8222-222222222222'
+  const now = Date.now()
+  await page.route('**/api/library', route =>
+    route.fulfill({
+      json: {
+        code: 0,
+        msg: 'success',
+        data: {
+          folders: [],
+          notes: [
+            {
+              task_id: fakeId,
+              title: null,
+              video_title: '生成中的测试任务',
+              folder_id: null,
+              status: 'PENDING',
+              video_id: 'BV1test',
+              platform: 'bilibili',
+              cover_url: '',
+              duration: 0,
+              created_at: now,
+              updated_at: now,
+              last_opened_at: null,
+              form_data: { video_url: 'https://www.bilibili.com/video/BV1test', platform: 'bilibili' },
+            },
+          ],
+        },
+      },
+    }),
+  )
+  await page.route(`**/api/task_status/${fakeId}`, route =>
+    route.fulfill({
+      json: {
+        code: 0,
+        msg: 'success',
+        data: { status: 'PENDING', message: '任务排队中', task_id: fakeId },
+      },
+    }),
+  )
+
+  await page.goto(`/note/${fakeId}`)
+  await expect(page.getByText(/请稍候/)).toBeVisible({ timeout: 10000 })
+  const back = page.getByRole('button', { name: '返回书架' })
+  await expect(back).toBeVisible()
+  await back.click()
+  await expect(page).toHaveURL(/\/$/)
+})
