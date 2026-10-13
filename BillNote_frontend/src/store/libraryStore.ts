@@ -24,6 +24,8 @@ interface LibraryState {
   setSortMode: (mode: ShelfSortMode) => void
   loaded: boolean
   loading: boolean
+  /** 最近一次拉笔记库失败了：界面要区分"真的没有笔记"和"后端连不上" */
+  loadError: boolean
   fetchVersions: (taskId: string) => Promise<void>
   uploadLocalVersions: (taskId: string, versions: VersionUpload[]) => Promise<boolean>
   removeServerVersion: (taskId: string, verId: string) => Promise<boolean>
@@ -54,6 +56,7 @@ export const useLibraryStore = create<LibraryState>()(
       setSortMode: sortMode => set({ sortMode }),
       loaded: false,
       loading: false,
+      loadError: false,
 
       fetchVersions: async taskId => {
         try {
@@ -93,9 +96,12 @@ export const useLibraryStore = create<LibraryState>()(
             folders: data?.folders ?? [],
             notes: data?.notes ?? [],
             loaded: true,
+            loadError: false,
           })
         } catch {
-          // 后端不可用时保留上一次的数据，界面不至于变成空白书架
+          // 后端不可用时保留上一次的数据，界面不至于变成空白书架；
+          // 只记一个标志位，让页面能提示"连不上"而不是"没有笔记"
+          set({ loadError: true })
         } finally {
           set({ loading: false })
         }

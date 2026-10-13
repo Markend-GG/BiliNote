@@ -67,6 +67,7 @@ const LibraryPage = () => {
   const setSortMode = useLibraryStore(state => state.setSortMode)
   const loaded = useLibraryStore(state => state.loaded)
   const loading = useLibraryStore(state => state.loading)
+  const loadError = useLibraryStore(state => state.loadError)
   const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
     useLibraryStore()
   const removeTask = useTaskStore(state => state.removeTask)
@@ -440,11 +441,13 @@ const LibraryPage = () => {
         {visibleItems.length === 0 ? (
           <EmptyState
             loading={loading && !loaded}
+            offline={loadError && !loaded}
             searching={searching}
             keyword={keyword}
             hasAnyNote={totalNotes > 0}
             onCreate={() => setNewNoteOpen(true)}
             onCreateFolder={() => setPrompt({ kind: 'newFolder' })}
+            onRetry={() => fetchLibrary()}
           />
         ) : viewMode === 'card' ? (
           // 文件夹卡和笔记卡混排在同一个 auto-fill 栅格里（确认过的方案），
@@ -682,21 +685,39 @@ function FilterChip({
 
 function EmptyState({
   loading,
+  offline,
   searching,
   keyword,
   hasAnyNote,
   onCreate,
   onCreateFolder,
+  onRetry,
 }: {
   loading: boolean
+  offline: boolean
   searching: boolean
   keyword: string
   hasAnyNote: boolean
   onCreate: () => void
   onCreateFolder: () => void
+  onRetry: () => void
 }) {
   if (loading) {
     return <p className="text-muted-foreground py-20 text-center text-sm">正在读取笔记库…</p>
+  }
+  // 后端连不上时不能显示"还没有笔记"——那会让人以为笔记没了
+  if (offline) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-20 text-center">
+        <p className="text-lg font-medium text-neutral-700">连不上笔记库</p>
+        <p className="text-muted-foreground max-w-md text-sm">
+          读不到后端的笔记索引。检查一下 Docker 容器是否在运行，然后重试。
+        </p>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          重试
+        </Button>
+      </div>
+    )
   }
   if (searching) {
     return (

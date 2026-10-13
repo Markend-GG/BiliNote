@@ -25,8 +25,12 @@ export interface ChatStatusResponse {
   status: IndexStatus
 }
 
+// 索引状态和触发索引都是"后台自动"发生的：dock 常驻挂载后，每打开一篇笔记都会打这两个接口。
+// 失败时 ChatPanel 自己会渲染「索引失败，请重试」，全局红 toast 只会变成骚扰（还会和重试按钮的提示重复）。
+const SILENT = { suppressToast: true }
+
 export const indexTask = async (taskId: string): Promise<void> => {
-  return await request.post('/chat/index', { task_id: taskId })
+  return await request.post('/chat/index', { task_id: taskId }, SILENT)
 }
 
 export const askQuestion = async (data: {
@@ -42,5 +46,5 @@ export const askQuestion = async (data: {
 }
 
 export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {
-  return await request.get(`/chat/status?task_id=${taskId}`)
+  return await request.get(`/chat/status?task_id=${taskId}`, SILENT)
 }
