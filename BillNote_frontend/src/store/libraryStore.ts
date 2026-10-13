@@ -71,7 +71,10 @@ export const useLibraryStore = create<LibraryState>()(
         try {
           await api.syncVersions(taskId, versions)
           await get().fetchVersions(taskId)
-          return true
+          // 逐条核对落库结果：接口返回成功但条数对不上时（ver_id 撞唯一约束被整批回滚之类），
+          // 调用方会把浏览器里的存量版本降级成一份正文，那就是真丢了，必须报 false
+          const stored = new Set((get().versionsByTask[taskId] ?? []).map(v => v.ver_id))
+          return versions.every(v => stored.has(v.ver_id))
         } catch {
           return false
         }

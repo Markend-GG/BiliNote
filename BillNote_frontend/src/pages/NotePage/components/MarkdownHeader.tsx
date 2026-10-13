@@ -458,7 +458,7 @@ export function MarkdownHeader({
             <DialogTitle>删除这个版本？</DialogTitle>
             <DialogDescription>
               {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
-              　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
+              　将被永久删除：版本历史存在后端 note_versions 表里，删掉后本机缓存也会同步清除，无法恢复。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -26,6 +26,7 @@ from app import create_app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import library_dao, search_dao  # noqa: E402
+from app.services import library_service  # noqa: E402
 
 
 @asynccontextmanager
@@ -59,6 +60,8 @@ class TestLibraryHttp(unittest.TestCase):
         # 多模块同进程跑时，别的模块会把全局引擎和路径常量换到它自己的临时目录，
         # 每个用例前绑回本模块的
         ENV.bind()
+        # 用例里的文件都是刚写的，孤儿宽限期会让它们全部"太新"而跳过清理
+        library_service._ORPHAN_GRACE_MS = 0
 
     def test_library_shape(self):
         res = client.get("/api/library").json()
@@ -121,6 +124,25 @@ class TestLibraryHttp(unittest.TestCase):
         self.assertEqual(res["data"]["deleted_screenshots"], 1)
         self.assertFalse((NOTE_DIR / f"{task_id}.json").exists())
         self.assertFalse((SHOT_DIR / shot).exists())
+
+    def test_malformed_task_id_is_rejected(self):
+        """task_id 会被拼进文件路径，而 delete_task 现在真删文件：形态不对必须挡在拼路径之前。"""
+        victim = NOTE_DIR.parent / "escaped.json"
+        victim.write_text("{}", encoding="utf-8")
+        try:
+            res = client.post("/api/delete_task", json={"task_id": "../escaped"}).json()
+            self.assertNotEqual(res["code"], 0)
+            self.assertTrue(victim.exists(), "目录外的文件被删了")
+
+            res = client.post(
+                "/api/update_note", json={"task_id": "../escaped", "markdown": "x"}
+            ).json()
+            self.assertNotEqual(res["code"], 0)
+
+            res = client.get("/api/task_status/not-a-uuid").json()
+            self.assertNotEqual(res["code"], 0)
+        finally:
+            victim.unlink(missing_ok=True)
 
     def test_storage_scan_and_delete_guard(self):
         orphan = f"screenshot_008_{uuid.uuid4()}.jpg"

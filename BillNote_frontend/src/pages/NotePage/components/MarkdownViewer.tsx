@@ -72,9 +72,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
   // 版本历史的权威存储在后端 note_versions 表；本地 store 里可能还留着升级前的数组格式，
-  // 由下面的 effect 一次性上传后降级为最新正文串
+  // 由下面的 effect 一次性上传后降级为最新正文串。
+  // 这里只能用 currentTask?.id：taskId 在下面第 100 行才声明，而 selector 是渲染期同步调用的，
+  // 引用它会撞上 TDZ（ReferenceError → 整页白屏），tsc 对闭包里的提前引用不报错。
   const versionsOrNull = useLibraryStore(state =>
-    taskId ? (state.versionsByTask[taskId] ?? null) : null,
+    currentTask?.id ? (state.versionsByTask[currentTask.id] ?? null) : null,
   )
   const versions = versionsOrNull ?? EMPTY_VERSIONS
   const isMultiVersion = versions.length > 1

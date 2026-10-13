@@ -71,6 +71,7 @@ const LibraryPage = () => {
   const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
     useLibraryStore()
   const removeTask = useTaskStore(state => state.removeTask)
+  const dropTasksLocal = useTaskStore(state => state.dropTasksLocal)
   const items = useShelfItems()
 
   const [search, setSearch] = useState('')
@@ -118,8 +119,8 @@ const LibraryPage = () => {
         : activeFolder === 'none'
           ? base.filter(item => !item.folderId)
           : base.filter(item => item.folderId === activeFolder)
-    return [...filtered].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-  }, [items, fuse, keyword, searching, activeFolder])
+    return [...filtered].sort(SORTERS[sortMode].cmp)
+  }, [items, fuse, keyword, searching, activeFolder, sortMode])
 
   // 最近打开只占一行，够跳回去就行，不做成卡片区
   const recent = useMemo(
@@ -156,9 +157,17 @@ const LibraryPage = () => {
   const handleDeleteFolder = async (mode: 'move' | 'delete') => {
     if (!folderToDelete) return
     setDeleting(true)
+    // 连笔记一起删时后端已经清掉产物了，本地 store 里那几条也得摘掉：
+    // 否则 mergeShelfItems 会把它们当"只在浏览器里"的条目重新摆回书架——
+    // 卡片还在、点开却什么都没有，而提示语刚刚才说过"无法恢复"
+    const doomed =
+      mode === 'delete'
+        ? items.filter(item => item.folderId === folderToDelete.id).map(item => item.taskId)
+        : []
     try {
       const ok = await removeFolder(folderToDelete.id, mode)
       if (ok) {
+        if (doomed.length) dropTasksLocal(doomed)
         toast.success(mode === 'delete' ? '已删除文件夹和里面的笔记' : '已删除文件夹，笔记移到未分类')
         if (activeFolder === folderToDelete.id) setActiveFolder(null)
         setFolderToDelete(null)

@@ -101,6 +101,8 @@ interface TaskStore {
   hydrateTask: (payload: HydratePayload) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
+  /** 后端那边已经删干净了（例如整个文件夹连笔记一起删），本地只同步摘掉，不再逐个回调接口 */
+  dropTasksLocal: (ids: string[]) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
@@ -228,6 +230,15 @@ export const useTaskStore = create<TaskStore>()(
         // 不管本地有没有这条都要通知后端：清过浏览器缓存时本地记录已经没了，
         // 但 note_results 里的文件和截图还在盘上
         await deleteNote({ task_id: id })
+      },
+
+      dropTasksLocal: ids => {
+        const drop = new Set(ids)
+        set(state => ({
+          tasks: state.tasks.filter(task => !drop.has(task.id)),
+          currentTaskId:
+            state.currentTaskId && drop.has(state.currentTaskId) ? null : state.currentTaskId,
+        }))
       },
 
       adoptServerVersions: (id, latestContent) =>

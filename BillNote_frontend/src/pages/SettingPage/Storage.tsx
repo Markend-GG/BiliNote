@@ -34,6 +34,7 @@ const StoragePage = () => {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -41,6 +42,10 @@ const StoragePage = () => {
       const data = await scanStorage()
       setScan(data)
       setSelected(new Set())
+      setError(false)
+    } catch {
+      // 拦截器已经弹过 toast；这里留个错误态，页面才有"重试"入口而不是一片空白
+      setError(true)
     } finally {
       setLoading(false)
     }
@@ -96,6 +101,19 @@ const StoragePage = () => {
           重新扫描
         </Button>
       </div>
+
+      {!scan && error && (
+        <div className="text-muted-foreground rounded-lg border bg-white p-6 text-center text-sm">
+          扫描失败，后端可能没起来。
+          <button
+            type="button"
+            onClick={refresh}
+            className="text-primary ml-1 cursor-pointer underline"
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       {scan && (
         <>

@@ -327,10 +327,12 @@ def sync_versions(task_id: str, versions: list[dict]) -> int:
         if added:
             logger.info(f"已同步浏览器存量版本 task_id={task_id} 新增 {added} 条")
         return added
-    except Exception as e:
+    except Exception:
         db.rollback()
-        logger.error(f"同步版本失败 task_id={task_id}: {e}")
-        return 0
+        # 必须抛出去：吞掉异常返回 0 的话，接口照样回"成功"，前端会把浏览器里的存量版本
+        # 降级成一份最新正文串——后端一条没存、本地却已经没了，版本历史真的丢了
+        logger.error(f"同步版本失败 task_id={task_id}", exc_info=True)
+        raise
     finally:
         db.close()
 

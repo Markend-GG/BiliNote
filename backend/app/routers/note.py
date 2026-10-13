@@ -1,6 +1,7 @@
 # app/routers/note.py
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -35,6 +36,16 @@ from app.enmus.task_status_enums import TaskStatus
 # from app.services.whisperer import transcribe_audio
 
 router = APIRouter()
+
+# task_id 会被直接拼进文件路径（note_results/{task_id}.json 等），而 delete_task 现在是真删文件、
+# update_note 是真写文件。生产里 task_id 一律是 uuid4，先卡形态，"../../x" 这种穿越就进不了拼路径。
+_TASK_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _valid_task_id(task_id: str) -> bool:
+    return isinstance(task_id, str) and bool(_TASK_ID_RE.fullmatch(task_id))
 
 
 class DeleteTaskRequest(BaseModel):
@@ -216,6 +227,8 @@ def delete_task(data: DeleteTaskRequest):
     这里以前是个空壳（请求体被注释掉、无条件返回成功），界面上的"删除"只是让它从浏览器
     IndexedDB 消失，盘上的 json 和截图一直堆着。
     """
+    if not _valid_task_id(data.task_id):
+        return R.error(msg='task_id 非法')
     try:
         result = delete_note_artifacts(data.task_id)
         return R.success(data=result, msg='删除成功')
@@ -241,6 +254,8 @@ def _reindex_note(task_id: str):
 @router.post('/update_note')
 def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
     """保存用户手动编辑后的笔记内容（同步更新索引，供 AI 问答使用）。"""
+    if not _valid_task_id(data.task_id):
+        return R.error(msg='task_id 非法')
     if not data.markdown.strip():
         return R.error(msg='笔记内容不能为空')
     note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
@@ -352,6 +367,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
 @router.get("/task_status/{task_id}")
 def get_task_status(task_id: str):
+    if not _valid_task_id(task_id):
+        return R.error(msg='task_id 非法')
     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
 

@@ -7,6 +7,7 @@ routers/library.py（删文件夹时连带删笔记）都要用，放任一边�
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,15 @@ VECTOR_DB_DIR = os.getenv("VECTOR_DB_DIR", "vector_db")
 _SCREENSHOT_NAME_RE = re.compile(r"screenshot_\d{3}_[0-9a-fA-F-]{36}\.jpg")
 # note_results 下只有 {task_id}.json 是"一篇笔记"，其余带下划线的都是派生缓存
 _NOTE_FILE_RE = re.compile(r"^[0-9a-fA-F-]{36}\.json$")
+
+# 生成一篇笔记时截图是先落盘的，note json 要等总结写完才有——中间这几分钟里，
+# 新截图在引用集里查不到，会被判成孤儿。给一个宽限期，别把正在生成的笔记的图列出来让人删。
+_ORPHAN_GRACE_MS = 30 * 60 * 1000
+
+
+def _within_grace(mtime_ms: float, now_ms: float) -> bool:
+    """宽限期关掉（<=0）时一律返回 False，测试才能确定性地验引用逻辑本身。"""
+    return _ORPHAN_GRACE_MS > 0 and now_ms - mtime_ms < _ORPHAN_GRACE_MS
 
 # 一篇笔记在 note_results 下的全部文件。
 # _markdown.status.json 是历史遗留：早期有个 bug 会把 SUMMARIZING 状态写到这个文件名上，
@@ -199,8 +209,17 @@ def referenced_screenshot_names() -> set:
         if not _NOTE_FILE_RE.match(path.name):
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            raw = path.read_text(encoding="utf-8")
         except Exception:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # json 坏了（写到一半崩了、老文件损坏）不等于这篇笔记不引用截图。
+            # 直接跳过会把它引用的截图全判成孤儿，用户在存储页一点"清理"就真删了，
+            # 所以退化成对原始文本跑正则——坏 json 里照样能捞到 ![](/static/screenshots/xxx.jpg)
+            refs.update(_SCREENSHOT_NAME_RE.findall(raw))
+            logger.warning(f"笔记 json 解析失败，改用正则提取截图引用: {path.name}")
             continue
         manifest = data.get("screenshots")
         if isinstance(manifest, list):
@@ -215,6 +234,7 @@ def referenced_screenshot_names() -> set:
 def scan_storage() -> dict:
     """设置页「存储」的数据源：截图目录占用、孤儿清单、笔记/向量库体积。"""
     refs = referenced_screenshot_names()
+    now_ms = int(time.time() * 1000)
     files = []
     if IMAGE_OUTPUT_DIR.is_dir():
         for path in IMAGE_OUTPUT_DIR.iterdir():
@@ -226,7 +246,13 @@ def scan_storage() -> dict:
                     "mtime": int(stat.st_mtime * 1000),
                     "referenced": path.name in refs,
                 })
-    orphans = sorted((f for f in files if not f["referenced"]), key=lambda f: -f["size"])
+    orphans = sorted(
+        (
+            f for f in files
+            if not f["referenced"] and not _within_grace(f["mtime"], now_ms)
+        ),
+        key=lambda f: -f["size"],
+    )
     return {
         "screenshots": {
             "count": len(files),
@@ -254,6 +280,14 @@ def delete_orphan_screenshots(names: list) -> dict:
             continue
         target = IMAGE_OUTPUT_DIR / name
         if not target.resolve().is_relative_to(IMAGE_OUTPUT_DIR.resolve()):
+            skipped.append(name)
+            continue
+        # 界面扫完到点删除之间可能正好有新笔记在生成，宽限期内的文件一律不删
+        try:
+            if _within_grace(target.stat().st_mtime * 1000, time.time() * 1000):
+                skipped.append(name)
+                continue
+        except OSError:
             skipped.append(name)
             continue
         if _unlink(target):

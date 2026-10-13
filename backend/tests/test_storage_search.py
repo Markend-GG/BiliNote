@@ -5,8 +5,10 @@
 """
 
 import json
+import os
 import pathlib
 import sys
+import time
 import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -105,6 +107,9 @@ class TestStorageScan(unittest.TestCase):
     def setUp(self):
         ENV.bind()
         ENV.reset_dirs()
+        # 用例里的文件都是刚写的，宽限期会让它们全部"太新"而跳过清理；
+        # 归零后测的是引用逻辑本身，宽限期单独有 test_recent_files_are_protected
+        library_service._ORPHAN_GRACE_MS = 0
         # TestSearchIndex 用完的 s1/s2 索引行要清掉，否则搜索命中数会串
         search_dao.delete_note("s1")
         search_dao.delete_note("s2")
@@ -148,6 +153,37 @@ class TestStorageScan(unittest.TestCase):
         hits = search_dao.search("恩格尔系数")
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["task_id"], "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+
+    def test_recent_files_are_protected(self):
+        """生成中的笔记：截图先落盘、note json 最后才写，这段窗口不能被当成孤儿删掉。"""
+        library_service._ORPHAN_GRACE_MS = 30 * 60 * 1000
+        fresh = "screenshot_004_44444444-4444-4444-8444-444444444444.jpg"
+        (SHOT_DIR / fresh).write_bytes(b"x" * 100)
+        # SHOT_C 确实没人引用，但已经躺了一小时——不在宽限期里，该清
+        old = time.time() - 3600
+        os.utime(SHOT_DIR / SHOT_C, (old, old))
+
+        names = [o["name"] for o in library_service.scan_storage()["orphans"]]
+        self.assertIn(SHOT_C, names)
+        self.assertNotIn(fresh, names)
+
+        # 界面上的清单可能是几分钟前扫的，删除时还得再判一次时间
+        result = library_service.delete_orphan_screenshots([SHOT_C, fresh])
+        self.assertEqual(result["deleted"], [SHOT_C])
+        self.assertIn(fresh, result["skipped"])
+        self.assertTrue((SHOT_DIR / fresh).exists())
+
+    def test_corrupt_note_json_still_protects_its_screenshots(self):
+        """json 坏了不等于这篇笔记不引用截图：整篇跳过会把它引用的图全判成孤儿。"""
+        broken = "screenshot_005_55555555-5555-4555-8555-555555555555.jpg"
+        (SHOT_DIR / broken).write_bytes(b"x" * 100)
+        (NOTE_DIR / f"{NOTE_2}.json").write_text(
+            f'{{"markdown": "![](/static/screenshots/{broken})" 这里 json 断掉了',
+            encoding="utf-8",
+        )
+        self.assertNotIn(broken, [o["name"] for o in library_service.scan_storage()["orphans"]])
+        self.assertEqual(library_service.delete_orphan_screenshots([broken])["deleted"], [])
+        self.assertTrue((SHOT_DIR / broken).exists())
 
 
 if __name__ == "__main__":

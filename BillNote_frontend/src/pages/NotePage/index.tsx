@@ -63,7 +63,10 @@ const NotePage: FC = () => {
     const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
     getTaskStatus(taskId)
       .then(res => {
-        if (!res?.status) {
+        // 后端对"两个文件都不存在"的 id 也返回 PENDING（兜底），只看 status 的话
+        // 已删除的笔记会被恢复成永远转圈的幻影任务，还会被轮询每 3 秒打一次后端。
+        // 真在跑的任务提交时就写进了笔记库索引，所以 indexed 为空 = 后端确实没有这篇
+        if (!res?.status || (!res.result && !indexed)) {
           setRestoreFailed(true)
           return
         }
