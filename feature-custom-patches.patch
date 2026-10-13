@@ -1,8 +1,26 @@
 diff --git a/.dockerignore b/.dockerignore
-index 179b969..2a36425 100644
+index 179b969..08b39eb 100644
 --- a/.dockerignore
 +++ b/.dockerignore
-@@ -33,3 +33,6 @@ build/
+@@ -20,10 +20,17 @@ backend/note_results
+ backend/bin/
+ 
+ # 依赖和构建缓存
++# 必须带 **/ ：只写 node_modules/ 只匹配顶层，BillNote_frontend/node_modules 会被整个
++# COPY 进镜像盖掉容器里 pnpm 装的那份——本地是 Windows 装的符号链接（指向 /g/work/...），
++# 进容器全断，表现为 "Cannot find module /app/node_modules/typescript/bin/tsc"，
++# 顺带把构建上下文从 30MB 撑到 480MB。
+ node_modules/
++**/node_modules
+ __pycache__/
++**/__pycache__
+ *.py[cod]
+ dist/
++**/dist
+ build/
+ *.tar
+ *.egg-info/
+@@ -33,3 +40,6 @@ build/
  .env.local
  .env.*.local
  !.env.example
@@ -5098,10 +5116,10 @@ index 0000000..825306a
 +})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/index.tsx b/BillNote_frontend/src/pages/LibraryPage/index.tsx
 new file mode 100644
-index 0000000..a293378
+index 0000000..d8ef534
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/index.tsx
-@@ -0,0 +1,761 @@
+@@ -0,0 +1,770 @@
 +import { useEffect, useMemo, useState } from 'react'
 +import { Link, useLocation, useNavigate } from 'react-router-dom'
 +import {
@@ -5175,6 +5193,7 @@ index 0000000..a293378
 +  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
 +    useLibraryStore()
 +  const removeTask = useTaskStore(state => state.removeTask)
++  const dropTasksLocal = useTaskStore(state => state.dropTasksLocal)
 +  const items = useShelfItems()
 +
 +  const [search, setSearch] = useState('')
@@ -5222,8 +5241,8 @@ index 0000000..a293378
 +        : activeFolder === 'none'
 +          ? base.filter(item => !item.folderId)
 +          : base.filter(item => item.folderId === activeFolder)
-+    return [...filtered].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-+  }, [items, fuse, keyword, searching, activeFolder])
++    return [...filtered].sort(SORTERS[sortMode].cmp)
++  }, [items, fuse, keyword, searching, activeFolder, sortMode])
 +
 +  // 最近打开只占一行，够跳回去就行，不做成卡片区
 +  const recent = useMemo(
@@ -5260,9 +5279,17 @@ index 0000000..a293378
 +  const handleDeleteFolder = async (mode: 'move' | 'delete') => {
 +    if (!folderToDelete) return
 +    setDeleting(true)
++    // 连笔记一起删时后端已经清掉产物了，本地 store 里那几条也得摘掉：
++    // 否则 mergeShelfItems 会把它们当"只在浏览器里"的条目重新摆回书架——
++    // 卡片还在、点开却什么都没有，而提示语刚刚才说过"无法恢复"
++    const doomed =
++      mode === 'delete'
++        ? items.filter(item => item.folderId === folderToDelete.id).map(item => item.taskId)
++        : []
 +    try {
 +      const ok = await removeFolder(folderToDelete.id, mode)
 +      if (ok) {
++        if (doomed.length) dropTasksLocal(doomed)
 +        toast.success(mode === 'delete' ? '已删除文件夹和里面的笔记' : '已删除文件夹，笔记移到未分类')
 +        if (activeFolder === folderToDelete.id) setActiveFolder(null)
 +        setFolderToDelete(null)
@@ -6344,7 +6371,7 @@ index 0000000..a840fc2
 +}
 diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
 new file mode 100644
-index 0000000..550e197
+index 0000000..040a183
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownHeader.tsx
 @@ -0,0 +1,483 @@
@@ -6808,7 +6835,7 @@ index 0000000..550e197
 +            <DialogTitle>删除这个版本？</DialogTitle>
 +            <DialogDescription>
 +              {currentVersionIndex === -1 ? '当前版本' : versionLabel(currentVersionIndex)}
-+              　将被永久删除。版本历史只保存在本机浏览器里，删掉无法恢复（后端始终留着最新一次生成的内容）。
++              　将被永久删除：版本历史存在后端 note_versions 表里，删掉后本机缓存也会同步清除，无法恢复。
 +            </DialogDescription>
 +          </DialogHeader>
 +          <DialogFooter>
@@ -6833,10 +6860,10 @@ index 0000000..550e197
 +}
 diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
 new file mode 100644
-index 0000000..620a9fb
+index 0000000..9f4b820
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,542 @@
 +import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 +import { useNavigate } from 'react-router-dom'
 +import ReactMarkdown from 'react-markdown'
@@ -6911,9 +6938,11 @@ index 0000000..620a9fb
 +  const taskStatus = currentTask?.status || 'PENDING'
 +  const retryTask = useTaskStore.getState().retryTask
 +  // 版本历史的权威存储在后端 note_versions 表；本地 store 里可能还留着升级前的数组格式，
-+  // 由下面的 effect 一次性上传后降级为最新正文串
++  // 由下面的 effect 一次性上传后降级为最新正文串。
++  // 这里只能用 currentTask?.id：taskId 在下面第 100 行才声明，而 selector 是渲染期同步调用的，
++  // 引用它会撞上 TDZ（ReferenceError → 整页白屏），tsc 对闭包里的提前引用不报错。
 +  const versionsOrNull = useLibraryStore(state =>
-+    taskId ? (state.versionsByTask[taskId] ?? null) : null,
++    currentTask?.id ? (state.versionsByTask[currentTask.id] ?? null) : null,
 +  )
 +  const versions = versionsOrNull ?? EMPTY_VERSIONS
 +  const isMultiVersion = versions.length > 1
@@ -8366,10 +8395,10 @@ index 95c2e2f..b77fcaa 100644
        </div>
 diff --git a/BillNote_frontend/src/pages/NotePage/index.tsx b/BillNote_frontend/src/pages/NotePage/index.tsx
 new file mode 100644
-index 0000000..876a6f8
+index 0000000..b572c20
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/index.tsx
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,182 @@
 +import { FC, useEffect, useRef, useState } from 'react'
 +import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 +import { scrollToHeading } from '@/utils/heading'
@@ -8435,7 +8464,10 @@ index 0000000..876a6f8
 +    const indexed = useLibraryStore.getState().notes.find(note => note.task_id === taskId)
 +    getTaskStatus(taskId)
 +      .then(res => {
-+        if (!res?.status) {
++        // 后端对"两个文件都不存在"的 id 也返回 PENDING（兜底），只看 status 的话
++        // 已删除的笔记会被恢复成永远转圈的幻影任务，还会被轮询每 3 秒打一次后端。
++        // 真在跑的任务提交时就写进了笔记库索引，所以 indexed 为空 = 后端确实没有这篇
++        if (!res?.status || (!res.result && !indexed)) {
 +          setRestoreFailed(true)
 +          return
 +        }
@@ -8598,10 +8630,10 @@ index f759565..7c58c67 100644
        name: '部署监控',
 diff --git a/BillNote_frontend/src/pages/SettingPage/Storage.tsx b/BillNote_frontend/src/pages/SettingPage/Storage.tsx
 new file mode 100644
-index 0000000..ff39868
+index 0000000..8b008ed
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/SettingPage/Storage.tsx
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,218 @@
 +import { useCallback, useEffect, useMemo, useState } from 'react'
 +import { RefreshCw, Trash2 } from 'lucide-react'
 +import toast from 'react-hot-toast'
@@ -8638,6 +8670,7 @@ index 0000000..ff39868
 +  const [selected, setSelected] = useState<Set<string>>(new Set())
 +  const [confirmOpen, setConfirmOpen] = useState(false)
 +  const [deleting, setDeleting] = useState(false)
++  const [error, setError] = useState(false)
 +
 +  const refresh = useCallback(async () => {
 +    setLoading(true)
@@ -8645,6 +8678,10 @@ index 0000000..ff39868
 +      const data = await scanStorage()
 +      setScan(data)
 +      setSelected(new Set())
++      setError(false)
++    } catch {
++      // 拦截器已经弹过 toast；这里留个错误态，页面才有"重试"入口而不是一片空白
++      setError(true)
 +    } finally {
 +      setLoading(false)
 +    }
@@ -8700,6 +8737,19 @@ index 0000000..ff39868
 +          重新扫描
 +        </Button>
 +      </div>
++
++      {!scan && error && (
++        <div className="text-muted-foreground rounded-lg border bg-white p-6 text-center text-sm">
++          扫描失败，后端可能没起来。
++          <button
++            type="button"
++            onClick={refresh}
++            className="text-primary ml-1 cursor-pointer underline"
++          >
++            重试
++          </button>
++        </div>
++      )}
 +
 +      {scan && (
 +        <>
@@ -9163,10 +9213,10 @@ index 51baa57..12a03bb 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/store/libraryStore.ts b/BillNote_frontend/src/store/libraryStore.ts
 new file mode 100644
-index 0000000..d2d6f43
+index 0000000..68d0662
 --- /dev/null
 +++ b/BillNote_frontend/src/store/libraryStore.ts
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,217 @@
 +import { create } from 'zustand'
 +import { persist, createJSONStorage } from 'zustand/middleware'
 +import { del, get, set } from 'idb-keyval'
@@ -9240,7 +9290,10 @@ index 0000000..d2d6f43
 +        try {
 +          await api.syncVersions(taskId, versions)
 +          await get().fetchVersions(taskId)
-+          return true
++          // 逐条核对落库结果：接口返回成功但条数对不上时（ver_id 撞唯一约束被整批回滚之类），
++          // 调用方会把浏览器里的存量版本降级成一份正文，那就是真丢了，必须报 false
++          const stored = new Set((get().versionsByTask[taskId] ?? []).map(v => v.ver_id))
++          return versions.every(v => stored.has(v.ver_id))
 +        } catch {
 +          return false
 +        }
@@ -9604,7 +9657,7 @@ index 0000000..e4614c7
 +  return [...fromIndex, ...localOnly]
 +}
 diff --git a/BillNote_frontend/src/store/taskStore/index.ts b/BillNote_frontend/src/store/taskStore/index.ts
-index f511f78..fe22f91 100644
+index f511f78..3e9fffe 100644
 --- a/BillNote_frontend/src/store/taskStore/index.ts
 +++ b/BillNote_frontend/src/store/taskStore/index.ts
 @@ -1,12 +1,27 @@
@@ -9638,7 +9691,7 @@ index f511f78..fe22f91 100644
  
  export interface AudioMeta {
    cover_url: string
-@@ -45,27 +60,54 @@ export interface Task {
+@@ -45,27 +60,56 @@ export interface Task {
    status: TaskStatus
    audioMeta: AudioMeta
    createdAt: string
@@ -9686,6 +9739,8 @@ index f511f78..fe22f91 100644
 +  hydrateTask: (payload: HydratePayload) => void
    updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
    removeTask: (id: string) => void
++  /** 后端那边已经删干净了（例如整个文件夹连笔记一起删），本地只同步摘掉，不再逐个回调接口 */
++  dropTasksLocal: (ids: string[]) => void
    clearTasks: () => void
    setCurrentTask: (taskId: string | null) => void
    getCurrentTask: () => Task | null
@@ -9697,7 +9752,7 @@ index f511f78..fe22f91 100644
  }
  
  export const useTaskStore = create<TaskStore>()(
-@@ -75,7 +117,6 @@ export const useTaskStore = create<TaskStore>()(
+@@ -75,7 +119,6 @@ export const useTaskStore = create<TaskStore>()(
        currentTaskId: null,
  
        addPendingTask: (taskId: string, platform: string, formData: any) =>
@@ -9705,7 +9760,7 @@ index f511f78..fe22f91 100644
          set(state => ({
            tasks: [
              {
-@@ -84,6 +125,8 @@ export const useTaskStore = create<TaskStore>()(
+@@ -84,6 +127,8 @@ export const useTaskStore = create<TaskStore>()(
                status: 'PENDING',
                markdown: '',
                platform: platform,
@@ -9714,7 +9769,7 @@ index f511f78..fe22f91 100644
                transcript: {
                  full_text: '',
                  language: '',
-@@ -106,49 +149,17 @@ export const useTaskStore = create<TaskStore>()(
+@@ -106,49 +151,17 @@ export const useTaskStore = create<TaskStore>()(
            currentTaskId: taskId, // 默认设置为当前任务
          })),
  
@@ -9769,7 +9824,7 @@ index f511f78..fe22f91 100644
                return { ...task, ...data }
              }),
            })),
-@@ -159,66 +170,131 @@ export const useTaskStore = create<TaskStore>()(
+@@ -159,66 +172,140 @@ export const useTaskStore = create<TaskStore>()(
          return get().tasks.find(task => task.id === currentTaskId) || null
        },
        retryTask: async (id: string, payload?: any) => {
@@ -9863,6 +9918,15 @@ index f511f78..fe22f91 100644
 -            video_id: task.audioMeta.video_id,
 -            platform: task.platform,
 -          })
++      dropTasksLocal: ids => {
++        const drop = new Set(ids)
++        set(state => ({
++          tasks: state.tasks.filter(task => !drop.has(task.id)),
++          currentTaskId:
++            state.currentTaskId && drop.has(state.currentTaskId) ? null : state.currentTaskId,
++        }))
++      },
++
 +      adoptServerVersions: (id, latestContent) =>
 +        set(state => ({
 +          tasks: state.tasks.map(task =>
@@ -9931,7 +9995,7 @@ index f511f78..fe22f91 100644
        },
  
        clearTasks: () => set({ tasks: [], currentTaskId: null }),
-@@ -227,6 +303,20 @@ export const useTaskStore = create<TaskStore>()(
+@@ -227,6 +314,20 @@ export const useTaskStore = create<TaskStore>()(
      }),
      {
        name: 'task-storage',
@@ -10272,10 +10336,10 @@ index 0000000..6b3e4dc
 \ No newline at end of file
 diff --git a/Dockerfile.patch b/Dockerfile.patch
 new file mode 100644
-index 0000000..f1e2a6f
+index 0000000..c65801b
 --- /dev/null
 +++ b/Dockerfile.patch
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,43 @@
 +# 构建前端（与官方 Dockerfile.complete 一致的 node:20 + pnpm 9.15 环境，走国内镜像）
 +FROM docker.m.daocloud.io/library/node:20-alpine AS ui
 +ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
@@ -10303,37 +10367,22 @@ index 0000000..f1e2a6f
 +RUN /usr/local/bin/pip uninstall -y hf-xet || true
 +RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
 +COPY --from=ui /app/dist/ /usr/share/nginx/html/
-+COPY backend/app/routers/chat.py /app/backend/app/routers/chat.py
-+COPY backend/app/services/chat_service.py /app/backend/app/services/chat_service.py
-+COPY backend/app/routers/note.py /app/backend/app/routers/note.py
-+COPY backend/app/routers/config.py /app/backend/app/routers/config.py
-+COPY backend/app/utils/image_dedup.py /app/backend/app/utils/image_dedup.py
-+COPY backend/app/utils/video_reader.py /app/backend/app/utils/video_reader.py
-+COPY backend/app/utils/screenshot_marker.py /app/backend/app/utils/screenshot_marker.py
-+COPY backend/app/utils/note_helper.py /app/backend/app/utils/note_helper.py
-+COPY backend/app/utils/markdown_toc.py /app/backend/app/utils/markdown_toc.py
-+COPY backend/app/services/note.py /app/backend/app/services/note.py
-+COPY backend/app/gpt/prompt_builder.py /app/backend/app/gpt/prompt_builder.py
-+COPY backend/app/gpt/prompt.py /app/backend/app/gpt/prompt.py
-+COPY backend/app/enmus/task_status_enums.py /app/backend/app/enmus/task_status_enums.py
-+COPY backend/app/transcriber/whisper.py /app/backend/app/transcriber/whisper.py
-+COPY backend/app/transcriber/transcriber_provider.py /app/backend/app/transcriber/transcriber_provider.py
-+# 笔记库（书架页 / 文件夹）：新表 + 索引接口 + 真正删除笔记产物；main.py 里加了启动回填
++# 后端整目录同步，不再逐文件列清单。清单已经漏过一次：V3.2 新增的
++# app/db/search_dao.py、app/routers/storage.py、app/services/note_index.py、
++# app/utils/markdown_chunks.py 都没进镜像，容器一启动就 ImportError
++# （init_db 要 search_dao、app/__init__ 要 routers.storage、routers/note 要 note_index）；
++# 改过的 universal_gpt / vector_store / notes_model 没进镜像则是静默跑旧代码，更难发现。
++# .dockerignore 已排除 __pycache__ / data / static / *.db，整目录 COPY 是安全的。
++COPY backend/app/ /app/backend/app/
 +COPY backend/main.py /app/backend/main.py
-+COPY backend/app/__init__.py /app/backend/app/__init__.py
-+COPY backend/app/db/init_db.py /app/backend/app/db/init_db.py
-+COPY backend/app/db/video_task_dao.py /app/backend/app/db/video_task_dao.py
-+COPY backend/app/db/library_dao.py /app/backend/app/db/library_dao.py
-+COPY backend/app/db/models/library.py /app/backend/app/db/models/library.py
-+COPY backend/app/routers/library.py /app/backend/app/routers/library.py
-+COPY backend/app/services/library_service.py /app/backend/app/services/library_service.py
-+# 日志轮转：上游 supervisord conf 没配 maxbytes/backups，backend.log 会无限涨。
-+# 先清掉上游 conf.d 再放我们的，避免同名 program 定义冲突导致 supervisord 起不来
-+RUN rm -f /etc/supervisor/conf.d/*.conf
-+COPY deploy/supervisord.conf /etc/supervisor/conf.d/bilinote.conf
-+# 同步测试：上游的 test_video_reader_dedupe 写的是假字节，与感知去重不兼容，已重写
 +COPY backend/tests/ /app/backend/tests/
-\ No newline at end of file
++# 日志轮转：上游 supervisord conf 没配 maxbytes/backups，backend.log 会无限涨。
++# 必须覆盖成【同名】文件：基础镜像的 CMD 是
++#   /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
++# 写成别的名字（一度写成 bilinote.conf）CMD 就找不到配置文件，容器起来就退出、无限重启。
++COPY deploy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
++# 启动命令显式写死，不赌基础镜像继承了什么
++CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 diff --git a/backend/app/__init__.py b/backend/app/__init__.py
 index f97ca9a..61013fa 100644
 --- a/backend/app/__init__.py
@@ -10378,10 +10427,10 @@ index d7e9847..f939375 100644
 \ No newline at end of file
 diff --git a/backend/app/db/library_dao.py b/backend/app/db/library_dao.py
 new file mode 100644
-index 0000000..8240210
+index 0000000..b54a8be
 --- /dev/null
 +++ b/backend/app/db/library_dao.py
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,361 @@
 +import json
 +import uuid
 +from datetime import datetime, timezone
@@ -10711,10 +10760,12 @@ index 0000000..8240210
 +        if added:
 +            logger.info(f"已同步浏览器存量版本 task_id={task_id} 新增 {added} 条")
 +        return added
-+    except Exception as e:
++    except Exception:
 +        db.rollback()
-+        logger.error(f"同步版本失败 task_id={task_id}: {e}")
-+        return 0
++        # 必须抛出去：吞掉异常返回 0 的话，接口照样回"成功"，前端会把浏览器里的存量版本
++        # 降级成一份最新正文串——后端一条没存、本地却已经没了，版本历史真的丢了
++        logger.error(f"同步版本失败 task_id={task_id}", exc_info=True)
++        raise
 +    finally:
 +        db.close()
 +
@@ -10811,10 +10862,10 @@ index 0000000..6d65c96
 +    __table_args__ = (Index("ix_note_versions_task_id", "task_id"),)
 diff --git a/backend/app/db/search_dao.py b/backend/app/db/search_dao.py
 new file mode 100644
-index 0000000..6ef446c
+index 0000000..5d987bd
 --- /dev/null
 +++ b/backend/app/db/search_dao.py
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,95 @@
 +"""笔记正文的 SQLite FTS5 全文索引。
 +
 +书架页搜索原来只搜标题；这里对正文按 H2/H3 分块建 FTS5 索引，支持中文子串命中
@@ -10863,6 +10914,15 @@ index 0000000..6ef446c
 +def delete_note(task_id: str) -> None:
 +    with get_engine().begin() as conn:
 +        conn.exec_driver_sql(f"DELETE FROM {_TABLE} WHERE task_id = ?", (task_id,))
++
++
++def count_note(task_id: str) -> int:
++    """这篇笔记有几个索引块。启动回填靠它判断存量笔记要不要补建索引。"""
++    with get_engine().connect() as conn:
++        row = conn.exec_driver_sql(
++            f"SELECT COUNT(*) FROM {_TABLE} WHERE task_id = ?", (task_id,)
++        ).fetchone()
++    return int(row[0]) if row else 0
 +
 +
 +def search(query: str, limit: int = 30) -> list[dict]:
@@ -11436,19 +11496,20 @@ index 0000000..d2475fe
 +        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
 +        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..433cc2e 100644
+index f433e46..1345c3b 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,9 @@
  # app/routers/note.py
  import json
  import os
++import re
 +import threading
 +import time
  import uuid
  from pathlib import Path
  from typing import Optional
-@@ -10,7 +12,12 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+@@ -10,7 +13,12 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
  from pydantic import BaseModel, validator, field_validator, model_validator
  from dataclasses import asdict
  
@@ -11461,19 +11522,30 @@ index f433e46..433cc2e 100644
  from app.enmus.exception import NoteErrorEnum
  from app.enmus.note_enums import DownloadQuality
  from app.exceptions.note import NoteError
-@@ -30,9 +37,8 @@ from app.enmus.task_status_enums import TaskStatus
+@@ -29,10 +37,19 @@ from app.enmus.task_status_enums import TaskStatus
+ 
  router = APIRouter()
  
++# task_id 会被直接拼进文件路径（note_results/{task_id}.json 等），而 delete_task 现在是真删文件、
++# update_note 是真写文件。生产里 task_id 一律是 uuid4，先卡形态，"../../x" 这种穿越就进不了拼路径。
++_TASK_ID_RE = re.compile(
++    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
++)
++
++
++def _valid_task_id(task_id: str) -> bool:
++    return isinstance(task_id, str) and bool(_TASK_ID_RE.fullmatch(task_id))
  
 -class RecordRequest(BaseModel):
 -    video_id: str
 -    platform: str
++
 +class DeleteTaskRequest(BaseModel):
 +    task_id: str
  
  
  class VideoRequest(BaseModel):
-@@ -77,16 +83,9 @@ class VideoRequest(BaseModel):
+@@ -77,16 +94,9 @@ class VideoRequest(BaseModel):
          return v
  
  
@@ -11490,7 +11562,7 @@ index f433e46..433cc2e 100644
  def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
  
-@@ -121,6 +120,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+@@ -121,6 +131,12 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
  
  
@@ -11503,7 +11575,7 @@ index f433e46..433cc2e 100644
  def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                    link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                    _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-@@ -130,6 +135,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -130,6 +146,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
      if not model_name or not provider_id:
          raise HTTPException(status_code=400, detail="请选择模型和提供者")
  
@@ -11529,7 +11601,7 @@ index f433e46..433cc2e 100644
      def _execute_note_task():
          return NoteGenerator().generate(
              video_url=video_url,
-@@ -149,12 +173,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -149,12 +184,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
          )
  
      logger.info(f"任务进入执行队列 (task_id={task_id})")
@@ -11564,7 +11636,7 @@ index f433e46..433cc2e 100644
  
      # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
      try:
-@@ -165,13 +210,73 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -165,13 +221,77 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
  
  
  @router.post('/delete_task')
@@ -11575,6 +11647,8 @@ index f433e46..433cc2e 100644
 +    这里以前是个空壳（请求体被注释掉、无条件返回成功），界面上的"删除"只是让它从浏览器
 +    IndexedDB 消失，盘上的 json 和截图一直堆着。
 +    """
++    if not _valid_task_id(data.task_id):
++        return R.error(msg='task_id 非法')
 +    try:
 +        result = delete_note_artifacts(data.task_id)
 +        return R.success(data=result, msg='删除成功')
@@ -11589,10 +11663,7 @@ index f433e46..433cc2e 100644
 +
 +
 +def _reindex_note(task_id: str):
-     try:
--        # TODO: 待持久化完成
--        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
--        return R.success(msg='删除成功')
++    try:
 +        from app.services.vector_store import VectorStoreManager
 +        VectorStoreManager().index_task(task_id)
 +        logger.info(f"编辑后重新索引完成: {task_id}")
@@ -11603,12 +11674,17 @@ index f433e46..433cc2e 100644
 +@router.post('/update_note')
 +def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
 +    """保存用户手动编辑后的笔记内容（同步更新索引，供 AI 问答使用）。"""
++    if not _valid_task_id(data.task_id):
++        return R.error(msg='task_id 非法')
 +    if not data.markdown.strip():
 +        return R.error(msg='笔记内容不能为空')
 +    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
 +    if not os.path.exists(note_path):
 +        return R.error(msg='笔记文件不存在，无法保存')
-+    try:
+     try:
+-        # TODO: 待持久化完成
+-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
+-        return R.success(msg='删除成功')
 +        with open(note_path, 'r', encoding='utf-8') as f:
 +            note_data = json.load(f)
 +        note_data['markdown'] = data.markdown
@@ -11643,7 +11719,7 @@ index f433e46..433cc2e 100644
  
  
  @router.post("/upload")
-@@ -227,6 +332,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -227,6 +347,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
  
          # 统一先写入 PENDING，表示已进入队列等待串行执行
          NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
@@ -11652,6 +11728,15 @@ index f433e46..433cc2e 100644
  
          # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
          if data.prefetched_transcript:
+@@ -245,6 +367,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+ 
+ @router.get("/task_status/{task_id}")
+ def get_task_status(task_id: str):
++    if not _valid_task_id(task_id):
++        return R.error(msg='task_id 非法')
+     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
+     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+ 
 diff --git a/backend/app/routers/storage.py b/backend/app/routers/storage.py
 new file mode 100644
 index 0000000..126fba4
@@ -11744,10 +11829,10 @@ index e7239cf..d15aced 100644
      provider = ProviderService.get_provider_by_id(provider_id)
 diff --git a/backend/app/services/library_service.py b/backend/app/services/library_service.py
 new file mode 100644
-index 0000000..335f21a
+index 0000000..779bcd0
 --- /dev/null
 +++ b/backend/app/services/library_service.py
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,327 @@
 +"""笔记库的落地操作：删除一篇笔记的全部产物、启动时回填历史笔记索引。
 +
 +放在 service 层而不是 router 里，是因为 routers/note.py（删除单篇）和
@@ -11757,6 +11842,7 @@ index 0000000..335f21a
 +import json
 +import os
 +import re
++import time
 +from datetime import datetime, timezone
 +from pathlib import Path
 +
@@ -11774,6 +11860,15 @@ index 0000000..335f21a
 +_SCREENSHOT_NAME_RE = re.compile(r"screenshot_\d{3}_[0-9a-fA-F-]{36}\.jpg")
 +# note_results 下只有 {task_id}.json 是"一篇笔记"，其余带下划线的都是派生缓存
 +_NOTE_FILE_RE = re.compile(r"^[0-9a-fA-F-]{36}\.json$")
++
++# 生成一篇笔记时截图是先落盘的，note json 要等总结写完才有——中间这几分钟里，
++# 新截图在引用集里查不到，会被判成孤儿。给一个宽限期，别把正在生成的笔记的图列出来让人删。
++_ORPHAN_GRACE_MS = 30 * 60 * 1000
++
++
++def _within_grace(mtime_ms: float, now_ms: float) -> bool:
++    """宽限期关掉（<=0）时一律返回 False，测试才能确定性地验引用逻辑本身。"""
++    return _ORPHAN_GRACE_MS > 0 and now_ms - mtime_ms < _ORPHAN_GRACE_MS
 +
 +# 一篇笔记在 note_results 下的全部文件。
 +# _markdown.status.json 是历史遗留：早期有个 bug 会把 SUMMARIZING 状态写到这个文件名上，
@@ -11866,6 +11961,28 @@ index 0000000..335f21a
 +    return {"deleted_files": deleted_files, "deleted_screenshots": deleted_screenshots}
 +
 +
++def _fts_missing(task_id: str) -> bool:
++    try:
++        return search_dao.count_note(task_id) == 0
++    except Exception:
++        # 索引表本身有问题时别在启动路径上刷一堆日志，搜索接口自己会报错
++        return False
++
++
++def _reindex_from_file(path: Path, task_id: str) -> bool:
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++    except Exception as e:
++        logger.warning(f"补建全文索引时读取失败 {path.name}: {e}")
++        return False
++    try:
++        search_dao.rebuild_note(task_id, data.get("markdown", "") or "")
++        return True
++    except Exception as e:
++        logger.warning(f"补建全文索引失败 {task_id}: {e}")
++        return False
++
++
 +def backfill_library() -> int:
 +    """启动时把 note_results/ 里已有但没进 notes 表的笔记补进去。
 +
@@ -11878,11 +11995,16 @@ index 0000000..335f21a
 +
 +    existing = {n["task_id"] for n in library_dao.list_notes()}
 +    added = 0
++    reindexed = 0
 +    for path in sorted(note_dir.iterdir()):
 +        if not _NOTE_FILE_RE.match(path.name):
 +            continue
 +        task_id = path.stem
 +        if task_id in existing:
++            # 库里已经有了，但可能是"全文索引这个功能上线之前"就进来的：那批笔记在
++            # note_fts 里一行都没有，搜索永远搜不到它们。缺索引才读 json，补建一次
++            if _fts_missing(task_id) and _reindex_from_file(path, task_id):
++                reindexed += 1
 +            continue
 +        try:
 +            with open(path, "r", encoding="utf-8") as f:
@@ -11927,6 +12049,8 @@ index 0000000..335f21a
 +
 +    if added:
 +        logger.info(f"已回填 {added} 篇历史笔记到笔记库索引")
++    if reindexed:
++        logger.info(f"已为 {reindexed} 篇存量笔记补建全文索引")
 +    return added
 +
 +
@@ -11949,8 +12073,17 @@ index 0000000..335f21a
 +        if not _NOTE_FILE_RE.match(path.name):
 +            continue
 +        try:
-+            data = json.loads(path.read_text(encoding="utf-8"))
++            raw = path.read_text(encoding="utf-8")
 +        except Exception:
++            continue
++        try:
++            data = json.loads(raw)
++        except Exception:
++            # json 坏了（写到一半崩了、老文件损坏）不等于这篇笔记不引用截图。
++            # 直接跳过会把它引用的截图全判成孤儿，用户在存储页一点"清理"就真删了，
++            # 所以退化成对原始文本跑正则——坏 json 里照样能捞到 ![](/static/screenshots/xxx.jpg)
++            refs.update(_SCREENSHOT_NAME_RE.findall(raw))
++            logger.warning(f"笔记 json 解析失败，改用正则提取截图引用: {path.name}")
 +            continue
 +        manifest = data.get("screenshots")
 +        if isinstance(manifest, list):
@@ -11965,6 +12098,7 @@ index 0000000..335f21a
 +def scan_storage() -> dict:
 +    """设置页「存储」的数据源：截图目录占用、孤儿清单、笔记/向量库体积。"""
 +    refs = referenced_screenshot_names()
++    now_ms = int(time.time() * 1000)
 +    files = []
 +    if IMAGE_OUTPUT_DIR.is_dir():
 +        for path in IMAGE_OUTPUT_DIR.iterdir():
@@ -11976,7 +12110,13 @@ index 0000000..335f21a
 +                    "mtime": int(stat.st_mtime * 1000),
 +                    "referenced": path.name in refs,
 +                })
-+    orphans = sorted((f for f in files if not f["referenced"]), key=lambda f: -f["size"])
++    orphans = sorted(
++        (
++            f for f in files
++            if not f["referenced"] and not _within_grace(f["mtime"], now_ms)
++        ),
++        key=lambda f: -f["size"],
++    )
 +    return {
 +        "screenshots": {
 +            "count": len(files),
@@ -12004,6 +12144,14 @@ index 0000000..335f21a
 +            continue
 +        target = IMAGE_OUTPUT_DIR / name
 +        if not target.resolve().is_relative_to(IMAGE_OUTPUT_DIR.resolve()):
++            skipped.append(name)
++            continue
++        # 界面扫完到点删除之间可能正好有新笔记在生成，宽限期内的文件一律不删
++        try:
++            if _within_grace(target.stat().st_mtime * 1000, time.time() * 1000):
++                skipped.append(name)
++                continue
++        except OSError:
 +            skipped.append(name)
 +            continue
 +        if _unlink(target):
@@ -13518,10 +13666,10 @@ index 0000000..dfdeb48
 +    unittest.main()
 diff --git a/backend/tests/test_library_http.py b/backend/tests/test_library_http.py
 new file mode 100644
-index 0000000..f515b82
+index 0000000..9bc8103
 --- /dev/null
 +++ b/backend/tests/test_library_http.py
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,183 @@
 +"""library / storage / search / delete_task 的 HTTP 层测试（FastAPI TestClient）。
 +
 +DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
@@ -13550,6 +13698,7 @@ index 0000000..f515b82
 +from fastapi.testclient import TestClient  # noqa: E402
 +
 +from app.db import library_dao, search_dao  # noqa: E402
++from app.services import library_service  # noqa: E402
 +
 +
 +@asynccontextmanager
@@ -13583,6 +13732,8 @@ index 0000000..f515b82
 +        # 多模块同进程跑时，别的模块会把全局引擎和路径常量换到它自己的临时目录，
 +        # 每个用例前绑回本模块的
 +        ENV.bind()
++        # 用例里的文件都是刚写的，孤儿宽限期会让它们全部"太新"而跳过清理
++        library_service._ORPHAN_GRACE_MS = 0
 +
 +    def test_library_shape(self):
 +        res = client.get("/api/library").json()
@@ -13645,6 +13796,25 @@ index 0000000..f515b82
 +        self.assertEqual(res["data"]["deleted_screenshots"], 1)
 +        self.assertFalse((NOTE_DIR / f"{task_id}.json").exists())
 +        self.assertFalse((SHOT_DIR / shot).exists())
++
++    def test_malformed_task_id_is_rejected(self):
++        """task_id 会被拼进文件路径，而 delete_task 现在真删文件：形态不对必须挡在拼路径之前。"""
++        victim = NOTE_DIR.parent / "escaped.json"
++        victim.write_text("{}", encoding="utf-8")
++        try:
++            res = client.post("/api/delete_task", json={"task_id": "../escaped"}).json()
++            self.assertNotEqual(res["code"], 0)
++            self.assertTrue(victim.exists(), "目录外的文件被删了")
++
++            res = client.post(
++                "/api/update_note", json={"task_id": "../escaped", "markdown": "x"}
++            ).json()
++            self.assertNotEqual(res["code"], 0)
++
++            res = client.get("/api/task_status/not-a-uuid").json()
++            self.assertNotEqual(res["code"], 0)
++        finally:
++            victim.unlink(missing_ok=True)
 +
 +    def test_storage_scan_and_delete_guard(self):
 +        orphan = f"screenshot_008_{uuid.uuid4()}.jpg"
@@ -14522,10 +14692,10 @@ index f947ef8..98c6991 100644
      unittest.main()
 diff --git a/backend/tests/test_storage_search.py b/backend/tests/test_storage_search.py
 new file mode 100644
-index 0000000..d0f20ae
+index 0000000..2709fa9
 --- /dev/null
 +++ b/backend/tests/test_storage_search.py
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,206 @@
 +"""V3.2 后端测试：存储扫描/孤儿截图清理 + FTS5 全文搜索。
 +
 +只 import app.db / app.services.library_service（不碰 routers，避免拉 fastapi/chromadb），
@@ -14533,8 +14703,10 @@ index 0000000..d0f20ae
 +"""
 +
 +import json
++import os
 +import pathlib
 +import sys
++import time
 +import unittest
 +
 +_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -14544,7 +14716,7 @@ index 0000000..d0f20ae
 +
 +ENV = IsolatedEnv("bilinote-storage-test-")
 +
-+from app.db import search_dao  # noqa: E402
++from app.db import library_dao, search_dao  # noqa: E402
 +from app.db.init_db import init_db  # noqa: E402
 +from app.services import library_service  # noqa: E402
 +
@@ -14559,6 +14731,10 @@ index 0000000..d0f20ae
 +# 回填/引用扫描的正则只认这种名字，测试不能用 n1/n2 这类短名
 +NOTE_1 = "aaaaaaaa-0000-4000-8000-000000000001"
 +NOTE_2 = "aaaaaaaa-0000-4000-8000-000000000002"
++# 回填相关用例的笔记：一篇是"库里没有、要新增"，一篇是"库里已有、只缺全文索引"
++NOTE_NEW = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
++NOTE_LEGACY = "aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
++_FTS_IDS = ("s1", "s2", NOTE_NEW, NOTE_LEGACY)
 +
 +MD = (
 +    "## 题型一：基期倍比与两期比重差\n"
@@ -14590,8 +14766,8 @@ index 0000000..d0f20ae
 +
 +    def setUp(self):
 +        ENV.bind()
-+        search_dao.delete_note("s1")
-+        search_dao.delete_note("s2")
++        for tid in _FTS_IDS:
++            search_dao.delete_note(tid)
 +
 +    def test_rebuild_and_trigram_search(self):
 +        n = search_dao.rebuild_note("s1", MD)
@@ -14633,9 +14809,12 @@ index 0000000..d0f20ae
 +    def setUp(self):
 +        ENV.bind()
 +        ENV.reset_dirs()
-+        # TestSearchIndex 用完的 s1/s2 索引行要清掉，否则搜索命中数会串
-+        search_dao.delete_note("s1")
-+        search_dao.delete_note("s2")
++        # 用例里的文件都是刚写的，宽限期会让它们全部"太新"而跳过清理；
++        # 归零后测的是引用逻辑本身，宽限期单独有 test_recent_files_are_protected
++        library_service._ORPHAN_GRACE_MS = 0
++        # 别的用例留下的索引行要清掉，否则"恩格尔系数"这种关键词的命中数会串
++        for tid in _FTS_IDS:
++            search_dao.delete_note(tid)
 +        for name in (SHOT_A, SHOT_B, SHOT_C):
 +            (SHOT_DIR / name).write_bytes(b"x" * 100)
 +        _write_note(NOTE_1, MD, manifest=[SHOT_A])
@@ -14671,11 +14850,51 @@ index 0000000..d0f20ae
 +
 +    def test_backfill_rebuilds_search_index(self):
 +        ENV.reset_dirs()
-+        _write_note("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", MD)
++        _write_note(NOTE_NEW, MD)
 +        self.assertEqual(library_service.backfill_library(), 1)
 +        hits = search_dao.search("恩格尔系数")
 +        self.assertEqual(len(hits), 1)
-+        self.assertEqual(hits[0]["task_id"], "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
++        self.assertEqual(hits[0]["task_id"], NOTE_NEW)
++
++    def test_backfill_indexes_notes_already_in_library(self):
++        """全文索引上线之前就已经进库的笔记：backfill 不会"新增"它，但必须补建索引，
++        否则书架页搜索对这些老笔记永远 0 命中（部署后实测就是这个现象）。"""
++        ENV.reset_dirs()
++        _write_note(NOTE_LEGACY, MD)
++        library_dao.upsert_note(NOTE_LEGACY, status="SUCCESS")
++        self.assertEqual(library_service.backfill_library(), 0)  # 库里已有，不算新增
++        self.assertEqual([h["task_id"] for h in search_dao.search("恩格尔系数")], [NOTE_LEGACY])
++
++    def test_recent_files_are_protected(self):
++        """生成中的笔记：截图先落盘、note json 最后才写，这段窗口不能被当成孤儿删掉。"""
++        library_service._ORPHAN_GRACE_MS = 30 * 60 * 1000
++        fresh = "screenshot_004_44444444-4444-4444-8444-444444444444.jpg"
++        (SHOT_DIR / fresh).write_bytes(b"x" * 100)
++        # SHOT_C 确实没人引用，但已经躺了一小时——不在宽限期里，该清
++        old = time.time() - 3600
++        os.utime(SHOT_DIR / SHOT_C, (old, old))
++
++        names = [o["name"] for o in library_service.scan_storage()["orphans"]]
++        self.assertIn(SHOT_C, names)
++        self.assertNotIn(fresh, names)
++
++        # 界面上的清单可能是几分钟前扫的，删除时还得再判一次时间
++        result = library_service.delete_orphan_screenshots([SHOT_C, fresh])
++        self.assertEqual(result["deleted"], [SHOT_C])
++        self.assertIn(fresh, result["skipped"])
++        self.assertTrue((SHOT_DIR / fresh).exists())
++
++    def test_corrupt_note_json_still_protects_its_screenshots(self):
++        """json 坏了不等于这篇笔记不引用截图：整篇跳过会把它引用的图全判成孤儿。"""
++        broken = "screenshot_005_55555555-5555-4555-8555-555555555555.jpg"
++        (SHOT_DIR / broken).write_bytes(b"x" * 100)
++        (NOTE_DIR / f"{NOTE_2}.json").write_text(
++            f'{{"markdown": "![](/static/screenshots/{broken})" 这里 json 断掉了',
++            encoding="utf-8",
++        )
++        self.assertNotIn(broken, [o["name"] for o in library_service.scan_storage()["orphans"]])
++        self.assertEqual(library_service.delete_orphan_screenshots([broken])["deleted"], [])
++        self.assertTrue((SHOT_DIR / broken).exists())
 +
 +
 +if __name__ == "__main__":
@@ -15299,10 +15518,10 @@ index 0000000..d4ba93d
 +})
 diff --git a/e2e/tests/features.spec.ts b/e2e/tests/features.spec.ts
 new file mode 100644
-index 0000000..dd72f0b
+index 0000000..e0e1199
 --- /dev/null
 +++ b/e2e/tests/features.spec.ts
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,87 @@
 +import { test, expect } from '@playwright/test'
 +
 +// 覆盖 V3.2/V3.3 的交互项。依赖真实数据的地方都先取 /api/library，没数据就 skip。
@@ -15320,7 +15539,8 @@ index 0000000..dd72f0b
 +
 +test('设置→存储与清理页能扫描并列出占用', async ({ page }) => {
 +  await page.goto('/settings/storage')
-+  await expect(page.getByText('存储与清理')).toBeVisible()
++  // 左侧导航里也有"存储与清理"这一项，不限定 main 会撞 strict mode
++  await expect(page.getByRole('main').getByText('存储与清理')).toBeVisible()
 +  await expect(page.getByText('截图目录')).toBeVisible()
 +  await expect(page.getByText('AI 问答向量索引')).toBeVisible()
 +  // 孤儿区要么是清单要么是"很干净"
@@ -15391,10 +15611,10 @@ index 0000000..dd72f0b
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
-index 0000000..4f2015f
+index 0000000..bf2874f
 --- /dev/null
 +++ b/e2e/tests/note.spec.ts
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,65 @@
 +import { test, expect } from '@playwright/test'
 +
 +let taskId = ''
@@ -15421,18 +15641,32 @@ index 0000000..4f2015f
 +      .closest('[data-radix-scroll-area-viewport]') as HTMLElement
 +    vp.scrollTop = vp.scrollHeight * 0.6
 +  })
-+  await page.waitForTimeout(700)
-+  const after = await aside.locator('button[aria-current="location"]').getAttribute('title')
-+  expect(after).not.toBe(before)
++  // scroll-spy 是 80ms 节流 + 渲染后再量位置，重笔记下 700ms 死等会偶发超时；轮询等到变为止
++  await expect
++    .poll(() => aside.locator('button[aria-current="location"]').getAttribute('title'), {
++      timeout: 8000,
++    })
++    .not.toBe(before)
 +})
 +
 +test('打开参照 dock 时章节栏收竖条，关闭后恢复', async ({ page }) => {
 +  await page.goto(`/note/${taskId}`)
++  // dock 面板是常驻挂载的，关掉只是 collapse 到 0 宽（内容被 overflow:hidden 裁掉）。
++  // 所以不能断言 tablist "hidden"：它有 px-2 内边距，自身盒子始终 16x40，Playwright 会判可见
++  const dockPanel = page.locator('[data-panel-id]', {
++    has: page.locator('[aria-label="参照面板"]'),
++  })
++  const dockWidth = async () => (await dockPanel.boundingBox())?.width ?? -1
++
++  expect(await dockWidth()).toBe(0)
++  await expect(page.locator('aside')).toBeVisible()
++
 +  await page.getByRole('button', { name: '原文参照' }).click()
-+  await expect(page.getByRole('tablist')).toBeVisible()
++  await expect.poll(dockWidth, { timeout: 5000 }).toBeGreaterThan(200)
 +  await expect(page.locator('button[aria-label="展开章节导航"]')).toBeVisible()
++
 +  await page.getByRole('button', { name: '原文参照' }).click()
-+  await expect(page.getByRole('tablist')).toBeHidden()
++  await expect.poll(dockWidth, { timeout: 5000 }).toBe(0)
 +  await expect(page.locator('aside')).toBeVisible()
 +})
 +
@@ -15441,6 +15675,7 @@ index 0000000..4f2015f
 +  await page.goto(`/note/${taskId}`)
 +  await expect(page.locator('button[aria-label="展开章节导航"]')).toBeVisible()
 +  await page.getByRole('button', { name: '原文参照' }).click()
++  // 窄屏是条件挂载的浮层，关掉就整个从 DOM 里消失，这里断言 hidden 是对的
 +  await expect(page.getByRole('tablist')).toBeVisible()
 +  await page.locator('button[aria-label="关闭参照面板"]').click()
 +  await expect(page.getByRole('tablist')).toBeHidden()
