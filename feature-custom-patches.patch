@@ -7039,10 +7039,10 @@ index 0000000..040a183
 +}
 diff --git a/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
 new file mode 100644
-index 0000000..c79d346
+index 0000000..ca8331d
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/MarkdownViewer.tsx
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,563 @@
 +import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 +import { useNavigate } from 'react-router-dom'
 +import ReactMarkdown from 'react-markdown'
@@ -7561,12 +7561,16 @@ index 0000000..c79d346
 +                {noteColumn}
 +              </ResizablePanel>
 +              <ResizableHandle />
-+              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变 */}
++              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变。
++                  defaultSize 必须跟着 dockOpen 走：首帧 status 还是 idle/loading 时本组件提前
++                  return，面板组还没挂载，那个 `dockRef.current?.collapse()` 的 effect 打在 null 上
++                  等于没做；等面板组挂载时用的是写死的 38% → 打开笔记就默认展开着原文参照。
++                  声明式初始尺寸不依赖时序，从思维导图/编辑切回来导致面板组重挂载时也照样正确。 */}
 +              <ResizablePanel
 +                ref={dockRef}
 +                collapsible
 +                collapsedSize={0}
-+                defaultSize={38}
++                defaultSize={dockOpen ? 38 : 0}
 +                minSize={25}
 +                maxSize={70}
 +              >
@@ -16888,10 +16892,10 @@ index 0000000..30ee4cb
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
-index 0000000..734c8c3
+index 0000000..e02d40c
 --- /dev/null
 +++ b/e2e/tests/note.spec.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,126 @@
 +import { test, expect } from '@playwright/test'
 +
 +let taskId = ''
@@ -16945,6 +16949,15 @@ index 0000000..734c8c3
 +  await page.getByRole('button', { name: '原文参照' }).click()
 +  await expect.poll(dockWidth, { timeout: 5000 }).toBe(0)
 +  await expect(page.locator('aside')).toBeVisible()
++
++  // 面板组重挂载后也必须保持收起：切到思维导图再切回来会把整个 ResizablePanelGroup 卸掉重建。
++  // "打开笔记时 dock 莫名展开"的根因就是首帧 status 还是 idle、面板组尚未挂载，
++  // 那个 collapse() 打在 null ref 上等于没做，挂载后用的是写死的 defaultSize=38。
++  // headless 里首屏时序碰巧走对（所以这条 bug 逃过了之前的测试），重挂载这条路是确定性的。
++  await page.getByRole('button', { name: /思维导图/ }).click()
++  await page.waitForTimeout(800)
++  await page.getByRole('button', { name: /返回笔记|思维导图/ }).click()
++  await expect.poll(dockWidth, { timeout: 5000 }).toBe(0)
 +})
 +
 +test('窄屏下 dock 是浮层且带关闭按钮', async ({ page }) => {
