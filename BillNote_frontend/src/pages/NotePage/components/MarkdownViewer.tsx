@@ -516,12 +516,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 {noteColumn}
               </ResizablePanel>
               <ResizableHandle />
-              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变 */}
+              {/* dock 面板常驻挂载、靠 collapse/expand 开关：条件挂载会让布局跳变。
+                  defaultSize 必须跟着 dockOpen 走：首帧 status 还是 idle/loading 时本组件提前
+                  return，面板组还没挂载，那个 `dockRef.current?.collapse()` 的 effect 打在 null 上
+                  等于没做；等面板组挂载时用的是写死的 38% → 打开笔记就默认展开着原文参照。
+                  声明式初始尺寸不依赖时序，从思维导图/编辑切回来导致面板组重挂载时也照样正确。 */}
               <ResizablePanel
                 ref={dockRef}
                 collapsible
                 collapsedSize={0}
-                defaultSize={38}
+                defaultSize={dockOpen ? 38 : 0}
                 minSize={25}
                 maxSize={70}
               >

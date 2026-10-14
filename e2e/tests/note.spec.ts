@@ -51,6 +51,15 @@ test('打开参照 dock 时章节栏收竖条，关闭后恢复', async ({ page 
   await page.getByRole('button', { name: '原文参照' }).click()
   await expect.poll(dockWidth, { timeout: 5000 }).toBe(0)
   await expect(page.locator('aside')).toBeVisible()
+
+  // 面板组重挂载后也必须保持收起：切到思维导图再切回来会把整个 ResizablePanelGroup 卸掉重建。
+  // "打开笔记时 dock 莫名展开"的根因就是首帧 status 还是 idle、面板组尚未挂载，
+  // 那个 collapse() 打在 null ref 上等于没做，挂载后用的是写死的 defaultSize=38。
+  // headless 里首屏时序碰巧走对（所以这条 bug 逃过了之前的测试），重挂载这条路是确定性的。
+  await page.getByRole('button', { name: /思维导图/ }).click()
+  await page.waitForTimeout(800)
+  await page.getByRole('button', { name: /返回笔记|思维导图/ }).click()
+  await expect.poll(dockWidth, { timeout: 5000 }).toBe(0)
 })
 
 test('窄屏下 dock 是浮层且带关闭按钮', async ({ page }) => {
