@@ -8405,13 +8405,17 @@ index 6acd3a9..b4481e1 100644
      : ''
 diff --git a/BillNote_frontend/src/pages/NotePage/components/markdownComponents.tsx b/BillNote_frontend/src/pages/NotePage/components/markdownComponents.tsx
 new file mode 100644
-index 0000000..aa378f1
+index 0000000..69835fe
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/NotePage/components/markdownComponents.tsx
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,250 @@
 +import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 +import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
 +import Zoom from 'react-medium-image-zoom'
++// 这张样式表必须引：库里的 [data-rmiz-ghost] 占位元素靠它才是 position:absolute。
++// 不引的话 ghost 落在正常文档流里，每张截图后面都会多一个和图片等高的空块
++// （实测 500px），图和下文之间就隔出一大片空白。顺带让放大按钮/浮层样式生效。
++import 'react-medium-image-zoom/dist/styles.css'
 +import { Copy, Play, ExternalLink } from 'lucide-react'
 +import { toast } from 'react-hot-toast'
 +import { scrollToHeading } from '@/utils/heading'
@@ -16985,10 +16989,10 @@ index 0000000..30ee4cb
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
-index 0000000..e02d40c
+index 0000000..595a0c1
 --- /dev/null
 +++ b/e2e/tests/note.spec.ts
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,151 @@
 +import { test, expect } from '@playwright/test'
 +
 +let taskId = ''
@@ -17062,6 +17066,31 @@ index 0000000..e02d40c
 +  await expect(page.getByRole('tablist')).toBeVisible()
 +  await page.locator('button[aria-label="关闭参照面板"]').click()
 +  await expect(page.getByRole('tablist')).toBeHidden()
++})
++
++test('截图与下文之间没有异常空白', async ({ page }) => {
++  test.skip(!taskId, '没有笔记数据')
++  await page.goto(`/note/${taskId}`)
++  await expect(page.locator('.markdown-body img').first()).toBeVisible({ timeout: 10000 })
++  // react-medium-image-zoom 的 styles.css 没被引入时，它的 ghost 占位元素落在正常文档流里，
++  // 每张截图后面多一个和图片等高（实测 500px）的空块。直接数"流内、无文字、无图的高空块"，
++  // 修复前 12 个、修复后 0 个；不依赖库内部何时挂载 ghost，也不依赖 DOM 拓扑
++  const blanks = await page.locator('.markdown-body').evaluate(root => {
++    let n = 0
++    for (const el of root.querySelectorAll('div')) {
++      const r = el.getBoundingClientRect()
++      if (
++        r.height > 150 &&
++        !(el.textContent || '').trim() &&
++        !el.querySelector('img') &&
++        getComputedStyle(el).position === 'static'
++      ) {
++        n++
++      }
++    }
++    return n
++  })
++  expect(blanks).toBe(0)
 +})
 +
 +test('生成中的流程页有返回书架的出口', async ({ page }) => {
