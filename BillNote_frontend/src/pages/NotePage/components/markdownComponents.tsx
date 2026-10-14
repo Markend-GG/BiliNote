@@ -1,6 +1,10 @@
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import Zoom from 'react-medium-image-zoom'
+// 这张样式表必须引：库里的 [data-rmiz-ghost] 占位元素靠它才是 position:absolute。
+// 不引的话 ghost 落在正常文档流里，每张截图后面都会多一个和图片等高的空块
+// （实测 500px），图和下文之间就隔出一大片空白。顺带让放大按钮/浮层样式生效。
+import 'react-medium-image-zoom/dist/styles.css'
 import { Copy, Play, ExternalLink } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { scrollToHeading } from '@/utils/heading'

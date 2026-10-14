@@ -73,6 +73,31 @@ test('窄屏下 dock 是浮层且带关闭按钮', async ({ page }) => {
   await expect(page.getByRole('tablist')).toBeHidden()
 })
 
+test('截图与下文之间没有异常空白', async ({ page }) => {
+  test.skip(!taskId, '没有笔记数据')
+  await page.goto(`/note/${taskId}`)
+  await expect(page.locator('.markdown-body img').first()).toBeVisible({ timeout: 10000 })
+  // react-medium-image-zoom 的 styles.css 没被引入时，它的 ghost 占位元素落在正常文档流里，
+  // 每张截图后面多一个和图片等高（实测 500px）的空块。直接数"流内、无文字、无图的高空块"，
+  // 修复前 12 个、修复后 0 个；不依赖库内部何时挂载 ghost，也不依赖 DOM 拓扑
+  const blanks = await page.locator('.markdown-body').evaluate(root => {
+    let n = 0
+    for (const el of root.querySelectorAll('div')) {
+      const r = el.getBoundingClientRect()
+      if (
+        r.height > 150 &&
+        !(el.textContent || '').trim() &&
+        !el.querySelector('img') &&
+        getComputedStyle(el).position === 'static'
+      ) {
+        n++
+      }
+    }
+    return n
+  })
+  expect(blanks).toBe(0)
+})
+
 test('生成中的流程页有返回书架的出口', async ({ page }) => {
   // 伪造一个"生成中"的任务：拦截笔记库与状态接口，不碰真实数据、也不会真跑一次生成。
   // 回归的是用户明确提的问题——流程页以前没有任何返回入口，人被卡在这一页只能刷新或按
