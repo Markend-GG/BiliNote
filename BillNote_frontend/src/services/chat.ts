@@ -42,7 +42,9 @@ export const askQuestion = async (data: {
   /** 可选：data:image/...;base64,... 形式的多模态图片（最多 4 张） */
   images?: string[]
 }): Promise<AskResponse> => {
-  return await request.post('/chat/ask', data, { timeout: 180000 })
+  // 工具调用多轮链路实测 1~3 分钟；nginx 的 proxy_read_timeout 已同步提到 600s，
+  // 这里要比它略小或相等，否则先断的是客户端、用户看到的是"请求超时"
+  return await request.post('/chat/ask', data, { timeout: 600000 })
 }
 
 export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse> => {

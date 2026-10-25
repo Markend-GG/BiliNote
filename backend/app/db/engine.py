@@ -11,7 +11,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///bili_note.db")
 # SQLite 需要特定连接参数，其他数据库不需要
 engine_args = {}
 if DATABASE_URL.startswith("sqlite"):
-    engine_args["connect_args"] = {"check_same_thread": False}
+    # timeout=30：SQLite 的 busy timeout。生成笔记期间的写事务会短暂占用写锁，
+    # 默认 5 秒等不到就直接抛 "database is locked"（界面的书架/模型列表会跟着报错）
+    engine_args["connect_args"] = {"check_same_thread": False, "timeout": 30}
 
 _pool_args = {}
 if not DATABASE_URL.startswith("sqlite"):
