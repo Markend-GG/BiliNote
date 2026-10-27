@@ -28,8 +28,11 @@ describe('coverSrc', () => {
   it('远程封面走后端代理且是绝对路径', () => {
     expect(coverSrc(item())).toBe('/api/image_proxy?url=' + encodeURIComponent('http://x/1.jpg'))
   })
-  it('本地视频直连', () => {
-    expect(coverSrc(item({ platform: 'local', coverUrl: '/uploads/a.mp4' }))).toBe('/uploads/a.mp4')
+  it('本地笔记封面也走后端代理（后端绝对地址浏览器不可达）', () => {
+    const local = 'http://localhost:8483/static/cover/2、数量关系第二课-和差倍比_cover.jpg'
+    expect(coverSrc(item({ platform: 'local', coverUrl: local }))).toBe(
+      '/api/image_proxy?url=' + encodeURIComponent(local),
+    )
   })
   it('没封面给占位图', () => {
     expect(coverSrc(item({ coverUrl: null }))).toBe('/placeholder.png')

@@ -20,13 +20,13 @@ export const NOTE_DRAG_MIME = 'text/bilinote-note'
 const baseURL = String(import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
 
 /**
- * 封面要走后端代理：B 站等站点的图片有防盗链，浏览器直接拉会 403。
- * 本地视频存的是文件路径，直连即可。
+ * 封面一律走后端代理：B 站等站点有防盗链，浏览器直接拉会 403；
+ * 本地笔记的封面 URL 是后端绝对地址（如 http://localhost:8483/static/cover/…，
+ * 容器内端口，浏览器访问不到），同样必须由后端代拉，否则卡片永远回退占位图。
  */
 export const coverSrc = (item: ShelfItem) => {
   const url = item.coverUrl
   if (!url) return '/placeholder.png'
-  if (item.platform === 'local') return url
   return `${baseURL}/image_proxy?url=${encodeURIComponent(url)}`
 }
 
