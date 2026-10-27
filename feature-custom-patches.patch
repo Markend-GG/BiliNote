@@ -5209,12 +5209,294 @@ index 0000000..f1997f4
 +    </div>
 +  )
 +})
+diff --git a/BillNote_frontend/src/pages/LibraryPage/components/FolderTree.tsx b/BillNote_frontend/src/pages/LibraryPage/components/FolderTree.tsx
+new file mode 100644
+index 0000000..de8c4ca
+--- /dev/null
++++ b/BillNote_frontend/src/pages/LibraryPage/components/FolderTree.tsx
+@@ -0,0 +1,276 @@
++import { Fragment, memo, useState } from 'react'
++import { ChevronRight, Folder as FolderGlyph, FolderOpen, Library, MoreHorizontal } from 'lucide-react'
++import { cn } from '@/lib/utils'
++import { Menu, type MenuEntryOrSeparator } from '@/components/ui/menu'
++import type { LibraryFolder } from '@/services/library'
++import type { ShelfItem } from '@/store/selectors'
++import { NOTE_DRAG_MIME, statusMeta } from '../utils'
++import { startDrag } from './NoteCard'
++
++/** 文件夹节点自己的拖拽 MIME：和笔记的 MIME 分开，两种拖拽互不响应 */
++export const FOLDER_DRAG_MIME = 'text/bilinote-folder'
++
++const EXPAND_KEY = 'shelf-tree-expanded'
++
++/** 与书架页的 FolderFilter 同义：null=全部，'none'=未分类，其余是文件夹 id */
++export type TreeNode = string | 'none' | null
++
++interface FolderTreeProps {
++  folders: LibraryFolder[]
++  /** 某个范围（文件夹 / 未分类）里的笔记，已按当前排序档排好 */
++  itemsOf: (folderId: string | null) => ShelfItem[]
++  counts: { byFolder: Map<string, number>; none: number; total: number }
++  selected: TreeNode
++  onSelect: (node: TreeNode) => void
++  onOpenNote: (taskId: string) => void
++  /** 搜索命中所在的文件夹，节点上打个小圆点（不自动展开） */
++  hitFolderIds: Set<string>
++  onDropNote: (taskId: string, folderId: string | null) => void
++  onReorderFolders: (orderedIds: string[]) => void
++  folderMenu: (folder: LibraryFolder) => MenuEntryOrSeparator[]
++}
++
++const readExpanded = (): Record<string, boolean> => {
++  try {
++    return JSON.parse(localStorage.getItem(EXPAND_KEY) || '{}')
++  } catch {
++    return {}
++  }
++}
++
++/** 插入线：独立的一条 2px div，不给行加 border，避免拖拽时布局抖动 */
++const InsertLine = () => <div className="bg-primary my-0.5 h-0.5 rounded-full" />
++
++/**
++ * 书架的目录树侧栏：全部 → 各文件夹（展开后笔记作叶子）→ 未分类。
++ *
++ * 一个节点同时承担两种拖拽语义，靠 MIME 区分：
++ * 拖着【笔记】过来 = 归档落点（高亮 + "松手归档"提示）；
++ * 拖着【文件夹】过来 = 插入线排序（启用 folders 表里一直闲置的 sort_order）。
++ */
++export const FolderTree = memo(function FolderTree({
++  folders,
++  itemsOf,
++  counts,
++  selected,
++  onSelect,
++  onOpenNote,
++  hitFolderIds,
++  onDropNote,
++  onReorderFolders,
++  folderMenu,
++}: FolderTreeProps) {
++  const [expanded, setExpanded] = useState<Record<string, boolean>>(readExpanded)
++  // 笔记拖到文件夹节点上的高亮
++  const [archiveTarget, setArchiveTarget] = useState<string | 'none' | null>(null)
++  // 文件夹插入线的位置（0..folders.length）
++  const [folderDropIndex, setFolderDropIndex] = useState<number | null>(null)
++
++  const toggle = (key: string) => {
++    setExpanded(prev => {
++      const next = { ...prev, [key]: !prev[key] }
++      localStorage.setItem(EXPAND_KEY, JSON.stringify(next))
++      return next
++    })
++  }
++
++  const handleFolderDrop = (e: React.DragEvent, index: number) => {
++    const dragged = e.dataTransfer.getData(FOLDER_DRAG_MIME)
++    setFolderDropIndex(null)
++    if (!dragged) return
++    e.preventDefault()
++    e.stopPropagation()
++    const ids = folders.map(f => f.id)
++    const from = ids.indexOf(dragged)
++    if (from < 0) return
++    ids.splice(from, 1)
++    // 插入线位置是"含被拖节点"的坐标系，抽掉它之后要回退一格
++    ids.splice(from < index ? index - 1 : index, 0, dragged)
++    onReorderFolders(ids)
++  }
++
++  const folderDragOver = (e: React.DragEvent, index: number) => {
++    if (e.dataTransfer.types.includes(FOLDER_DRAG_MIME)) {
++      e.preventDefault()
++      const r = e.currentTarget.getBoundingClientRect()
++      const idx = e.clientY < r.top + r.height / 2 ? index : index + 1
++      if (idx !== folderDropIndex) setFolderDropIndex(idx)
++      return
++    }
++    // 笔记拖过文件夹节点时不要冒插入线，归档高亮由节点自己的 handler 负责
++    setFolderDropIndex(null)
++  }
++
++  const nodeBase =
++    'group/node flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-sm transition-colors'
++
++  return (
++    <nav
++      aria-label="笔记目录树"
++      className="flex h-full w-[240px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r bg-neutral-50/70 p-2"
++      onDragLeave={e => {
++        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
++          setFolderDropIndex(null)
++          setArchiveTarget(null)
++        }
++      }}
++    >
++      <button
++        type="button"
++        onClick={() => onSelect(null)}
++        className={cn(nodeBase, selected === null ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-neutral-200/60')}
++      >
++        <Library className="h-4 w-4 shrink-0" />
++        <span className="flex-1 truncate text-left">全部</span>
++        <span className="text-muted-foreground text-xs">{counts.total}</span>
++      </button>
++
++      {folders.map((folder, i) => {
++        const isOpen = !!expanded[folder.id]
++        const leaves = isOpen ? itemsOf(folder.id) : []
++        return (
++          <Fragment key={folder.id}>
++            {folderDropIndex === i && <InsertLine />}
++            <div
++              draggable
++              onDragStart={e => {
++                e.dataTransfer.setData(FOLDER_DRAG_MIME, folder.id)
++                e.dataTransfer.effectAllowed = 'move'
++              }}
++              onDragOver={e => folderDragOver(e, i)}
++              onDrop={e => handleFolderDrop(e, i)}
++              className={cn(
++                nodeBase,
++                selected === folder.id ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-neutral-200/60',
++                archiveTarget === folder.id && 'bg-primary/15 ring-primary/40 ring-1',
++              )}
++            >
++              <button
++                type="button"
++                aria-label={isOpen ? `收起 ${folder.name}` : `展开 ${folder.name}`}
++                onClick={e => {
++                  e.stopPropagation()
++                  toggle(folder.id)
++                }}
++                className="hover:bg-neutral-300/60 -ml-1 cursor-pointer rounded p-0.5"
++              >
++                <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', isOpen && 'rotate-90')} />
++              </button>
++              <button
++                type="button"
++                aria-label={`打开 ${folder.name}`}
++                onClick={() => onSelect(folder.id)}
++                onDragOver={e => {
++                  if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
++                  e.preventDefault()
++                  e.stopPropagation()
++                  e.dataTransfer.dropEffect = 'move'
++                  setArchiveTarget(folder.id)
++                }}
++                onDragLeave={() => setArchiveTarget(t => (t === folder.id ? null : t))}
++                onDrop={e => {
++                  const taskId = e.dataTransfer.getData(NOTE_DRAG_MIME)
++                  setArchiveTarget(null)
++                  if (!taskId) return
++                  e.preventDefault()
++                  e.stopPropagation()
++                  onDropNote(taskId, folder.id)
++                }}
++                className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left"
++              >
++                {isOpen ? (
++                  <FolderOpen className="text-amber-500 h-4 w-4 shrink-0" />
++                ) : (
++                  <FolderGlyph className="text-amber-500 h-4 w-4 shrink-0" />
++                )}
++                <span className="flex-1 truncate">{folder.name}</span>
++                {hitFolderIds.has(folder.id) && (
++                  <span className="bg-primary h-1.5 w-1.5 shrink-0 rounded-full" title="搜索命中" />
++                )}
++                <span className="text-muted-foreground text-xs">{counts.byFolder.get(folder.id) ?? 0}</span>
++              </button>
++              <Menu
++                trigger={<MoreHorizontal className="h-3.5 w-3.5" />}
++                entries={folderMenu(folder)}
++                ariaLabel={`${folder.name} 的操作`}
++                className="shrink-0 opacity-0 transition group-hover/node:opacity-100"
++              />
++            </div>
++            {isOpen &&
++              leaves.map(leaf => (
++                <TreeLeaf key={leaf.taskId} item={leaf} onOpenNote={onOpenNote} />
++              ))}
++          </Fragment>
++        )
++      })}
++      {folderDropIndex === folders.length && <InsertLine />}
++
++      {/* 未分类：虚拟节点，没有 ⋯ 菜单、不参与文件夹排序，但同样是归档落点 */}
++      <div
++        onDragOver={e => {
++          if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
++          e.preventDefault()
++          e.dataTransfer.dropEffect = 'move'
++          setArchiveTarget('none')
++        }}
++        onDragLeave={() => setArchiveTarget(t => (t === 'none' ? null : t))}
++        onDrop={e => {
++          const taskId = e.dataTransfer.getData(NOTE_DRAG_MIME)
++          setArchiveTarget(null)
++          if (!taskId) return
++          e.preventDefault()
++          onDropNote(taskId, null)
++        }}
++        className={cn(
++          nodeBase,
++          selected === 'none' ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-neutral-200/60',
++          archiveTarget === 'none' && 'bg-primary/15 ring-primary/40 ring-1',
++        )}
++      >
++        <button
++          type="button"
++          aria-label={expanded.none ? '收起未分类' : '展开未分类'}
++          onClick={e => {
++            e.stopPropagation()
++            toggle('none')
++          }}
++          className="hover:bg-neutral-300/60 -ml-1 cursor-pointer rounded p-0.5"
++        >
++          <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', expanded.none && 'rotate-90')} />
++        </button>
++        <button type="button" aria-label="打开 未分类" onClick={() => onSelect('none')} className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left">
++          <FolderGlyph className="text-neutral-400 h-4 w-4 shrink-0" />
++          <span className="flex-1 truncate">未分类</span>
++          <span className="text-muted-foreground text-xs">{counts.none}</span>
++        </button>
++      </div>
++      {expanded.none && itemsOf(null).map(leaf => <TreeLeaf key={leaf.taskId} item={leaf} onOpenNote={onOpenNote} />)}
++    </nav>
++  )
++})
++
++const TreeLeaf = memo(function TreeLeaf({
++  item,
++  onOpenNote,
++}: {
++  item: ShelfItem
++  onOpenNote: (taskId: string) => void
++}) {
++  const status = statusMeta(item.status)
++  return (
++    <button
++      type="button"
++      draggable
++      onDragStart={e => startDrag(e, item.taskId)}
++      onClick={() => onOpenNote(item.taskId)}
++      className="hover:bg-neutral-200/60 flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 pl-8 text-left text-[13px] transition-colors"
++      title={item.title}
++    >
++      <span
++        className={cn('h-1.5 w-1.5 shrink-0 rounded-full', status.running ? 'bg-blue-500 animate-pulse' : item.status === 'FAILED' ? 'bg-red-500' : 'bg-emerald-500')}
++        aria-label={status.label}
++      />
++      <span className="text-muted-foreground min-w-0 flex-1 truncate group-hover:text-foreground">{item.title}</span>
++    </button>
++  )
++})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx b/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx
 new file mode 100644
-index 0000000..825306a
+index 0000000..48beb70
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/components/NoteCard.tsx
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,178 @@
 +import { memo } from 'react'
 +import { Folder as FolderIcon, MoreHorizontal } from 'lucide-react'
 +import { cn } from '@/lib/utils'
@@ -5255,7 +5537,8 @@ index 0000000..825306a
 +  if (!img.src.endsWith('/placeholder.png')) img.src = '/placeholder.png'
 +}
 +
-+const startDrag = (e: React.DragEvent, taskId: string) => {
++/** 拖拽归档的统一入口：卡片、列表行、目录树叶子都用它写同一个 MIME */
++export const startDrag = (e: React.DragEvent, taskId: string) => {
 +  e.dataTransfer.setData(NOTE_DRAG_MIME, taskId)
 +  e.dataTransfer.effectAllowed = 'move'
 +}
@@ -5394,11 +5677,11 @@ index 0000000..825306a
 +})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/index.tsx b/BillNote_frontend/src/pages/LibraryPage/index.tsx
 new file mode 100644
-index 0000000..bdc4426
+index 0000000..c8c724b
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/index.tsx
-@@ -0,0 +1,771 @@
-+import { useEffect, useMemo, useState } from 'react'
+@@ -0,0 +1,950 @@
++import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 +import { Link, useLocation, useNavigate } from 'react-router-dom'
 +import {
 +  ArrowUpDown,
@@ -5407,6 +5690,8 @@ index 0000000..bdc4426
 +  FolderInput,
 +  FolderPlus,
 +  LayoutGrid,
++  ListTree,
++  PanelLeft,
 +  Pencil,
 +  List,
 +  Plus,
@@ -5436,10 +5721,12 @@ index 0000000..bdc4426
 +import { searchNotes, type SearchHit } from '@/services/library'
 +import { NoteCard, NoteRow } from './components/NoteCard'
 +import { FolderCard } from './components/FolderCard'
++import { FolderTree } from './components/FolderTree'
 +import { PromptDialog } from '@/components/PromptDialog'
 +import { Menu } from '@/components/ui/menu'
 +import { NOTE_DRAG_MIME, SORTERS } from './utils'
 +import type { ShelfSortMode } from '@/store/libraryStore'
++import { useMediaQuery } from '@/hooks/useMediaQuery'
 +
 +/** activeFolder: null = 全部，'none' = 未分类，其余是文件夹 id */
 +type FolderFilter = string | 'none' | null
@@ -5468,7 +5755,7 @@ index 0000000..bdc4426
 +  const loaded = useLibraryStore(state => state.loaded)
 +  const loading = useLibraryStore(state => state.loading)
 +  const loadError = useLibraryStore(state => state.loadError)
-+  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
++  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote, reorderNotes, reorderFolders } =
 +    useLibraryStore()
 +  const removeTask = useTaskStore(state => state.removeTask)
 +  const dropTasksLocal = useTaskStore(state => state.dropTasksLocal)
@@ -5485,6 +5772,10 @@ index 0000000..bdc4426
 +  const [folderToDelete, setFolderToDelete] = useState<LibraryFolder | null>(null)
 +  const [noteToDelete, setNoteToDelete] = useState<ShelfItem | null>(null)
 +  const [deleting, setDeleting] = useState(false)
++  // 目录树：窄屏收成抽屉；右区行的插入线位置（null = 没有拖拽悬停）
++  const [treeDrawerOpen, setTreeDrawerOpen] = useState(false)
++  const [noteDropIndex, setNoteDropIndex] = useState<number | null>(null)
++  const isNarrow = useMediaQuery('(max-width: 1100px)')
 +
 +  useEffect(() => {
 +    fetchLibrary()
@@ -5657,6 +5948,115 @@ index 0000000..bdc4426
 +    },
 +  ]
 +
++  /* ---- 目录树视图的派生数据与插入线排序 ---- */
++  const itemsOf = useCallback(
++    (folderId: string | null) => {
++      const list =
++        folderId === null ? items.filter(i => !i.folderId) : items.filter(i => i.folderId === folderId)
++      return [...list].sort(SORTERS[sortMode].cmp)
++    },
++    [items, sortMode],
++  )
++
++  // 搜索命中所在的文件夹：侧栏打小圆点（不自动展开）
++  const hitFolderIds = useMemo(() => {
++    const set = new Set<string>()
++    if (!searching) return set
++    for (const hit of bodyHits) if (hit.folder_id) set.add(hit.folder_id)
++    for (const item of visibleItems) if (item.folderId) set.add(item.folderId)
++    return set
++  }, [searching, bodyHits, visibleItems])
++
++  // 插入线排序只在一个具体范围内有意义：「全部」和搜索态混合了多个文件夹，
++  // 线的位置对不上任何一个 scope，干脆不出现线（拖拽仍可用于归档）
++  const reorderScope: string | null | 'disabled' = searching
++    ? 'disabled'
++    : activeFolder === null
++      ? 'disabled'
++      : activeFolder === 'none'
++        ? null
++        : activeFolder
++
++  const scopeItems = useMemo(
++    () => (searching ? visibleItems : itemsOf(activeFolder === 'none' ? null : activeFolder)),
++    [searching, visibleItems, itemsOf, activeFolder],
++  )
++
++  const scopeLabel = searching
++    ? `搜索「${keyword}」`
++    : activeFolder === null
++      ? '全部笔记'
++      : activeFolder === 'none'
++        ? '未分类'
++        : folderName(activeFolder)
++
++  const handleRowDragOver = (e: React.DragEvent, i: number) => {
++    if (reorderScope === 'disabled') return
++    if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
++    e.preventDefault()
++    const r = e.currentTarget.getBoundingClientRect()
++    const idx = e.clientY < r.top + r.height / 2 ? i : i + 1
++    // 只在跨过中点时 setState，避免拖拽期间每帧重渲染
++    if (idx !== noteDropIndex) setNoteDropIndex(idx)
++  }
++
++  const handleRowDrop = (e: React.DragEvent) => {
++    const id = e.dataTransfer.getData(NOTE_DRAG_MIME)
++    const index = noteDropIndex
++    setNoteDropIndex(null)
++    if (!id || index === null || reorderScope === 'disabled') return
++    e.preventDefault()
++    const ids = itemsOf(reorderScope).map(i => i.taskId)
++    const from = ids.indexOf(id)
++    if (from < 0) return
++    ids.splice(from, 1)
++    ids.splice(from < index ? index - 1 : index, 0, id)
++    if (sortMode !== 'manual') {
++      setSortMode('manual')
++      toast('已切到手动排序：之后的顺序就是你拖出来的顺序')
++    }
++    reorderNotes(reorderScope, ids)
++  }
++
++  const bodyHitsBlock = searching && bodyHits.length > 0 && (
++    <div className="mb-4 overflow-hidden rounded-lg border bg-white">
++      <div className="text-muted-foreground border-b px-3 py-2 text-xs">
++        正文命中 {bodyHits.length} 条（点击跳到对应章节）
++      </div>
++      {bodyHits.map((hit, i) => (
++        <button
++          key={`${hit.task_id}-${i}`}
++          type="button"
++          onClick={() => navigate(`/note/${hit.task_id}`, { state: { heading: hit.heading } })}
++          className="hover:bg-neutral-50 block w-full cursor-pointer border-b px-3 py-2 text-left last:border-b-0"
++        >
++          <div className="truncate text-sm font-medium">
++            {hit.title || '未命名笔记'}
++            <span className="text-muted-foreground font-normal"> · {hit.heading}</span>
++          </div>
++          <div className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
++            {renderSnippet(hit.snippet)}
++          </div>
++        </button>
++      ))}
++    </div>
++  )
++
++  const treeSidebar = (
++    <FolderTree
++      folders={folders}
++      itemsOf={itemsOf}
++      counts={{ byFolder: counts.byFolder, none: counts.none, total: items.length }}
++      selected={activeFolder}
++      onSelect={setActiveFolder}
++      onOpenNote={openNote}
++      hitFolderIds={hitFolderIds}
++      onDropNote={(taskId, folderId) => dropInto(taskId, folderId)}
++      onReorderFolders={ids => reorderFolders(ids)}
++      folderMenu={folderEntries}
++    />
++  )
++
 +  const showFolders = !searching && activeFolder === null
 +  const totalNotes = items.length
 +  const deletingCount = folderToDelete ? (counts.byFolder.get(folderToDelete.id) ?? 0) : 0
@@ -5681,8 +6081,34 @@ index 0000000..bdc4426
 +        </div>
 +
 +        <div className="flex shrink-0 items-center gap-1">
++          {viewMode === 'tree' && isNarrow && (
++            <Button
++              variant="ghost"
++              size="icon"
++              className="h-9 w-9"
++              aria-label="打开目录树"
++              onClick={() => setTreeDrawerOpen(true)}
++            >
++              <PanelLeft className="h-4 w-4" />
++            </Button>
++          )}
 +          <div className="mr-1 flex items-center rounded-md border p-0.5">
 +            <TooltipProvider>
++              <Tooltip>
++                <TooltipTrigger asChild>
++                  <button
++                    type="button"
++                    aria-label="目录树视图"
++                    onClick={() => setViewMode('tree')}
++                    className={`cursor-pointer rounded p-1 ${
++                      viewMode === 'tree' ? 'bg-primary text-white' : 'text-muted-foreground hover:bg-neutral-100'
++                    }`}
++                  >
++                    <ListTree className="h-4 w-4" />
++                  </button>
++                </TooltipTrigger>
++                <TooltipContent>目录树（按文件夹展开，可拖拽排序）</TooltipContent>
++              </Tooltip>
 +              <Tooltip>
 +                <TooltipTrigger asChild>
 +                  <button
@@ -5755,7 +6181,8 @@ index 0000000..bdc4426
 +        </div>
 +      </header>
 +
-+      {/* ── 文件夹筛选条 ─────────────────────────────────── */}
++      {/* ── 文件夹筛选条（目录树档隐藏：树自己就是导航）────── */}
++      {viewMode !== 'tree' && (
 +      <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b bg-white px-4 py-2">
 +        <FilterChip
 +          label="全部"
@@ -5795,32 +6222,66 @@ index 0000000..bdc4426
 +          </span>
 +        )}
 +      </div>
++      )}
 +
-+      {/* ── 内容区 ───────────────────────────────────────── */}
-+      <main className="flex-1 overflow-y-auto px-4 py-4">
-+        {searching && bodyHits.length > 0 && (
-+          <div className="mb-4 overflow-hidden rounded-lg border bg-white">
-+            <div className="text-muted-foreground border-b px-3 py-2 text-xs">
-+              正文命中 {bodyHits.length} 条（点击跳到对应章节）
++      {/* ── 目录树视图：左树 + 右行列表 ─────────────────────── */}
++      {viewMode === 'tree' && (
++        <div className="flex min-h-0 flex-1">
++          {isNarrow ? (
++            treeDrawerOpen && (
++              <div className="fixed inset-0 z-40">
++                <div className="absolute inset-0 bg-black/30" onClick={() => setTreeDrawerOpen(false)} />
++                <div className="relative z-10 h-full bg-white shadow-xl">{treeSidebar}</div>
++              </div>
++            )
++          ) : (
++            treeSidebar
++          )}
++          <div
++            className="min-w-0 flex-1 overflow-y-auto px-4 py-4"
++            onDragLeave={e => {
++              if (!e.currentTarget.contains(e.relatedTarget as Node)) setNoteDropIndex(null)
++            }}
++          >
++            {bodyHitsBlock}
++            <div className="text-muted-foreground mb-3 flex items-center gap-2 text-sm">
++              <span className="font-medium text-neutral-700">{scopeLabel}</span>
++              <span>· {scopeItems.length} 篇</span>
++              {reorderScope === 'disabled' && !searching && (
++                <span className="text-xs">（在左侧选一个文件夹后，可拖行排序）</span>
++              )}
 +            </div>
-+            {bodyHits.map((hit, i) => (
-+              <button
-+                key={`${hit.task_id}-${i}`}
-+                type="button"
-+                onClick={() => navigate(`/note/${hit.task_id}`, { state: { heading: hit.heading } })}
-+                className="hover:bg-neutral-50 block w-full cursor-pointer border-b px-3 py-2 text-left last:border-b-0"
-+              >
-+                <div className="truncate text-sm font-medium">
-+                  {hit.title || '未命名笔记'}
-+                  <span className="text-muted-foreground font-normal"> · {hit.heading}</span>
-+                </div>
-+                <div className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
-+                  {renderSnippet(hit.snippet)}
-+                </div>
-+              </button>
-+            ))}
++            {scopeItems.length === 0 ? (
++              <p className="text-muted-foreground py-16 text-center text-sm">
++                {searching ? `没有匹配「${keyword}」的笔记` : '这里还没有笔记'}
++              </p>
++            ) : (
++              <div className="mx-auto flex max-w-5xl flex-col gap-2">
++                {scopeItems.map((item, i) => (
++                  <Fragment key={item.taskId}>
++                    {noteDropIndex === i && <div className="bg-primary h-0.5 rounded-full" />}
++                    <div onDragOver={e => handleRowDragOver(e, i)} onDrop={handleRowDrop}>
++                      <NoteRow
++                        item={item}
++                        folderName={folderName(item.folderId)}
++                        showFolder={activeFolder === null || searching}
++                        onOpen={() => openNote(item.taskId)}
++                        menuEntries={noteEntries(item)}
++                      />
++                    </div>
++                  </Fragment>
++                ))}
++                {noteDropIndex === scopeItems.length && <div className="bg-primary h-0.5 rounded-full" />}
++              </div>
++            )}
 +          </div>
-+        )}
++        </div>
++      )}
++
++      {/* ── 内容区（卡片 / 列表两档）───────────────────────── */}
++      {viewMode !== 'tree' && (
++      <main className="flex-1 overflow-y-auto px-4 py-4">
++        {bodyHitsBlock}
 +        {showFolders && recent.length > 0 && (
 +          <div className="mb-4 flex items-center gap-2 text-sm">
 +            <Clock className="text-muted-foreground h-4 w-4 shrink-0" />
@@ -5937,6 +6398,7 @@ index 0000000..bdc4426
 +          </>
 +        )}
 +      </main>
++      )}
 +
 +      {/* ── 弹层 ─────────────────────────────────────────── */}
 +      <NoteFormDialog
@@ -6171,10 +6633,10 @@ index 0000000..bdc4426
 +export default LibraryPage
 diff --git a/BillNote_frontend/src/pages/LibraryPage/utils.test.ts b/BillNote_frontend/src/pages/LibraryPage/utils.test.ts
 new file mode 100644
-index 0000000..bfdb7ec
+index 0000000..ea0eee4
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/utils.test.ts
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,54 @@
 +import { describe, expect, it } from 'vitest'
 +import { SORTERS, coverSrc, formatDate, formatDuration } from './utils'
 +import type { ShelfItem } from '@/store/selectors'
@@ -6201,7 +6663,7 @@ index 0000000..bfdb7ec
 +
 +describe('coverSrc', () => {
 +  const item = (over: Partial<ShelfItem> = {}): ShelfItem =>
-+    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: 'bilibili', coverUrl: 'http://x/1.jpg', duration: null, createdAt: null, lastOpenedAt: null, hasLocal: false, ...over })
++    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: 'bilibili', coverUrl: 'http://x/1.jpg', duration: null, createdAt: null, lastOpenedAt: null, sortOrder: 0, hasLocal: false, ...over })
 +  it('远程封面走后端代理且是绝对路径', () => {
 +    expect(coverSrc(item())).toBe('/api/image_proxy?url=' + encodeURIComponent('http://x/1.jpg'))
 +  })
@@ -6215,28 +6677,38 @@ index 0000000..bfdb7ec
 +
 +describe('SORTERS', () => {
 +  const item = (over: Partial<ShelfItem>): ShelfItem =>
-+    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: null, coverUrl: null, duration: null, createdAt: null, lastOpenedAt: null, hasLocal: false, ...over })
++    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: null, coverUrl: null, duration: null, createdAt: null, lastOpenedAt: null, sortOrder: 0, hasLocal: false, ...over })
 +  const list = [item({ taskId: 'a', createdAt: 1, duration: 9, title: '乙' }), item({ taskId: 'b', createdAt: 3, duration: 5, title: '甲' })]
 +  it('默认最新创建', () => expect(list.sort(SORTERS.created.cmp).map(i => i.taskId)).toEqual(['b', 'a']))
 +  it('时长最长', () => expect(list.sort(SORTERS.duration.cmp).map(i => i.taskId)).toEqual(['a', 'b']))
 +  it('标题按中文排', () => expect(list.sort(SORTERS.title.cmp).map(i => i.taskId)).toEqual(['b', 'a']))
++  it('手动排序按 sortOrder，只在本地的任务排最后', () => {
++    const manual = [
++      item({ taskId: 'local', sortOrder: Number.MAX_SAFE_INTEGER }),
++      item({ taskId: 'second', sortOrder: 7 }),
++      item({ taskId: 'first', sortOrder: 2 }),
++    ]
++    expect(manual.sort(SORTERS.manual.cmp).map(i => i.taskId)).toEqual(['first', 'second', 'local'])
++  })
 +})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/utils.ts b/BillNote_frontend/src/pages/LibraryPage/utils.ts
 new file mode 100644
-index 0000000..747c713
+index 0000000..9a43dd7
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/utils.ts
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,76 @@
 +import type { ShelfItem } from '@/hooks/useShelfItems'
 +import type { ShelfSortMode } from '@/store/libraryStore'
 +import { taskStatusLabels, videoPlatforms } from '@/constant/note'
 +
-+/** 书架排序器：默认最新创建；"最近打开"没打开过的排最后 */
++/** 书架排序器：默认最新创建；"最近打开"没打开过的排最后；"手动"按文件夹内部各自的顺序 */
 +export const SORTERS: Record<ShelfSortMode, { label: string; cmp: (a: ShelfItem, b: ShelfItem) => number }> = {
 +  created: { label: '最新创建', cmp: (a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) },
 +  opened: { label: '最近打开', cmp: (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0) },
 +  duration: { label: '时长最长', cmp: (a, b) => (b.duration ?? 0) - (a.duration ?? 0) },
 +  title: { label: '标题拼音', cmp: (a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN') },
++  // 只在浏览器本地的任务没有 sortOrder（selectors 里给了 MAX_SAFE_INTEGER），排最后
++  manual: { label: '手动排序', cmp: (a, b) => a.sortOrder - b.sortOrder },
 +}
 +
 +/** 拖拽归档用的自定义 MIME。用 text/plain 会和"拖文字"混淆 */
@@ -9431,10 +9903,10 @@ index d5fcb68..eae0efa 100644
  
 diff --git a/BillNote_frontend/src/services/library.ts b/BillNote_frontend/src/services/library.ts
 new file mode 100644
-index 0000000..45d18f8
+index 0000000..9c852bf
 --- /dev/null
 +++ b/BillNote_frontend/src/services/library.ts
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,118 @@
 +import request from '@/utils/request'
 +
 +export interface LibraryFolder {
@@ -9458,6 +9930,8 @@ index 0000000..45d18f8
 +  created_at: number | null
 +  updated_at: number | null
 +  last_opened_at: number | null
++  /** 手动排序档的位置（按文件夹内部各自独立） */
++  sort_order: number
 +  /** 生成时的表单参数，浏览器本地记录丢了以后靠它恢复「重新生成」 */
 +  form_data: Record<string, any> | null
 +}
@@ -9504,6 +9978,19 @@ index 0000000..45d18f8
 +    task_id: taskId,
 +    folder_id: folderId,
 +  })
++
++export interface ReorderResult {
++  applied: number
++  ignored: number
++}
++
++/** 手动排序：重写某个文件夹内部的笔记顺序（folderId=null 即未分类） */
++export const reorderNotes = (folderId: string | null, taskIds: string[]) =>
++  request.post<any, ReorderResult>('/library/reorder', { folder_id: folderId, task_ids: taskIds })
++
++/** 侧栏文件夹节点的插入线排序 */
++export const reorderFolders = (folderIds: string[]) =>
++  request.post<any, ReorderResult>('/library/folders/reorder', { folder_ids: folderIds })
 +
 +export const renameNote = (taskId: string, title: string) =>
 +  request.post<any, { task_id: string; title: string | null }>('/library/rename', {
@@ -9796,10 +10283,10 @@ index 51baa57..12a03bb 100644
 \ No newline at end of file
 diff --git a/BillNote_frontend/src/store/libraryStore.ts b/BillNote_frontend/src/store/libraryStore.ts
 new file mode 100644
-index 0000000..68d0662
+index 0000000..5b228e2
 --- /dev/null
 +++ b/BillNote_frontend/src/store/libraryStore.ts
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,259 @@
 +import { create } from 'zustand'
 +import { persist, createJSONStorage } from 'zustand/middleware'
 +import { del, get, set } from 'idb-keyval'
@@ -9812,9 +10299,9 @@ index 0000000..68d0662
 +  VersionUpload,
 +} from '@/services/library'
 +
-+export type ShelfViewMode = 'card' | 'list'
++export type ShelfViewMode = 'tree' | 'card' | 'list'
 +
-+export type ShelfSortMode = 'created' | 'opened' | 'duration' | 'title'
++export type ShelfSortMode = 'created' | 'opened' | 'duration' | 'title' | 'manual'
 +
 +interface LibraryState {
 +  folders: LibraryFolder[]
@@ -9839,6 +10326,9 @@ index 0000000..68d0662
 +  moveNote: (taskId: string, folderId: string | null) => Promise<boolean>
 +  renameNote: (taskId: string, title: string) => Promise<boolean>
 +  touchNote: (taskId: string) => Promise<void>
++  /** 手动排序档：重写某个文件夹内部顺序（null = 未分类）。乐观更新 + 失败回滚 */
++  reorderNotes: (folderId: string | null, taskIds: string[]) => Promise<boolean>
++  reorderFolders: (folderIds: string[]) => Promise<boolean>
 +  folderName: (folderId: string | null | undefined) => string
 +}
 +
@@ -9853,7 +10343,8 @@ index 0000000..68d0662
 +      folders: [],
 +      notes: [],
 +      versionsByTask: {},
-+      viewMode: 'card',
++      // 首次进来默认目录树（用户定的）；老用户持久化里的 'card'/'list' 仍合法，直接沿用
++      viewMode: 'tree',
 +      sortMode: 'created',
 +      setSortMode: sortMode => set({ sortMode }),
 +      loaded: false,
@@ -9963,6 +10454,44 @@ index 0000000..68d0662
 +          return true
 +        } catch {
 +          set({ notes: before })
++          return false
++        }
++      },
++
++      reorderNotes: async (folderId, taskIds) => {
++        const before = get().notes
++        const rank = new Map(taskIds.map((id, i) => [id, i]))
++        // 先本地改一遍：插入线落位要立刻看到新顺序，不等网络往返
++        set(state => ({
++          notes: state.notes.map(n =>
++            n.folder_id === folderId && rank.has(n.task_id)
++              ? { ...n, sort_order: rank.get(n.task_id)! }
++              : n,
++          ),
++        }))
++        try {
++          await api.reorderNotes(folderId, taskIds)
++          return true
++        } catch {
++          set({ notes: before })
++          return false
++        }
++      },
++
++      reorderFolders: async folderIds => {
++        const before = get().folders
++        const rank = new Map(folderIds.map((id, i) => [id, i]))
++        set(state => ({
++          // 文件夹的显示顺序就是数组顺序，乐观更新后必须重排数组才看得见
++          folders: state.folders
++            .map(f => (rank.has(f.id) ? { ...f, sort_order: rank.get(f.id)! } : f))
++            .sort((a, b) => a.sort_order - b.sort_order),
++        }))
++        try {
++          await api.reorderFolders(folderIds)
++          return true
++        } catch {
++          set({ folders: before })
 +          return false
 +        }
 +      },
@@ -10098,10 +10627,10 @@ index d94e042..0ad9abf 100644
        const existing = get().provider.find(p => p.id === provider.id)
 diff --git a/BillNote_frontend/src/store/selectors.test.ts b/BillNote_frontend/src/store/selectors.test.ts
 new file mode 100644
-index 0000000..ea9ec6e
+index 0000000..037798c
 --- /dev/null
 +++ b/BillNote_frontend/src/store/selectors.test.ts
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,71 @@
 +import { describe, expect, it } from 'vitest'
 +import { mergeShelfItems } from './selectors'
 +import type { LibraryNote } from '@/services/library'
@@ -10120,6 +10649,7 @@ index 0000000..ea9ec6e
 +  created_at: 1000,
 +  updated_at: 1000,
 +  last_opened_at: null,
++  sort_order: 4,
 +  form_data: null,
 +  ...over,
 +})
@@ -10165,13 +10695,19 @@ index 0000000..ea9ec6e
 +    expect(items.map(i => i.taskId)).toEqual(['n1', 'local-only'])
 +    expect(items[1].hasLocal).toBe(true)
 +  })
++
++  it('手动排序位置透传；只在本地的任务排最后', () => {
++    const items = mergeShelfItems([note({ sort_order: 4 })], [task({ id: 'local-only' })])
++    expect(items[0].sortOrder).toBe(4)
++    expect(items[1].sortOrder).toBe(Number.MAX_SAFE_INTEGER)
++  })
 +})
 diff --git a/BillNote_frontend/src/store/selectors.ts b/BillNote_frontend/src/store/selectors.ts
 new file mode 100644
-index 0000000..e4614c7
+index 0000000..71a2409
 --- /dev/null
 +++ b/BillNote_frontend/src/store/selectors.ts
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +import type { LibraryNote } from '@/services/library'
 +import type { Task } from '@/store/taskStore'
 +
@@ -10185,6 +10721,8 @@ index 0000000..e4614c7
 +  duration: number | null
 +  createdAt: number | null
 +  lastOpenedAt: number | null
++  /** 手动排序档的位置；只在浏览器本地的任务没有这个概念，排最后 */
++  sortOrder: number
 +  /** 本地 IndexedDB 里有没有这篇的完整内容；没有的话进详情页要从后端 hydrate */
 +  hasLocal: boolean
 +}
@@ -10217,6 +10755,7 @@ index 0000000..e4614c7
 +      duration: note.duration ?? local?.audioMeta?.duration ?? null,
 +      createdAt: note.created_at ?? (local?.createdAt ? new Date(local.createdAt).getTime() : null),
 +      lastOpenedAt: note.last_opened_at,
++      sortOrder: note.sort_order ?? 0,
 +      hasLocal: !!local,
 +    }
 +  })
@@ -10234,6 +10773,7 @@ index 0000000..e4614c7
 +      duration: task.audioMeta?.duration || null,
 +      createdAt: task.createdAt ? new Date(task.createdAt).getTime() : null,
 +      lastOpenedAt: null,
++      sortOrder: Number.MAX_SAFE_INTEGER,
 +      hasLocal: true,
 +    }))
 +
@@ -11053,10 +11593,10 @@ index 3d6c806..e226270 100644
  _pool_args = {}
  if not DATABASE_URL.startswith("sqlite"):
 diff --git a/backend/app/db/init_db.py b/backend/app/db/init_db.py
-index d7e9847..f52dced 100644
+index d7e9847..445e008 100644
 --- a/backend/app/db/init_db.py
 +++ b/backend/app/db/init_db.py
-@@ -1,9 +1,29 @@
+@@ -1,9 +1,54 @@
  from app.db.models.models import Model
  from app.db.models.providers import Provider
  from app.db.models.video_tasks import VideoTask
@@ -11065,6 +11605,30 @@ index d7e9847..f52dced 100644
 +from app.utils.logger import get_logger
 +
 +logger = get_logger(__name__)
++
++def _migrate_note_sort_order(engine) -> None:
++    """notes 表补 sort_order 列（手动排序档用）。
++
++    仓库没有 alembic，而 create_all 对【已存在】的表不会补列，所以照 search_dao 的
++    幂等裸 SQL 路子：PRAGMA 查列，缺才 ALTER。老笔记按"文件夹内创建时间正序"回填，
++    这样手动排序档第一次打开就是用户熟悉的时间顺序，而不是全 0 的随机序。
++    """
++    with engine.connect() as conn:
++        cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(notes)").fetchall()]
++        if "sort_order" in cols:
++            return
++        conn.exec_driver_sql("ALTER TABLE notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
++        conn.exec_driver_sql(
++            "UPDATE notes SET sort_order = ("
++            "  SELECT COUNT(*) FROM notes AS o"
++            "   WHERE o.folder_id IS notes.folder_id"
++            "     AND (o.created_at < notes.created_at"
++            "          OR (o.created_at = notes.created_at AND o.task_id <= notes.task_id))"
++            ") - 1"
++        )
++        conn.commit()
++    logger.info("notes 表已补 sort_order 列，并按文件夹内创建顺序回填")
++
  
  def init_db():
      engine = get_engine()
@@ -11072,6 +11636,7 @@ index d7e9847..f52dced 100644
 -    Base.metadata.create_all(bind=engine)
 \ No newline at end of file
 +    Base.metadata.create_all(bind=engine)
++    _migrate_note_sort_order(engine)
 +
 +    # WAL：读写并发。默认的 rollback journal 模式下，生成笔记的写事务会把界面的
 +    # 读请求整段堵住（实测堵出过 "database is locked"）；WAL 下读者不阻塞写者。
@@ -11090,14 +11655,16 @@ index d7e9847..f52dced 100644
 +    search_dao.init_search_table()
 diff --git a/backend/app/db/library_dao.py b/backend/app/db/library_dao.py
 new file mode 100644
-index 0000000..b54a8be
+index 0000000..b0af806
 --- /dev/null
 +++ b/backend/app/db/library_dao.py
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,438 @@
 +import json
 +import uuid
 +from datetime import datetime, timezone
 +from typing import Optional
++
++from sqlalchemy import func
 +
 +from app.db.engine import get_db
 +from app.db.models.library import Folder, NoteRecord, NoteVersion
@@ -11163,6 +11730,7 @@ index 0000000..b54a8be
 +        "created_at": _ms(row.created_at),
 +        "updated_at": _ms(row.updated_at),
 +        "last_opened_at": _ms(row.last_opened_at),
++        "sort_order": row.sort_order or 0,
 +        "form_data": form_data,
 +    }
 +
@@ -11283,6 +11851,8 @@ index 0000000..b54a8be
 +        row = db.query(NoteRecord).filter_by(task_id=task_id).first()
 +        if row is None:
 +            row = NoteRecord(task_id=task_id, created_at=now)
++            # 新笔记接在它所在文件夹的末尾，手动排序档里不会突然插到最前
++            row.sort_order = _next_note_order(db, payload.get("folder_id"))
 +            db.add(row)
 +        for key, value in payload.items():
 +            if hasattr(row, key):
@@ -11305,9 +11875,81 @@ index 0000000..b54a8be
 +        if folder_id is not None and not db.query(Folder).filter_by(id=folder_id).first():
 +            raise ValueError("目标文件夹不存在")
 +        row.folder_id = folder_id
++        # 换文件夹后接到目标文件夹末尾：手动排序是"按文件夹内部各自独立"的，
++        # 不重置的话它会带着原文件夹的位置插队
++        row.sort_order = _next_note_order(db, folder_id)
 +        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 +        db.commit()
 +        return True
++    finally:
++        db.close()
++
++
++# ── 手动排序 ──────────────────────────────────────────────────
++
++
++def _scope_filter(folder_id: Optional[str]):
++    return NoteRecord.folder_id.is_(None) if folder_id is None else NoteRecord.folder_id == folder_id
++
++
++def _next_note_order(db, folder_id: Optional[str]) -> int:
++    value = (
++        db.query(func.coalesce(func.max(NoteRecord.sort_order), -1))
++        .filter(_scope_filter(folder_id))
++        .scalar()
++    )
++    return int(value) + 1
++
++
++def reorder_notes(folder_id: Optional[str], task_ids: list[str]) -> dict:
++    """按给定顺序重写某个文件夹（folder_id=None 即未分类）内部的 sort_order。
++
++    只认本 scope 里的 id：外来/不存在的 id 忽略（前端可能拿着过期列表），
++    也保证 reorder 永远不能把笔记挪去别的文件夹——移动只走 move_note。
++    没被点名的笔记接在后面，保持它们原来的相对顺序。
++    """
++    db = next(get_db())
++    try:
++        rows = {r.task_id: r for r in db.query(NoteRecord).filter(_scope_filter(folder_id)).all()}
++        applied = 0
++        for task_id in task_ids:
++            row = rows.pop(task_id, None)
++            if row is None:
++                continue
++            row.sort_order = applied
++            applied += 1
++        leftovers = sorted(rows.values(), key=lambda r: (r.sort_order or 0, r.created_at or datetime.min))
++        for offset, row in enumerate(leftovers):
++            row.sort_order = applied + offset
++        db.commit()
++        return {"applied": applied, "ignored": len(task_ids) - applied}
++    except Exception:
++        db.rollback()
++        raise
++    finally:
++        db.close()
++
++
++def reorder_folders(folder_ids: list[str]) -> dict:
++    """侧栏文件夹节点的插入线排序。同样只认存在的 id，不存在的忽略。"""
++    db = next(get_db())
++    try:
++        rows = {r.id: r for r in db.query(Folder).all()}
++        applied = 0
++        for folder_id in folder_ids:
++            row = rows.pop(folder_id, None)
++            if row is None:
++                continue
++            row.sort_order = applied
++            applied += 1
++        leftovers = sorted(rows.values(), key=lambda r: (r.sort_order or 0, r.created_at or datetime.min))
++        for offset, row in enumerate(leftovers):
++            row.sort_order = applied + offset
++        db.commit()
++        return {"applied": applied, "ignored": len(folder_ids) - applied}
++    except Exception:
++        db.rollback()
++        raise
 +    finally:
 +        db.close()
 +
@@ -11457,10 +12099,10 @@ index 0000000..b54a8be
 +        db.close()
 diff --git a/backend/app/db/models/library.py b/backend/app/db/models/library.py
 new file mode 100644
-index 0000000..6d65c96
+index 0000000..d34bab7
 --- /dev/null
 +++ b/backend/app/db/models/library.py
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,64 @@
 +from sqlalchemy import Column, DateTime, Float, Integer, String, Text, func
 +from sqlalchemy.schema import Index
 +
@@ -11500,6 +12142,8 @@ index 0000000..6d65c96
 +    created_at = Column(DateTime, nullable=True)
 +    updated_at = Column(DateTime, nullable=True)
 +    last_opened_at = Column(DateTime, nullable=True)
++    # 手动排序档的位置（按文件夹内部各自独立）。老库没有这列，init_db 里做幂等 ALTER + 回填
++    sort_order = Column(Integer, default=0, nullable=False)
 +    # 生成这篇笔记时的表单参数（JSON 文本）。详情页刷新后若浏览器本地记录已丢，
 +    # 「重新生成」还得知道原来的链接/风格/模型，只能从这里恢复。
 +    form_data = Column(Text, nullable=True)
@@ -11949,10 +12593,10 @@ index 1e08c22..16deb4b 100644
                  "preprocessor_config.json",
 diff --git a/backend/app/routers/library.py b/backend/app/routers/library.py
 new file mode 100644
-index 0000000..d2475fe
+index 0000000..9aca3ae
 --- /dev/null
 +++ b/backend/app/routers/library.py
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,235 @@
 +from typing import Optional
 +
 +from fastapi import APIRouter, BackgroundTasks
@@ -12002,6 +12646,16 @@ index 0000000..d2475fe
 +class VersionsSyncRequest(BaseModel):
 +    task_id: str
 +    versions: list[VersionItem]
++
++
++class ReorderNotesRequest(BaseModel):
++    # null = 未分类。手动顺序按文件夹内部各自独立
++    folder_id: Optional[str] = None
++    task_ids: list[str]
++
++
++class ReorderFoldersRequest(BaseModel):
++    folder_ids: list[str]
 +
 +
 +@router.get("/search")
@@ -12092,6 +12746,26 @@ index 0000000..d2475fe
 +    except Exception as e:
 +        logger.error(f"移动笔记失败: {e}", exc_info=True)
 +        return R.error(msg=f"移动失败: {e}")
++
++
++@router.post("/library/reorder")
++def reorder_notes(data: ReorderNotesRequest):
++    """手动排序档：重写某个文件夹内部的笔记顺序（拖拽插入线落位时调用）。"""
++    try:
++        return R.success(data=library_dao.reorder_notes(data.folder_id, data.task_ids))
++    except Exception as e:
++        logger.error(f"笔记排序失败: {e}", exc_info=True)
++        return R.error(msg=f"排序失败: {e}")
++
++
++@router.post("/library/folders/reorder")
++def reorder_folders(data: ReorderFoldersRequest):
++    """侧栏文件夹节点的插入线排序。"""
++    try:
++        return R.success(data=library_dao.reorder_folders(data.folder_ids))
++    except Exception as e:
++        logger.error(f"文件夹排序失败: {e}", exc_info=True)
++        return R.error(msg=f"排序失败: {e}")
 +
 +
 +@router.post("/library/rename")
@@ -15088,10 +15762,10 @@ index 0000000..fdf47e8
 +    unittest.main(verbosity=2)
 diff --git a/backend/tests/test_library_store.py b/backend/tests/test_library_store.py
 new file mode 100644
-index 0000000..706a46b
+index 0000000..400f009
 --- /dev/null
 +++ b/backend/tests/test_library_store.py
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,358 @@
 +"""笔记库（文件夹 + 笔记索引）的数据层与删除逻辑测试。
 +
 +DB / 笔记目录 / 截图目录 / 向量库全部由 tests.isolation 指到临时位置：
@@ -15375,6 +16049,77 @@ index 0000000..706a46b
 +        library_dao.add_version("t1", "t1-v1", "内容")
 +        library_dao.delete_note_row("t1")
 +        self.assertEqual(library_dao.list_versions("t1"), [])
++
++
++class TestManualOrder(unittest.TestCase):
++    """手动排序档：notes.sort_order 迁移 + reorder 接口。"""
++
++    def setUp(self):
++        _truncate_all()
++
++    def test_migration_adds_column_to_legacy_table(self):
++        """老库的 notes 表没有 sort_order 列：create_all 对已存在的表不补列，
++        必须靠 init_db 里的幂等 ALTER + 按文件夹内创建顺序回填。"""
++        from app.db.engine import get_engine
++
++        with get_engine().begin() as conn:
++            conn.exec_driver_sql("DROP TABLE notes")
++            conn.exec_driver_sql(
++                "CREATE TABLE notes (task_id TEXT PRIMARY KEY, title TEXT, video_title TEXT,"
++                " folder_id TEXT, status TEXT, video_id TEXT, platform TEXT, cover_url TEXT,"
++                " duration FLOAT, created_at DATETIME, updated_at DATETIME,"
++                " last_opened_at DATETIME, form_data TEXT)"
++            )
++            conn.exec_driver_sql(
++                "INSERT INTO notes (task_id, created_at) VALUES"
++                " ('old2', '2026-01-02 00:00:00'), ('old1', '2026-01-01 00:00:00')"
++            )
++        init_db()
++        init_db()  # 再跑一次必须无副作用（列已存在时 ALTER 要跳过）
++        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
++        self.assertEqual(orders, {"old1": 0, "old2": 1})
++
++    def test_new_note_appends_to_end_of_its_folder(self):
++        folder = library_dao.create_folder("行测")
++        library_dao.upsert_note("n1", status="SUCCESS", folder_id=folder["id"])
++        library_dao.upsert_note("n2", status="SUCCESS", folder_id=folder["id"])
++        library_dao.upsert_note("n3", status="SUCCESS")  # 未分类自成一组
++        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
++        self.assertEqual((orders["n1"], orders["n2"], orders["n3"]), (0, 1, 0))
++
++    def test_reorder_notes_stays_inside_scope(self):
++        fa = library_dao.create_folder("A")
++        fb = library_dao.create_folder("B")
++        library_dao.upsert_note("n0", status="SUCCESS", folder_id=fa["id"])
++        library_dao.upsert_note("n1", status="SUCCESS", folder_id=fa["id"])
++        library_dao.upsert_note("n2", status="SUCCESS", folder_id=fb["id"])
++
++        result = library_dao.reorder_notes(fa["id"], ["n1", "n0", "n2", "ghost"])
++
++        self.assertEqual(result, {"applied": 2, "ignored": 2})
++        notes = {n["task_id"]: n for n in library_dao.list_notes()}
++        self.assertEqual((notes["n1"]["sort_order"], notes["n0"]["sort_order"]), (0, 1))
++        # 别的文件夹的笔记、不存在的 id 都不能被这次 reorder 动到（也不能借它跨文件夹移动）
++        self.assertEqual(notes["n2"]["sort_order"], 0)
++        self.assertEqual(notes["n2"]["folder_id"], fb["id"])
++
++    def test_move_note_appends_to_target_end(self):
++        fa = library_dao.create_folder("A")
++        fb = library_dao.create_folder("B")
++        library_dao.upsert_note("n0", status="SUCCESS", folder_id=fa["id"])
++        library_dao.upsert_note("n1", status="SUCCESS", folder_id=fa["id"])
++        library_dao.upsert_note("n2", status="SUCCESS", folder_id=fb["id"])
++        library_dao.move_note("n2", fa["id"])
++        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
++        self.assertEqual(orders["n2"], 2, "移进来的笔记要接在目标文件夹末尾，不能插队")
++
++    def test_reorder_folders(self):
++        a = library_dao.create_folder("A")
++        b = library_dao.create_folder("B")
++        c = library_dao.create_folder("C")
++        result = library_dao.reorder_folders([c["id"], a["id"], "ghost"])
++        self.assertEqual(result, {"applied": 2, "ignored": 1})
++        self.assertEqual([f["id"] for f in library_dao.list_folders()][:2], [c["id"], a["id"]])
 +
 +
 +if __name__ == "__main__":
@@ -16713,16 +17458,16 @@ index 0000000..ad5036b
 +    unittest.main()
 diff --git a/backup/backup-bilinote.ps1 b/backup/backup-bilinote.ps1
 new file mode 100644
-index 0000000..047db91
+index 0000000..8d89a7a
 --- /dev/null
 +++ b/backup/backup-bilinote.ps1
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,49 @@
 +# BiliNote volume backup script (Windows PowerShell). Keep ASCII-only: PS 5.1 reads BOM-less files as ANSI.
 +#
 +# Usage:
 +#   powershell -ExecutionPolicy Bypass -File backup-bilinote.ps1
 +#
-+# Spins a one-shot container mounting the 6 named volumes read-only plus the backup dir
++# Spins a one-shot container mounting the 7 named volumes read-only plus the backup dir
 +# writable, and tars with the tar shipped in the bilinote image (no extra pull, no host tar).
 +# The running container is untouched; BiliNote keeps serving during backup.
 +# For a strictly consistent snapshot stop the container first.
@@ -16737,16 +17482,17 @@ index 0000000..047db91
 +
 +New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 +
-+Write-Host "Backing up 6 volumes -> $backupRoot\$archive"
++Write-Host "Backing up 7 volumes -> $backupRoot\$archive"
 +docker run --rm --entrypoint tar `
 +  -v bilinote-cache:/ro/cache:ro `
 +  -v bilinote-config:/ro/config:ro `
 +  -v bilinote-data:/ro/data:ro `
 +  -v bilinote-models:/ro/models:ro `
 +  -v bilinote-static:/ro/static:ro `
++  -v bilinote-uploads:/ro/uploads:ro `
 +  -v bilinote-vector:/ro/vector:ro `
 +  -v "${backupRoot}:/out" `
-+  $runnerImage -czf "/out/$archive" -C /ro cache config data models static vector
++  $runnerImage -czf "/out/$archive" -C /ro cache config data models static uploads vector
 +
 +if ($LASTEXITCODE -ne 0) { throw "tar exited with $LASTEXITCODE" }
 +
@@ -16971,15 +17717,16 @@ index 0000000..c6fe606
 +})
 diff --git a/e2e/tests/features.spec.ts b/e2e/tests/features.spec.ts
 new file mode 100644
-index 0000000..e2b5e59
+index 0000000..63db1d6
 --- /dev/null
 +++ b/e2e/tests/features.spec.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,121 @@
 +import { test, expect } from '@playwright/test'
 +
 +// 覆盖 V3.2/V3.3 的交互项。依赖真实数据的地方都先取 /api/library，没数据就 skip。
 +let taskId = ''
 +let title = ''
++let pillTaskId = ''
 +
 +test.beforeAll(async ({ request }) => {
 +  const res = await request.get('/api/library')
@@ -16989,6 +17736,16 @@ index 0000000..e2b5e59
 +  if (usable) {
 +    taskId = usable.task_id
 +    title = usable.title || usable.video_title || ''
++  }
++  // 转写联动需要正文里真有「原片（mm:ss）」胶囊：速查卡这类风格整篇没有，
++  // 点转写行就没有滚动目标（真实踩过：第一篇 SUCCESS 恰好是速查卡）
++  for (const n of notes.filter((x: any) => x.status === 'SUCCESS').slice(0, 4)) {
++    const r = await request.get(`/api/task_status/${n.task_id}`)
++    const md = ((await r.json()).data || {}).result?.markdown || ''
++    if (md.includes('原片')) {
++      pillTaskId = n.task_id
++      break
++    }
 +  }
 +})
 +
@@ -17052,8 +17809,8 @@ index 0000000..e2b5e59
 +})
 +
 +test('点转写行会把正文滚到对应章节', async ({ page }) => {
-+  test.skip(!taskId, '没有笔记数据')
-+  await page.goto(`/note/${taskId}`)
++  test.skip(!pillTaskId, '没有带「原片」胶囊的笔记可测')
++  await page.goto(`/note/${pillTaskId}`)
 +  await page.getByRole('button', { name: '原文参照' }).click()
 +  await expect(page.getByRole('tablist')).toBeVisible()
 +  const vp = page.locator('[data-radix-scroll-area-viewport]').first()
@@ -17258,20 +18015,22 @@ index 0000000..448f24b
 +})
 diff --git a/e2e/tests/shelf.spec.ts b/e2e/tests/shelf.spec.ts
 new file mode 100644
-index 0000000..6a17ba5
+index 0000000..f7152d2
 --- /dev/null
 +++ b/e2e/tests/shelf.spec.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,167 @@
 +import { test, expect } from '@playwright/test'
 +
 +test('书架页渲染卡片与新建入口', async ({ page }) => {
 +  await page.goto('/')
++  await page.locator('button[aria-label="卡片视图"]').click()
 +  await expect(page.getByRole('button', { name: '新建笔记' })).toBeVisible()
 +  await expect(page.getByRole('button', { name: /全部/ })).toBeVisible()
 +})
 +
 +test('新建文件夹对话框可开可关', async ({ page }) => {
 +  await page.goto('/')
++  await page.locator('button[aria-label="卡片视图"]').click()
 +  await page.getByRole('button', { name: '新建文件夹' }).click()
 +  const dialog = page.locator('[data-slot="dialog-content"][data-state="open"]')
 +  await expect(dialog).toBeVisible()
@@ -17297,6 +18056,7 @@ index 0000000..6a17ba5
 +  const title = notes[0].title || notes[0].video_title
 +
 +  await page.goto('/')
++  await page.locator('button[aria-label="卡片视图"]').click()
 +  const card = page.locator('main div.group', { hasText: title }).first()
 +  // 卡片菜单的 aria-label 是「{标题} 的操作」，用 aria-haspopup 定位更稳
 +  await card.locator('button[aria-haspopup="menu"]').click()
@@ -17325,6 +18085,60 @@ index 0000000..6a17ba5
 +  await expect(page.getByText('删除这篇笔记？')).toBeVisible()
 +  await page.getByRole('button', { name: '取消' }).click()
 +  await expect(page.getByText('删除这篇笔记？')).toBeHidden()
++})
++
++test('目录树视图：默认树、叶子可见、拖到节点归档、切换持久化', async ({ page }) => {
++  // 拦截 /api/library 造数据：2 文件夹 + 3 笔记（含 1 篇 FAILED 看状态点），不碰真实库
++  const now = Date.now()
++  await page.route('**/api/library', route =>
++    route.fulfill({
++      json: {
++        code: 0,
++        msg: 'success',
++        data: {
++          folders: [
++            { id: 'f1', name: '文件夹A', sort_order: 0, created_at: now, note_count: 2 },
++            { id: 'f2', name: '文件夹B', sort_order: 1, created_at: now, note_count: 1 },
++          ],
++          notes: [
++            { task_id: 'n1', title: '笔记一', video_title: null, folder_id: 'f1', status: 'SUCCESS', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now, updated_at: now, last_opened_at: null, sort_order: 0, form_data: null },
++            { task_id: 'n2', title: '笔记二', video_title: null, folder_id: 'f1', status: 'FAILED', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now - 1000, updated_at: now, last_opened_at: null, sort_order: 1, form_data: null },
++            { task_id: 'n3', title: '笔记三', video_title: null, folder_id: 'f2', status: 'SUCCESS', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now - 2000, updated_at: now, last_opened_at: null, sort_order: 0, form_data: null },
++          ],
++        },
++      },
++    }),
++  )
++  const moves: any[] = []
++  await page.route('**/api/library/move', async route => {
++    moves.push(route.request().postDataJSON())
++    await route.fulfill({ json: { code: 0, msg: 'success', data: { task_id: 'n1', folder_id: 'f2' } } })
++  })
++
++  await page.goto('/')
++  const tree = page.getByRole('navigation', { name: '笔记目录树' })
++  // 全新浏览器存储下首次默认是目录树
++  await expect(tree).toBeVisible()
++  // 树档隐藏筛选 chip 行（「新建文件夹」按钮只存在于 chip 行）
++  await expect(page.getByRole('button', { name: '新建文件夹' })).toBeHidden()
++
++  // 展开文件夹A → 笔记叶子出现（含 FAILED 的那篇）
++  await tree.getByRole('button', { name: '展开 文件夹A' }).click()
++  await expect(tree.getByRole('button', { name: '笔记一' })).toBeVisible()
++  await expect(tree.getByRole('button', { name: '笔记二' })).toBeVisible()
++
++  // 拖叶子到「文件夹B」节点 = 归档（HTML5 DnD，Playwright 原生支持）。
++  // 节点上有三个按钮（展开/选中/⋯），用选中按钮的稳定 aria-label 定位
++  await tree.getByRole('button', { name: '笔记一' }).dragTo(tree.getByRole('button', { name: '打开 文件夹B' }))
++  expect(moves.length, '拖到树节点应触发一次移动').toBe(1)
++  expect(moves[0]).toEqual({ task_id: 'n1', folder_id: 'f2' })
++
++  // 切到卡片视图 → 树消失；刷新后仍是卡片（偏好持久化）
++  await page.locator('button[aria-label="卡片视图"]').click()
++  await expect(tree).toBeHidden()
++  await page.reload()
++  await expect(page.getByRole('navigation', { name: '笔记目录树' })).toBeHidden()
++  await expect(page.locator('main .aspect-video').first()).toBeVisible()
 +})
 +
 +test('新建笔记双击也只发一次提交请求', async ({ page }) => {
@@ -17425,10 +18239,10 @@ index 0000000..269150b
 +exit $status
 diff --git a/scripts/verify-after-deploy.sh b/scripts/verify-after-deploy.sh
 new file mode 100644
-index 0000000..e7d79c7
+index 0000000..d426b48
 --- /dev/null
 +++ b/scripts/verify-after-deploy.sh
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,41 @@
 +#!/usr/bin/env bash
 +# Docker 恢复后的一键验证序列（V3.1-V3.5 通用）。在 Git Bash 里跑：
 +#   bash scripts/verify-after-deploy.sh
@@ -17444,14 +18258,15 @@ index 0000000..e7d79c7
 +echo "== 2/6 构建镜像（typecheck 门禁在 ui 阶段，类型错误会在这里红）=="
 +docker build -f Dockerfile.patch -t bilinote-gpu:local . | tail -3
 +
-+echo "== 3/6 重建容器（6 卷，数据都在卷里）=="
++echo "== 3/6 重建容器（7 卷，数据都在卷里）=="
 +docker stop bilinote || true
 +docker rm bilinote || true
 +docker run -d --name bilinote --gpus all -p 80:80 --restart unless-stopped \
 +  -e HF_ENDPOINT=https://hf-mirror.com -e PYTHONUNBUFFERED=1 \
 +  -v bilinote-cache:/root/.cache -v bilinote-config:/app/backend/config \
 +  -v bilinote-data:/app/backend/data -v bilinote-models:/app/backend/models \
-+  -v bilinote-static:/app/backend/static -v bilinote-vector:/app/backend/vector_db \
++  -v bilinote-static:/app/backend/static -v bilinote-uploads:/app/backend/uploads \
++  -v bilinote-vector:/app/backend/vector_db \
 +  bilinote-gpu:local
 +sleep 18
 +
