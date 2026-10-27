@@ -29,8 +29,11 @@ echo "== 4/6 接口冒烟 =="
 curl -sf http://localhost/api/library | head -c 160; echo
 curl -sf "http://localhost/api/search?q=%E5%9F%BA%E6%9C%9F" | head -c 160; echo
 curl -sf http://localhost/api/storage/scan | head -c 160; echo
-curl -s -o /dev/null -w "deep link /note/:id -> %{http_code}\n" http://localhost/note/00000000-0000-4000-8000-000000000000
-docker exec bilinote sh -c 'grep -c logfile_maxbytes /etc/supervisor/conf.d/bilinote.conf'
+# 别用 -o /dev/null：脚本顶部 MSYS_NO_PATHCONV=1 会让它字面传给 mingw curl，
+# 打不开 "/dev/null" → curl exit 23 → set -e 中断（2026-10-27 踩过）
+deep_link_code=$(curl -s -w '\n%{http_code}' http://localhost/note/00000000-0000-4000-8000-000000000000 | tail -n1)
+echo "deep link /note/:id -> ${deep_link_code}"
+docker exec bilinote sh -c 'grep -c logfile_maxbytes /etc/supervisor/conf.d/supervisord.conf'
 
 echo "== 5/6 浏览器冒烟（headless Edge，visibilityState=visible，scroll-spy 能真验）=="
 (cd e2e && npx playwright test)
