@@ -1,12 +1,16 @@
 import { test, expect } from '@playwright/test'
 
 let taskId = ''
+let successIds: string[] = []
 
 test.beforeAll(async ({ request }) => {
   const res = await request.get('/api/library')
   const notes = (await res.json()).data.notes
-  if (!notes.length) test.skip()
-  taskId = notes[0].task_id
+  // 必须挑一篇 SUCCESS 的：notes[0] 是最新一篇，可能正处在 FAILED/生成中，
+  // 拿它测"正文渲染/dock/截图间距"会全挂在失败视图上（真实踩过一次）
+  successIds = notes.filter((n: any) => n.status === 'SUCCESS').map((n: any) => n.task_id)
+  if (!successIds.length) test.skip()
+  taskId = successIds[0]
 })
 
 test('章节导航列出全部小节且滚动高亮跟随', async ({ page }) => {
@@ -75,8 +79,18 @@ test('窄屏下 dock 是浮层且带关闭按钮', async ({ page }) => {
 
 test('截图与下文之间没有异常空白', async ({ page }) => {
   test.skip(!taskId, '没有笔记数据')
-  await page.goto(`/note/${taskId}`)
-  await expect(page.locator('.markdown-body img').first()).toBeVisible({ timeout: 10000 })
+  // 速查卡这类风格整篇没有截图，得找一篇带图的来测（否则 img 都找不到，测了个寂寞）
+  let hasImg = false
+  for (const id of successIds.slice(0, 4)) {
+    await page.goto(`/note/${id}`)
+    // 等正文渲染出来再数图：goto 只等到 load，React 挂载是之后的事
+    await page.locator('.markdown-body').waitFor({ timeout: 10000 }).catch(() => {})
+    if ((await page.locator('.markdown-body img').count()) > 0) {
+      hasImg = true
+      break
+    }
+  }
+  test.skip(!hasImg, '没有带截图的笔记可测')
   // react-medium-image-zoom 的 styles.css 没被引入时，它的 ghost 占位元素落在正常文档流里，
   // 每张截图后面多一个和图片等高（实测 500px）的空块。直接数"流内、无文字、无图的高空块"，
   // 修复前 12 个、修复后 0 个；不依赖库内部何时挂载 ghost，也不依赖 DOM 拓扑

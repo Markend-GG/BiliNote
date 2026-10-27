@@ -72,7 +72,14 @@ export const useTaskPolling = (interval = 3000) => {
               // 生成成功时后端落了一个新版本行，版本下拉要跟着刷新
               useLibraryStore.getState().fetchVersions(task.id)
             } else {
-              if (status === 'FAILED') console.warn(`⚠️ 任务 ${task.id} 后端判定失败`)
+              if (status === 'FAILED') {
+                // 失败要立刻把原因告诉用户：真实事故是 bcut 返回 412 任务早已 FAILED，
+                // 界面却还停在"转写文字"，用户以为在跑、干等几十分钟
+                const reason = String(res.message || '').split('\n')[0]
+                toast.error(
+                  `笔记生成失败：${reason.length > 60 ? reason.slice(0, 60) + '…' : reason || '未知原因'}`,
+                )
+              }
               updateTaskContent(task.id, { status })
             }
           } catch (e) {

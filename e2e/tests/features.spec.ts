@@ -7,9 +7,11 @@ let title = ''
 test.beforeAll(async ({ request }) => {
   const res = await request.get('/api/library')
   const notes = (await res.json()).data.notes
-  if (notes.length) {
-    taskId = notes[0].task_id
-    title = notes[0].title || notes[0].video_title || ''
+  // 同 note.spec：最新一篇可能是 FAILED/生成中，挑一篇 SUCCESS 的当被测对象
+  const usable = notes.find((n: any) => n.status === 'SUCCESS')
+  if (usable) {
+    taskId = usable.task_id
+    title = usable.title || usable.video_title || ''
   }
 })
 

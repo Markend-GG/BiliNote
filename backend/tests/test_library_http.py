@@ -144,6 +144,27 @@ class TestLibraryHttp(unittest.TestCase):
         finally:
             victim.unlink(missing_ok=True)
 
+    def test_task_status_reports_failed_as_status_not_error(self):
+        """任务失败是【状态】不是【请求错误】。
+
+        以前 FAILED 走 R.error，前端轮询把业务错误和传输失败混在一起处理时，
+        失败永远到不了界面——用户看着"转写中"干等几十分钟（bcut 412 真实事故）。
+        """
+        task_id = str(uuid.uuid4())
+        NOTE_DIR.mkdir(parents=True, exist_ok=True)
+        status_file = NOTE_DIR / f"{task_id}.status.json"
+        status_file.write_text(
+            json.dumps({"status": "FAILED", "message": "bcut 412 测试原因"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            res = client.get(f"/api/task_status/{task_id}").json()
+            self.assertEqual(res["code"], 0, "FAILED 必须走正常响应，不能是业务错误")
+            self.assertEqual(res["data"]["status"], "FAILED")
+            self.assertIn("412", res["data"]["message"])
+        finally:
+            status_file.unlink(missing_ok=True)
+
     def test_storage_scan_and_delete_guard(self):
         orphan = f"screenshot_008_{uuid.uuid4()}.jpg"
         used = f"screenshot_009_{uuid.uuid4()}.jpg"

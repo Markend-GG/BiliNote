@@ -18,7 +18,10 @@ from app.db import library_dao
 from app.db.video_task_dao import get_task_by_video
 from app.db import search_dao
 from app.services.library_service import delete_note_artifacts
-from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file, write_status_file
+# NOTE_OUTPUT_DIR 必须调用期从 note_index 取：import 期抄成自己的常量，会在多测试模块同进程
+# 跑时绑到先导入那个模块的临时目录上（合跑时状态文件写 A 目录、接口读 B 目录）
+from app.services import note_index
+from app.services.note_index import _form_snapshot, _index_note, save_note_to_file, write_status_file
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
@@ -124,8 +127,8 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
         "segments": cleaned_segments,
     }
 
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    target = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
+    os.makedirs(note_index.NOTE_OUTPUT_DIR, exist_ok=True)
+    target = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
     with open(target, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
@@ -286,7 +289,7 @@ def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
         return R.error(msg='task_id 非法')
     if not data.markdown.strip():
         return R.error(msg='笔记内容不能为空')
-    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
+    note_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{data.task_id}.json")
     if not os.path.exists(note_path):
         return R.error(msg='笔记文件不存在，无法保存')
     try:
@@ -296,7 +299,7 @@ def update_note(data: UpdateNoteRequest, background_tasks: BackgroundTasks):
         with open(note_path, 'w', encoding='utf-8') as f:
             json.dump(note_data, f, ensure_ascii=False, indent=2)
 
-        md_cache = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
+        md_cache = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
         with open(md_cache, 'w', encoding='utf-8') as f:
             f.write(data.markdown)
 
@@ -407,8 +410,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 def get_task_status(task_id: str):
     if not _valid_task_id(task_id):
         return R.error(msg='task_id 非法')
-    status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
-    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+    status_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}.status.json")
+    result_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}.json")
 
     # 优先读状态文件
     if os.path.exists(status_path):
@@ -438,7 +441,15 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
-            return R.error(message or "任务失败", code=500)
+            # 任务失败是【状态】，不是【请求错误】：以前这里 return R.error(...)，
+            # 前端轮询把"业务错误"和"传输失败"混在一起处理时，失败就永远传不到界面，
+            # 页面会一直停在最后一个阶段（用户看到的就是"转写了好久"其实早就死了）。
+            # 按正常响应回 FAILED，message 带上失败原因供界面展示。
+            return R.success({
+                "status": status,
+                "message": message or "任务失败",
+                "task_id": task_id,
+            })
 
         # 处理中状态
         return R.success({
