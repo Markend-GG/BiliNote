@@ -6633,10 +6633,10 @@ index 0000000..c8c724b
 +export default LibraryPage
 diff --git a/BillNote_frontend/src/pages/LibraryPage/utils.test.ts b/BillNote_frontend/src/pages/LibraryPage/utils.test.ts
 new file mode 100644
-index 0000000..ea0eee4
+index 0000000..c79842c
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/utils.test.ts
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,57 @@
 +import { describe, expect, it } from 'vitest'
 +import { SORTERS, coverSrc, formatDate, formatDuration } from './utils'
 +import type { ShelfItem } from '@/store/selectors'
@@ -6667,8 +6667,11 @@ index 0000000..ea0eee4
 +  it('远程封面走后端代理且是绝对路径', () => {
 +    expect(coverSrc(item())).toBe('/api/image_proxy?url=' + encodeURIComponent('http://x/1.jpg'))
 +  })
-+  it('本地视频直连', () => {
-+    expect(coverSrc(item({ platform: 'local', coverUrl: '/uploads/a.mp4' }))).toBe('/uploads/a.mp4')
++  it('本地笔记封面也走后端代理（后端绝对地址浏览器不可达）', () => {
++    const local = 'http://localhost:8483/static/cover/2、数量关系第二课-和差倍比_cover.jpg'
++    expect(coverSrc(item({ platform: 'local', coverUrl: local }))).toBe(
++      '/api/image_proxy?url=' + encodeURIComponent(local),
++    )
 +  })
 +  it('没封面给占位图', () => {
 +    expect(coverSrc(item({ coverUrl: null }))).toBe('/placeholder.png')
@@ -6693,7 +6696,7 @@ index 0000000..ea0eee4
 +})
 diff --git a/BillNote_frontend/src/pages/LibraryPage/utils.ts b/BillNote_frontend/src/pages/LibraryPage/utils.ts
 new file mode 100644
-index 0000000..9a43dd7
+index 0000000..fbb6fc9
 --- /dev/null
 +++ b/BillNote_frontend/src/pages/LibraryPage/utils.ts
 @@ -0,0 +1,76 @@
@@ -6719,13 +6722,13 @@ index 0000000..9a43dd7
 +const baseURL = String(import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
 +
 +/**
-+ * 封面要走后端代理：B 站等站点的图片有防盗链，浏览器直接拉会 403。
-+ * 本地视频存的是文件路径，直连即可。
++ * 封面一律走后端代理：B 站等站点有防盗链，浏览器直接拉会 403；
++ * 本地笔记的封面 URL 是后端绝对地址（如 http://localhost:8483/static/cover/…，
++ * 容器内端口，浏览器访问不到），同样必须由后端代拉，否则卡片永远回退占位图。
 + */
 +export const coverSrc = (item: ShelfItem) => {
 +  const url = item.coverUrl
 +  if (!url) return '/placeholder.png'
-+  if (item.platform === 'local') return url
 +  return `${baseURL}/image_proxy?url=${encodeURIComponent(url)}`
 +}
 +
