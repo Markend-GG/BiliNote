@@ -12294,6 +12294,160 @@ index 42cd435..ea96044 100644
  # 删除任务
  def delete_task_by_video(video_id: str, platform: str):
      db = next(get_db())
+diff --git a/backend/app/downloaders/local_downloader.py b/backend/app/downloaders/local_downloader.py
+index 2808fb6..43508ae 100644
+--- a/backend/app/downloaders/local_downloader.py
++++ b/backend/app/downloaders/local_downloader.py
+@@ -1,16 +1,38 @@
+ import os
+ import subprocess
++import uuid
+ from abc import ABC
+ from typing import Optional
+ 
++from PIL import Image, ImageStat
++
+ from app.downloaders.base import Downloader
+ from app.enmus.note_enums import DownloadQuality
+ from app.models.audio_model import AudioDownloadResult
+ import os
+ import subprocess
+ 
++from app.utils.logger import get_logger
+ from app.utils.video_helper import save_cover_to_static
+ 
++logger = get_logger(__name__)
++
++# 封面候选帧：依次尝试第 1/2/3 秒，取第一张"有内容"的帧（跳过黑场/淡入起头）
++COVER_CANDIDATE_SECONDS = (1, 2, 3)
++# 实测标定：纯黑帧 mean/std = 0/0；纯色/白闪 std≈0（被 std 拦）；带噪声的暗帧 mean 很低（被 mean 拦）；
++# 白底课件 mean≈240/std≈20 不误杀。
++COVER_MIN_MEAN = 12.0
++COVER_MIN_STD = 6.0
++
++
++def _frame_has_content(image_path: str) -> bool:
++    """是否为"有内容"的画面（非纯黑/纯色/白闪）。读不出图按无内容处理。"""
++    try:
++        stat = ImageStat.Stat(Image.open(image_path).convert("L"))
++    except OSError:
++        return False
++    return stat.mean[0] >= COVER_MIN_MEAN and stat.stddev[0] >= COVER_MIN_STD
++
+ 
+ class LocalDownloader(Downloader, ABC):
+     def __init__(self):
+@@ -18,12 +40,16 @@ class LocalDownloader(Downloader, ABC):
+         super().__init__()
+ 
+ 
+-    def extract_cover(self, input_path: str, output_dir: Optional[str] = None) -> str:
++    def extract_cover(self, input_path: str, output_dir: Optional[str] = None) -> Optional[str]:
+         """
+-        从本地视频文件中提取一张封面图（默认取第一帧）
++        从本地视频文件中提取一张封面图。
++
++        候选第 1/2/3 秒依次尝试，取第一张"有内容"的帧（跳过黑场/淡入，见 _frame_has_content）；
++        全部不合格时回退第一张成功提取的帧（与旧行为一致的 1s 兜底）。
++        视频没有画面（纯音频）或全部提取失败时返回 None，由调用方降级为无封面、不再让任务失败。
+         :param input_path: 输入视频路径
+         :param output_dir: 输出目录，默认和视频同目录
+-        :return: 提取出的封面图片路径
++        :return: 提取出的封面图片路径；无法提取时为 None
+         """
+         if not os.path.exists(input_path):
+             raise FileNotFoundError(f"输入文件不存在: {input_path}")
+@@ -34,24 +60,44 @@ class LocalDownloader(Downloader, ABC):
+         base_name = os.path.splitext(os.path.basename(input_path))[0]
+         output_path = os.path.join(output_dir, f"{base_name}_cover.jpg")
+ 
++        temps = []
++        first_ok = None
+         try:
+-            command = [
+-                'ffmpeg',
+-                '-i', input_path,
+-                '-ss', '00:00:01',  # 跳到视频第1秒，防止黑屏
+-                '-vframes', '1',  # 只截取一帧
+-                '-q:v', '2',  # 输出质量高一点（qscale，2是很高）
+-                '-y',  # 覆盖
+-                output_path
+-            ]
+-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+-
+-            if not os.path.exists(output_path):
+-                raise RuntimeError(f"封面图片生成失败: {output_path}")
+-
+-            return output_path
+-        except subprocess.CalledProcessError as e:
+-            raise RuntimeError(f"提取封面失败: {output_path}") from e
++            for sec in COVER_CANDIDATE_SECONDS:
++                # 临时名必须 .jpg 结尾（ffmpeg 靠扩展名推 muxer），uuid 防并发任务互踩
++                candidate = os.path.join(output_dir, f"{base_name}_cover.{uuid.uuid4().hex[:8]}.jpg")
++                # 先登记再提取：极端情况下 ffmpeg 写了一半才失败，残留也能被 finally 清掉
++                temps.append(candidate)
++                try:
++                    # 输入 seek（-ss 在 -i 前）：长视频 O(1)，与 video_reader 的抽帧一致
++                    subprocess.run(
++                        ["ffmpeg", "-ss", str(sec), "-i", input_path,
++                         "-frames:v", "1", "-q:v", "2", "-y", candidate],
++                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
++                    )
++                except subprocess.CalledProcessError:
++                    # 无视频流 / seek 超出片长等：换下一个候选
++                    continue
++                if not os.path.exists(candidate):
++                    continue
++                if first_ok is None:
++                    first_ok = candidate
++                if _frame_has_content(candidate):
++                    os.replace(candidate, output_path)
++                    return output_path
++
++            if first_ok is not None:
++                # 三个候选都没通过内容检查（全程黑/纯色）：保留第一张，与旧行为一致
++                os.replace(first_ok, output_path)
++                return output_path
++            return None
++        finally:
++            # 未采用的临时候选全部清掉（已被 replace 走的那个 remove 会失败，忽略即可）
++            for temp in temps:
++                try:
++                    os.remove(temp)
++                except OSError:
++                    pass
+ 
+     def convert_to_mp3(self,input_path: str, output_path: str = None) -> str:
+         """
+@@ -95,7 +141,7 @@ class LocalDownloader(Downloader, ABC):
+             video_url = os.path.normpath(video_url)
+ 
+         if not os.path.exists(video_url):
+-            raise FileNotFoundError()
++            raise FileNotFoundError(f"本地文件不存在: {video_url}")
+         return video_url
+     def download(
+             self,
+@@ -120,14 +166,17 @@ class LocalDownloader(Downloader, ABC):
+         print(title, file_name,video_url)
+         file_path=self.convert_to_mp3(video_url)
+         cover_path = self.extract_cover(video_url)
+-        cover_url = save_cover_to_static(cover_path)
++        # 提取不到封面（纯音频/失败）就无封面继续：前端已有 placeholder / 渐变兜底
++        cover_url = save_cover_to_static(cover_path) if cover_path else None
++        if cover_url is None:
++            logger.warning(f"未能提取封面（视频无画面或提取失败），以无封面继续: {video_url}")
+ 
+         print('file——path',file_path)
+         return AudioDownloadResult(
+             file_path=file_path,
+             title=title,
+             duration=0,  # 可选：后续加上读取时长
+-            cover_url=cover_url,  # 暂无封面
++            cover_url=cover_url,
+             platform="local",
+             video_id=title,
+             raw_info={
 diff --git a/backend/app/enmus/task_status_enums.py b/backend/app/enmus/task_status_enums.py
 index f83daa1..b945467 100644
 --- a/backend/app/enmus/task_status_enums.py
@@ -16124,6 +16278,186 @@ index 0000000..400f009
 +
 +if __name__ == "__main__":
 +    unittest.main(verbosity=2)
+diff --git a/backend/tests/test_local_cover.py b/backend/tests/test_local_cover.py
+new file mode 100644
+index 0000000..857ff77
+--- /dev/null
++++ b/backend/tests/test_local_cover.py
+@@ -0,0 +1,173 @@
++import os
++import pathlib
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
++
++from PIL import Image, ImageDraw
++
++from app.downloaders import local_downloader as ld
++
++# 关键设计：假 ffmpeg 写"灰底 + 白色亮条，位置随秒数挪"的真实 PIL 图，
++# 断言时用像素探针（亮条 x 坐标）证明返回的到底是哪一秒的候选帧。
++BAR_X_BY_SECOND = {1: 60, 2: 250, 3: 440}
++
++
++def frame_with_bar(sec: int) -> Image.Image:
++    img = Image.new("RGB", (640, 360), (128, 128, 128))
++    draw = ImageDraw.Draw(img)
++    x = BAR_X_BY_SECOND[sec]
++    draw.rectangle([x, 120, x + 60, 240], fill=(255, 255, 255))
++    return img
++
++
++def solid(level: int) -> Image.Image:
++    return Image.new("RGB", (640, 360), (level, level, level))
++
++
++def make_slide() -> Image.Image:
++    """白底课件（mean≈240/std≈20）：内容检查必须放行。"""
++    img = Image.new("RGB", (1280, 720), (255, 255, 255))
++    draw = ImageDraw.Draw(img)
++    draw.rectangle([80, 50, 1200, 95], fill=(20, 20, 20))
++    for i in range(4):
++        y = 150 + i * 60
++        draw.rectangle([120, y, 1000, y + 26], fill=(20, 20, 20))
++    return img
++
++
++def make_fake_ffmpeg_runner(frames_by_second, fail_secs=(), silent_secs=()):
++    """解析 cmd 里的 -ss 与 .jpg 输出路径；fail_secs 抛非零退出，silent_secs 假成功但不写文件。"""
++    calls = []
++
++    def _runner(cmd, **kwargs):
++        output_path = next((a for a in cmd if isinstance(a, str) and a.endswith(".jpg")), None)
++        if output_path is None:
++            raise AssertionError(f"ffmpeg cmd 里没有 .jpg 输出路径: {cmd}")
++        sec = int(cmd[cmd.index("-ss") + 1])
++        calls.append(sec)
++        if sec in fail_secs:
++            raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
++        if sec in silent_secs:
++            return 0
++        frames_by_second[sec].save(output_path, quality=92)
++        return 0
++
++    return _runner, calls
++
++
++class _CoverTestCase(unittest.TestCase):
++    def setUp(self):
++        self.tmp_dir = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
++        self.src = os.path.join(self.tmp_dir, "clip.mp4")
++        pathlib.Path(self.src).write_bytes(b"fake-video")
++
++    def _extract(self, frames_by_second, fail_secs=(), silent_secs=()):
++        runner, calls = make_fake_ffmpeg_runner(frames_by_second, fail_secs, silent_secs)
++        with patch.object(ld.subprocess, "run", side_effect=runner):
++            cover = ld.LocalDownloader().extract_cover(self.src, output_dir=self.tmp_dir)
++        return cover, calls
++
++    def _leftovers(self):
++        return sorted(os.listdir(self.tmp_dir))
++
++    def assert_cover_is_second(self, cover_path, sec):
++        gray = Image.open(cover_path).convert("L")
++        bar_x = BAR_X_BY_SECOND[sec]
++        self.assertGreater(gray.getpixel((bar_x + 30, 180)), 200, "亮条不在预期秒数的位置")
++        for other_x in BAR_X_BY_SECOND.values():
++            if other_x != bar_x:
++                self.assertLess(gray.getpixel((other_x + 30, 180)), 200, "返回了别的候选帧")
++
++
++class TestExtractCoverCandidates(_CoverTestCase):
++    def test_first_contentful_frame_wins_and_stops(self):
++        """1s 就有内容 → 直接用 1s、不再试后面；目录只有最终文件。"""
++        cover, calls = self._extract({1: frame_with_bar(1), 2: frame_with_bar(2), 3: frame_with_bar(3)})
++        self.assertEqual(cover, os.path.join(self.tmp_dir, "clip_cover.jpg"))
++        self.assertEqual(calls, [1])
++        self.assert_cover_is_second(cover, 1)
++        self.assertEqual(self._leftovers(), ["clip.mp4", "clip_cover.jpg"])
++
++    def test_black_first_second_jumps_to_next(self):
++        """1s 黑场 → 跳 2s，返回的是 2s 的帧。"""
++        cover, calls = self._extract({1: solid(0), 2: frame_with_bar(2)})
++        self.assertEqual(calls, [1, 2])
++        self.assert_cover_is_second(cover, 2)
++
++    def test_crash_then_black_then_content(self):
++        """1s ffmpeg 崩（如无视频流）不中断循环；2s 黑 → 3s 内容胜出。"""
++        cover, calls = self._extract({2: solid(0), 3: frame_with_bar(3)}, fail_secs={1})
++        self.assertEqual(calls, [1, 2, 3])
++        self.assert_cover_is_second(cover, 3)
++
++    def test_all_rejected_falls_back_to_first_frame(self):
++        """三个候选都不合格（黑/纯灰/纯白）→ 回退第一张成功提取的帧（1s），无临时残留。"""
++        cover, calls = self._extract({1: solid(0), 2: solid(128), 3: solid(255)})
++        self.assertEqual(calls, [1, 2, 3])
++        self.assertEqual(cover, os.path.join(self.tmp_dir, "clip_cover.jpg"))
++        self.assertLess(Image.open(cover).convert("L").getpixel((320, 180)), 40, "回退的应该是 1s 黑帧")
++        self.assertEqual(self._leftovers(), ["clip.mp4", "clip_cover.jpg"])
++
++    def test_no_candidate_output_returns_none(self):
++        """全失败（崩/假成功无文件）→ None、不留任何文件。"""
++        cover, calls = self._extract({}, fail_secs={1, 3}, silent_secs={2})
++        self.assertIsNone(cover)
++        self.assertEqual(calls, [1, 2, 3])
++        self.assertEqual(self._leftovers(), ["clip.mp4"])
++
++
++class TestDownloadDegradation(_CoverTestCase):
++    def test_audio_without_video_degrades_to_no_cover(self):
++        """纯音频（无画面）：extract_cover → None，download 不抛异常、cover_url=None、不调 save_cover_to_static。"""
++        audio_path = os.path.join(self.tmp_dir, "clip.mp3")
++        runner, _ = make_fake_ffmpeg_runner({}, fail_secs=(1, 2, 3))
++        with patch.object(ld.subprocess, "run", side_effect=runner), \
++                patch.object(ld.LocalDownloader, "convert_to_mp3", return_value=audio_path), \
++                patch.object(ld, "save_cover_to_static") as save_mock:
++            result = ld.LocalDownloader().download(self.src)
++        self.assertIsNone(result.cover_url)
++        save_mock.assert_not_called()
++        self.assertEqual(result.file_path, audio_path)
++        self.assertEqual(result.platform, "local")
++
++    def test_download_video_error_message_contains_path(self):
++        """download_video 缺失文件的报错必须带路径（此前是裸 FileNotFoundError，UI 只显示"任务失败"）。"""
++        with self.assertRaises(FileNotFoundError) as ctx:
++            ld.LocalDownloader().download_video("/uploads/missing-lecture.mp4")
++        self.assertIn("missing-lecture.mp4", str(ctx.exception))
++
++        absolute_missing = os.path.join(self.tmp_dir, "not-here.mp4")
++        with self.assertRaises(FileNotFoundError) as ctx2:
++            ld.LocalDownloader().download_video(absolute_missing)
++        self.assertIn("not-here.mp4", str(ctx2.exception))
++
++
++class TestFrameHasContent(_CoverTestCase):
++    def _probe(self, img: Image.Image) -> bool:
++        path = os.path.join(self.tmp_dir, "probe.jpg")
++        img.save(path, quality=92)
++        return ld._frame_has_content(path)
++
++    def test_blank_frames_rejected(self):
++        self.assertFalse(self._probe(solid(0)), "纯黑")
++        self.assertFalse(self._probe(solid(128)), "纯灰")
++        self.assertFalse(self._probe(solid(255)), "纯白/白闪")
++
++    def test_slide_frame_accepted(self):
++        self.assertTrue(self._probe(make_slide()))
++
++    def test_unreadable_file_is_not_content(self):
++        broken = os.path.join(self.tmp_dir, "broken.jpg")
++        pathlib.Path(broken).write_bytes(b"not an image")
++        self.assertFalse(ld._frame_has_content(broken))
++
++
++if __name__ == "__main__":
++    unittest.main()
+\ No newline at end of file
 diff --git a/backend/tests/test_markdown_toc.py b/backend/tests/test_markdown_toc.py
 new file mode 100644
 index 0000000..90fdeda
@@ -18239,10 +18573,10 @@ index 0000000..269150b
 +exit $status
 diff --git a/scripts/verify-after-deploy.sh b/scripts/verify-after-deploy.sh
 new file mode 100644
-index 0000000..d426b48
+index 0000000..2a26ede
 --- /dev/null
 +++ b/scripts/verify-after-deploy.sh
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,44 @@
 +#!/usr/bin/env bash
 +# Docker 恢复后的一键验证序列（V3.1-V3.5 通用）。在 Git Bash 里跑：
 +#   bash scripts/verify-after-deploy.sh
@@ -18274,8 +18608,11 @@ index 0000000..d426b48
 +curl -sf http://localhost/api/library | head -c 160; echo
 +curl -sf "http://localhost/api/search?q=%E5%9F%BA%E6%9C%9F" | head -c 160; echo
 +curl -sf http://localhost/api/storage/scan | head -c 160; echo
-+curl -s -o /dev/null -w "deep link /note/:id -> %{http_code}\n" http://localhost/note/00000000-0000-4000-8000-000000000000
-+docker exec bilinote sh -c 'grep -c logfile_maxbytes /etc/supervisor/conf.d/bilinote.conf'
++# 别用 -o /dev/null：脚本顶部 MSYS_NO_PATHCONV=1 会让它字面传给 mingw curl，
++# 打不开 "/dev/null" → curl exit 23 → set -e 中断（2026-10-27 踩过）
++deep_link_code=$(curl -s -w '\n%{http_code}' http://localhost/note/00000000-0000-4000-8000-000000000000 | tail -n1)
++echo "deep link /note/:id -> ${deep_link_code}"
++docker exec bilinote sh -c 'grep -c logfile_maxbytes /etc/supervisor/conf.d/supervisord.conf'
 +
 +echo "== 5/6 浏览器冒烟（headless Edge，visibilityState=visible，scroll-spy 能真验）=="
 +(cd e2e && npx playwright test)
