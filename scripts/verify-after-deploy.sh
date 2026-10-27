@@ -13,14 +13,15 @@ docker run --rm -v "$PWD/backend:/src:ro" bilinote-gpu-base:local sh -c \
 echo "== 2/6 构建镜像（typecheck 门禁在 ui 阶段，类型错误会在这里红）=="
 docker build -f Dockerfile.patch -t bilinote-gpu:local . | tail -3
 
-echo "== 3/6 重建容器（6 卷，数据都在卷里）=="
+echo "== 3/6 重建容器（7 卷，数据都在卷里）=="
 docker stop bilinote || true
 docker rm bilinote || true
 docker run -d --name bilinote --gpus all -p 80:80 --restart unless-stopped \
   -e HF_ENDPOINT=https://hf-mirror.com -e PYTHONUNBUFFERED=1 \
   -v bilinote-cache:/root/.cache -v bilinote-config:/app/backend/config \
   -v bilinote-data:/app/backend/data -v bilinote-models:/app/backend/models \
-  -v bilinote-static:/app/backend/static -v bilinote-vector:/app/backend/vector_db \
+  -v bilinote-static:/app/backend/static -v bilinote-uploads:/app/backend/uploads \
+  -v bilinote-vector:/app/backend/vector_db \
   bilinote-gpu:local
 sleep 18
 

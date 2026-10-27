@@ -3,7 +3,7 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File backup-bilinote.ps1
 #
-# Spins a one-shot container mounting the 6 named volumes read-only plus the backup dir
+# Spins a one-shot container mounting the 7 named volumes read-only plus the backup dir
 # writable, and tars with the tar shipped in the bilinote image (no extra pull, no host tar).
 # The running container is untouched; BiliNote keeps serving during backup.
 # For a strictly consistent snapshot stop the container first.
@@ -18,16 +18,17 @@ $archive = "bilinote-$stamp.tar.gz"
 
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 
-Write-Host "Backing up 6 volumes -> $backupRoot\$archive"
+Write-Host "Backing up 7 volumes -> $backupRoot\$archive"
 docker run --rm --entrypoint tar `
   -v bilinote-cache:/ro/cache:ro `
   -v bilinote-config:/ro/config:ro `
   -v bilinote-data:/ro/data:ro `
   -v bilinote-models:/ro/models:ro `
   -v bilinote-static:/ro/static:ro `
+  -v bilinote-uploads:/ro/uploads:ro `
   -v bilinote-vector:/ro/vector:ro `
   -v "${backupRoot}:/out" `
-  $runnerImage -czf "/out/$archive" -C /ro cache config data models static vector
+  $runnerImage -czf "/out/$archive" -C /ro cache config data models static uploads vector
 
 if ($LASTEXITCODE -ne 0) { throw "tar exited with $LASTEXITCODE" }
 
