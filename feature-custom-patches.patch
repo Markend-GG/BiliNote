@@ -3343,7 +3343,7 @@ index 0000000..9527feb
 +  return useMemo(() => mergeShelfItems(notes, tasks), [notes, tasks])
 +}
 diff --git a/BillNote_frontend/src/hooks/useTaskPolling.ts b/BillNote_frontend/src/hooks/useTaskPolling.ts
-index 58e406f..ba22612 100644
+index 58e406f..8b64a42 100644
 --- a/BillNote_frontend/src/hooks/useTaskPolling.ts
 +++ b/BillNote_frontend/src/hooks/useTaskPolling.ts
 @@ -1,15 +1,29 @@
@@ -3426,7 +3426,7 @@ index 58e406f..ba22612 100644
                toast.success('笔记生成成功')
                updateTaskContent(task.id, {
                  status,
-@@ -40,20 +69,34 @@ export const useTaskPolling = (interval = 3000) => {
+@@ -40,20 +69,41 @@ export const useTaskPolling = (interval = 3000) => {
                  transcript,
                  audioMeta: audio_meta,
                })
@@ -3436,7 +3436,14 @@ index 58e406f..ba22612 100644
 +              // 生成成功时后端落了一个新版本行，版本下拉要跟着刷新
 +              useLibraryStore.getState().fetchVersions(task.id)
              } else {
-+              if (status === 'FAILED') console.warn(`⚠️ 任务 ${task.id} 后端判定失败`)
++              if (status === 'FAILED') {
++                // 失败要立刻把原因告诉用户：真实事故是 bcut 返回 412 任务早已 FAILED，
++                // 界面却还停在"转写文字"，用户以为在跑、干等几十分钟
++                const reason = String(res.message || '').split('\n')[0]
++                toast.error(
++                  `笔记生成失败：${reason.length > 60 ? reason.slice(0, 60) + '…' : reason || '未知原因'}`,
++                )
++              }
                updateTaskContent(task.id, { status })
              }
 +          } catch (e) {
@@ -12152,7 +12159,7 @@ index 0000000..d2475fe
 +        logger.warning(f"更新最近打开时间失败 {data.task_id}: {e}")
 +        return R.success()
 diff --git a/backend/app/routers/note.py b/backend/app/routers/note.py
-index f433e46..9c22559 100644
+index f433e46..1c18709 100644
 --- a/backend/app/routers/note.py
 +++ b/backend/app/routers/note.py
 @@ -1,6 +1,9 @@
@@ -12165,7 +12172,7 @@ index f433e46..9c22559 100644
  import uuid
  from pathlib import Path
  from typing import Optional
-@@ -10,7 +13,12 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+@@ -10,7 +13,15 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
  from pydantic import BaseModel, validator, field_validator, model_validator
  from dataclasses import asdict
  
@@ -12174,11 +12181,14 @@ index f433e46..9c22559 100644
  from app.db.video_task_dao import get_task_by_video
 +from app.db import search_dao
 +from app.services.library_service import delete_note_artifacts
-+from app.services.note_index import NOTE_OUTPUT_DIR, _form_snapshot, _index_note, save_note_to_file, write_status_file
++# NOTE_OUTPUT_DIR 必须调用期从 note_index 取：import 期抄成自己的常量，会在多测试模块同进程
++# 跑时绑到先导入那个模块的临时目录上（合跑时状态文件写 A 目录、接口读 B 目录）
++from app.services import note_index
++from app.services.note_index import _form_snapshot, _index_note, save_note_to_file, write_status_file
  from app.enmus.exception import NoteErrorEnum
  from app.enmus.note_enums import DownloadQuality
  from app.exceptions.note import NoteError
-@@ -29,10 +37,19 @@ from app.enmus.task_status_enums import TaskStatus
+@@ -29,10 +40,19 @@ from app.enmus.task_status_enums import TaskStatus
  
  router = APIRouter()
  
@@ -12201,7 +12211,7 @@ index f433e46..9c22559 100644
  
  
  class VideoRequest(BaseModel):
-@@ -77,16 +94,9 @@ class VideoRequest(BaseModel):
+@@ -77,16 +97,9 @@ class VideoRequest(BaseModel):
          return v
  
  
@@ -12218,7 +12228,16 @@ index f433e46..9c22559 100644
  def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
      """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
  
-@@ -121,6 +131,41 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+@@ -114,13 +127,48 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+         "segments": cleaned_segments,
+     }
+ 
+-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
+-    target = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
++    os.makedirs(note_index.NOTE_OUTPUT_DIR, exist_ok=True)
++    target = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
+     with open(target, "w", encoding="utf-8") as f:
+         json.dump(payload, f, ensure_ascii=False, indent=2)
      logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
  
  
@@ -12260,7 +12279,7 @@ index f433e46..9c22559 100644
  def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                    link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                    _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-@@ -130,6 +175,24 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -130,6 +178,24 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
      if not model_name or not provider_id:
          raise HTTPException(status_code=400, detail="请选择模型和提供者")
  
@@ -12285,7 +12304,7 @@ index f433e46..9c22559 100644
      def _execute_note_task():
          return NoteGenerator().generate(
              video_url=video_url,
-@@ -149,12 +212,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -149,12 +215,33 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
          )
  
      logger.info(f"任务进入执行队列 (task_id={task_id})")
@@ -12320,7 +12339,7 @@ index f433e46..9c22559 100644
  
      # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
      try:
-@@ -165,13 +249,77 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
+@@ -165,13 +252,77 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
  
  
  @router.post('/delete_task')
@@ -12365,7 +12384,7 @@ index f433e46..9c22559 100644
 +        return R.error(msg='task_id 非法')
 +    if not data.markdown.strip():
 +        return R.error(msg='笔记内容不能为空')
-+    note_path = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}.json")
++    note_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{data.task_id}.json")
 +    if not os.path.exists(note_path):
 +        return R.error(msg='笔记文件不存在，无法保存')
 +    try:
@@ -12375,7 +12394,7 @@ index f433e46..9c22559 100644
 +        with open(note_path, 'w', encoding='utf-8') as f:
 +            json.dump(note_data, f, ensure_ascii=False, indent=2)
 +
-+        md_cache = os.path.join(NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
++        md_cache = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{data.task_id}_markdown.md")
 +        with open(md_cache, 'w', encoding='utf-8') as f:
 +            f.write(data.markdown)
 +
@@ -12403,7 +12422,7 @@ index f433e46..9c22559 100644
  
  
  @router.post("/upload")
-@@ -225,8 +373,20 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -225,8 +376,20 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
              # 正常新建任务
              task_id = str(uuid.uuid4())
  
@@ -12426,16 +12445,37 @@ index f433e46..9c22559 100644
  
          # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
          if data.prefetched_transcript:
-@@ -245,6 +405,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+@@ -245,8 +408,10 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
  
  @router.get("/task_status/{task_id}")
  def get_task_status(task_id: str):
+-    status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
+-    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
 +    if not _valid_task_id(task_id):
 +        return R.error(msg='task_id 非法')
-     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
-     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
++    status_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}.status.json")
++    result_path = os.path.join(note_index.NOTE_OUTPUT_DIR, f"{task_id}.json")
  
-@@ -295,11 +457,14 @@ def get_task_status(task_id: str):
+     # 优先读状态文件
+     if os.path.exists(status_path):
+@@ -276,7 +441,15 @@ def get_task_status(task_id: str):
+                 })
+ 
+         if status == TaskStatus.FAILED.value:
+-            return R.error(message or "任务失败", code=500)
++            # 任务失败是【状态】，不是【请求错误】：以前这里 return R.error(...)，
++            # 前端轮询把"业务错误"和"传输失败"混在一起处理时，失败就永远传不到界面，
++            # 页面会一直停在最后一个阶段（用户看到的就是"转写了好久"其实早就死了）。
++            # 按正常响应回 FAILED，message 带上失败原因供界面展示。
++            return R.success({
++                "status": status,
++                "message": message or "任务失败",
++                "task_id": task_id,
++            })
+ 
+         # 处理中状态
+         return R.success({
+@@ -295,11 +468,14 @@ def get_task_status(task_id: str):
              "task_id": task_id
          })
  
@@ -14838,10 +14878,10 @@ index 0000000..dfdeb48
 +    unittest.main()
 diff --git a/backend/tests/test_library_http.py b/backend/tests/test_library_http.py
 new file mode 100644
-index 0000000..9bc8103
+index 0000000..fdf47e8
 --- /dev/null
 +++ b/backend/tests/test_library_http.py
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,204 @@
 +"""library / storage / search / delete_task 的 HTTP 层测试（FastAPI TestClient）。
 +
 +DAO/service 层已有 test_library_store / test_storage_search 覆盖；这里钉的是接口形状：
@@ -14987,6 +15027,27 @@ index 0000000..9bc8103
 +            self.assertNotEqual(res["code"], 0)
 +        finally:
 +            victim.unlink(missing_ok=True)
++
++    def test_task_status_reports_failed_as_status_not_error(self):
++        """任务失败是【状态】不是【请求错误】。
++
++        以前 FAILED 走 R.error，前端轮询把业务错误和传输失败混在一起处理时，
++        失败永远到不了界面——用户看着"转写中"干等几十分钟（bcut 412 真实事故）。
++        """
++        task_id = str(uuid.uuid4())
++        NOTE_DIR.mkdir(parents=True, exist_ok=True)
++        status_file = NOTE_DIR / f"{task_id}.status.json"
++        status_file.write_text(
++            json.dumps({"status": "FAILED", "message": "bcut 412 测试原因"}, ensure_ascii=False),
++            encoding="utf-8",
++        )
++        try:
++            res = client.get(f"/api/task_status/{task_id}").json()
++            self.assertEqual(res["code"], 0, "FAILED 必须走正常响应，不能是业务错误")
++            self.assertEqual(res["data"]["status"], "FAILED")
++            self.assertIn("412", res["data"]["message"])
++        finally:
++            status_file.unlink(missing_ok=True)
 +
 +    def test_storage_scan_and_delete_guard(self):
 +        orphan = f"screenshot_008_{uuid.uuid4()}.jpg"
@@ -16910,10 +16971,10 @@ index 0000000..c6fe606
 +})
 diff --git a/e2e/tests/features.spec.ts b/e2e/tests/features.spec.ts
 new file mode 100644
-index 0000000..30ee4cb
+index 0000000..e2b5e59
 --- /dev/null
 +++ b/e2e/tests/features.spec.ts
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,110 @@
 +import { test, expect } from '@playwright/test'
 +
 +// 覆盖 V3.2/V3.3 的交互项。依赖真实数据的地方都先取 /api/library，没数据就 skip。
@@ -16923,9 +16984,11 @@ index 0000000..30ee4cb
 +test.beforeAll(async ({ request }) => {
 +  const res = await request.get('/api/library')
 +  const notes = (await res.json()).data.notes
-+  if (notes.length) {
-+    taskId = notes[0].task_id
-+    title = notes[0].title || notes[0].video_title || ''
++  // 同 note.spec：最新一篇可能是 FAILED/生成中，挑一篇 SUCCESS 的当被测对象
++  const usable = notes.find((n: any) => n.status === 'SUCCESS')
++  if (usable) {
++    taskId = usable.task_id
++    title = usable.title || usable.video_title || ''
 +  }
 +})
 +
@@ -17024,19 +17087,23 @@ index 0000000..30ee4cb
 +})
 diff --git a/e2e/tests/note.spec.ts b/e2e/tests/note.spec.ts
 new file mode 100644
-index 0000000..595a0c1
+index 0000000..448f24b
 --- /dev/null
 +++ b/e2e/tests/note.spec.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,165 @@
 +import { test, expect } from '@playwright/test'
 +
 +let taskId = ''
++let successIds: string[] = []
 +
 +test.beforeAll(async ({ request }) => {
 +  const res = await request.get('/api/library')
 +  const notes = (await res.json()).data.notes
-+  if (!notes.length) test.skip()
-+  taskId = notes[0].task_id
++  // 必须挑一篇 SUCCESS 的：notes[0] 是最新一篇，可能正处在 FAILED/生成中，
++  // 拿它测"正文渲染/dock/截图间距"会全挂在失败视图上（真实踩过一次）
++  successIds = notes.filter((n: any) => n.status === 'SUCCESS').map((n: any) => n.task_id)
++  if (!successIds.length) test.skip()
++  taskId = successIds[0]
 +})
 +
 +test('章节导航列出全部小节且滚动高亮跟随', async ({ page }) => {
@@ -17105,8 +17172,18 @@ index 0000000..595a0c1
 +
 +test('截图与下文之间没有异常空白', async ({ page }) => {
 +  test.skip(!taskId, '没有笔记数据')
-+  await page.goto(`/note/${taskId}`)
-+  await expect(page.locator('.markdown-body img').first()).toBeVisible({ timeout: 10000 })
++  // 速查卡这类风格整篇没有截图，得找一篇带图的来测（否则 img 都找不到，测了个寂寞）
++  let hasImg = false
++  for (const id of successIds.slice(0, 4)) {
++    await page.goto(`/note/${id}`)
++    // 等正文渲染出来再数图：goto 只等到 load，React 挂载是之后的事
++    await page.locator('.markdown-body').waitFor({ timeout: 10000 }).catch(() => {})
++    if ((await page.locator('.markdown-body img').count()) > 0) {
++      hasImg = true
++      break
++    }
++  }
++  test.skip(!hasImg, '没有带截图的笔记可测')
 +  // react-medium-image-zoom 的 styles.css 没被引入时，它的 ghost 占位元素落在正常文档流里，
 +  // 每张截图后面多一个和图片等高（实测 500px）的空块。直接数"流内、无文字、无图的高空块"，
 +  // 修复前 12 个、修复后 0 个；不依赖库内部何时挂载 ghost，也不依赖 DOM 拓扑
