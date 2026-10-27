@@ -7,10 +7,35 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+def _migrate_note_sort_order(engine) -> None:
+    """notes 表补 sort_order 列（手动排序档用）。
+
+    仓库没有 alembic，而 create_all 对【已存在】的表不会补列，所以照 search_dao 的
+    幂等裸 SQL 路子：PRAGMA 查列，缺才 ALTER。老笔记按"文件夹内创建时间正序"回填，
+    这样手动排序档第一次打开就是用户熟悉的时间顺序，而不是全 0 的随机序。
+    """
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(notes)").fetchall()]
+        if "sort_order" in cols:
+            return
+        conn.exec_driver_sql("ALTER TABLE notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+        conn.exec_driver_sql(
+            "UPDATE notes SET sort_order = ("
+            "  SELECT COUNT(*) FROM notes AS o"
+            "   WHERE o.folder_id IS notes.folder_id"
+            "     AND (o.created_at < notes.created_at"
+            "          OR (o.created_at = notes.created_at AND o.task_id <= notes.task_id))"
+            ") - 1"
+        )
+        conn.commit()
+    logger.info("notes 表已补 sort_order 列，并按文件夹内创建顺序回填")
+
+
 def init_db():
     engine = get_engine()
 
     Base.metadata.create_all(bind=engine)
+    _migrate_note_sort_order(engine)
 
     # WAL：读写并发。默认的 rollback journal 模式下，生成笔记的写事务会把界面的
     # 读请求整段堵住（实测堵出过 "database is locked"）；WAL 下读者不阻塞写者。

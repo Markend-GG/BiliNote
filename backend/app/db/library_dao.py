@@ -3,6 +3,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import func
+
 from app.db.engine import get_db
 from app.db.models.library import Folder, NoteRecord, NoteVersion
 from app.utils.logger import get_logger
@@ -67,6 +69,7 @@ def _note_to_dict(row: NoteRecord) -> dict:
         "created_at": _ms(row.created_at),
         "updated_at": _ms(row.updated_at),
         "last_opened_at": _ms(row.last_opened_at),
+        "sort_order": row.sort_order or 0,
         "form_data": form_data,
     }
 
@@ -187,6 +190,8 @@ def upsert_note(task_id: str, **fields) -> None:
         row = db.query(NoteRecord).filter_by(task_id=task_id).first()
         if row is None:
             row = NoteRecord(task_id=task_id, created_at=now)
+            # 新笔记接在它所在文件夹的末尾，手动排序档里不会突然插到最前
+            row.sort_order = _next_note_order(db, payload.get("folder_id"))
             db.add(row)
         for key, value in payload.items():
             if hasattr(row, key):
@@ -209,9 +214,81 @@ def move_note(task_id: str, folder_id: Optional[str]) -> bool:
         if folder_id is not None and not db.query(Folder).filter_by(id=folder_id).first():
             raise ValueError("目标文件夹不存在")
         row.folder_id = folder_id
+        # 换文件夹后接到目标文件夹末尾：手动排序是"按文件夹内部各自独立"的，
+        # 不重置的话它会带着原文件夹的位置插队
+        row.sort_order = _next_note_order(db, folder_id)
         row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         return True
+    finally:
+        db.close()
+
+
+# ── 手动排序 ──────────────────────────────────────────────────
+
+
+def _scope_filter(folder_id: Optional[str]):
+    return NoteRecord.folder_id.is_(None) if folder_id is None else NoteRecord.folder_id == folder_id
+
+
+def _next_note_order(db, folder_id: Optional[str]) -> int:
+    value = (
+        db.query(func.coalesce(func.max(NoteRecord.sort_order), -1))
+        .filter(_scope_filter(folder_id))
+        .scalar()
+    )
+    return int(value) + 1
+
+
+def reorder_notes(folder_id: Optional[str], task_ids: list[str]) -> dict:
+    """按给定顺序重写某个文件夹（folder_id=None 即未分类）内部的 sort_order。
+
+    只认本 scope 里的 id：外来/不存在的 id 忽略（前端可能拿着过期列表），
+    也保证 reorder 永远不能把笔记挪去别的文件夹——移动只走 move_note。
+    没被点名的笔记接在后面，保持它们原来的相对顺序。
+    """
+    db = next(get_db())
+    try:
+        rows = {r.task_id: r for r in db.query(NoteRecord).filter(_scope_filter(folder_id)).all()}
+        applied = 0
+        for task_id in task_ids:
+            row = rows.pop(task_id, None)
+            if row is None:
+                continue
+            row.sort_order = applied
+            applied += 1
+        leftovers = sorted(rows.values(), key=lambda r: (r.sort_order or 0, r.created_at or datetime.min))
+        for offset, row in enumerate(leftovers):
+            row.sort_order = applied + offset
+        db.commit()
+        return {"applied": applied, "ignored": len(task_ids) - applied}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def reorder_folders(folder_ids: list[str]) -> dict:
+    """侧栏文件夹节点的插入线排序。同样只认存在的 id，不存在的忽略。"""
+    db = next(get_db())
+    try:
+        rows = {r.id: r for r in db.query(Folder).all()}
+        applied = 0
+        for folder_id in folder_ids:
+            row = rows.pop(folder_id, None)
+            if row is None:
+                continue
+            row.sort_order = applied
+            applied += 1
+        leftovers = sorted(rows.values(), key=lambda r: (r.sort_order or 0, r.created_at or datetime.min))
+        for offset, row in enumerate(leftovers):
+            row.sort_order = applied + offset
+        db.commit()
+        return {"applied": applied, "ignored": len(folder_ids) - applied}
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

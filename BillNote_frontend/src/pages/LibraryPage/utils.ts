@@ -2,12 +2,14 @@ import type { ShelfItem } from '@/hooks/useShelfItems'
 import type { ShelfSortMode } from '@/store/libraryStore'
 import { taskStatusLabels, videoPlatforms } from '@/constant/note'
 
-/** 书架排序器：默认最新创建；"最近打开"没打开过的排最后 */
+/** 书架排序器：默认最新创建；"最近打开"没打开过的排最后；"手动"按文件夹内部各自的顺序 */
 export const SORTERS: Record<ShelfSortMode, { label: string; cmp: (a: ShelfItem, b: ShelfItem) => number }> = {
   created: { label: '最新创建', cmp: (a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) },
   opened: { label: '最近打开', cmp: (a, b) => (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0) },
   duration: { label: '时长最长', cmp: (a, b) => (b.duration ?? 0) - (a.duration ?? 0) },
   title: { label: '标题拼音', cmp: (a, b) => a.title.localeCompare(b.title, 'zh-Hans-CN') },
+  // 只在浏览器本地的任务没有 sortOrder（selectors 里给了 MAX_SAFE_INTEGER），排最后
+  manual: { label: '手动排序', cmp: (a, b) => a.sortOrder - b.sortOrder },
 }
 
 /** 拖拽归档用的自定义 MIME。用 text/plain 会和"拖文字"混淆 */

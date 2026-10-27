@@ -37,6 +37,8 @@ class NoteRecord(Base):
     created_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True)
     last_opened_at = Column(DateTime, nullable=True)
+    # 手动排序档的位置（按文件夹内部各自独立）。老库没有这列，init_db 里做幂等 ALTER + 回填
+    sort_order = Column(Integer, default=0, nullable=False)
     # 生成这篇笔记时的表单参数（JSON 文本）。详情页刷新后若浏览器本地记录已丢，
     # 「重新生成」还得知道原来的链接/风格/模型，只能从这里恢复。
     form_data = Column(Text, nullable=True)

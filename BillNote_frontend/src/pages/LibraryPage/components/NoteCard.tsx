@@ -38,7 +38,8 @@ const CoverFallback = (e: React.SyntheticEvent<HTMLImageElement>) => {
   if (!img.src.endsWith('/placeholder.png')) img.src = '/placeholder.png'
 }
 
-const startDrag = (e: React.DragEvent, taskId: string) => {
+/** 拖拽归档的统一入口：卡片、列表行、目录树叶子都用它写同一个 MIME */
+export const startDrag = (e: React.DragEvent, taskId: string) => {
   e.dataTransfer.setData(NOTE_DRAG_MIME, taskId)
   e.dataTransfer.effectAllowed = 'move'
 }

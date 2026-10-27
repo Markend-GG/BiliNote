@@ -11,6 +11,8 @@ export interface ShelfItem {
   duration: number | null
   createdAt: number | null
   lastOpenedAt: number | null
+  /** 手动排序档的位置；只在浏览器本地的任务没有这个概念，排最后 */
+  sortOrder: number
   /** 本地 IndexedDB 里有没有这篇的完整内容；没有的话进详情页要从后端 hydrate */
   hasLocal: boolean
 }
@@ -43,6 +45,7 @@ export function mergeShelfItems(notes: LibraryNote[], tasks: Task[]): ShelfItem[
       duration: note.duration ?? local?.audioMeta?.duration ?? null,
       createdAt: note.created_at ?? (local?.createdAt ? new Date(local.createdAt).getTime() : null),
       lastOpenedAt: note.last_opened_at,
+      sortOrder: note.sort_order ?? 0,
       hasLocal: !!local,
     }
   })
@@ -60,6 +63,7 @@ export function mergeShelfItems(notes: LibraryNote[], tasks: Task[]): ShelfItem[
       duration: task.audioMeta?.duration || null,
       createdAt: task.createdAt ? new Date(task.createdAt).getTime() : null,
       lastOpenedAt: null,
+      sortOrder: Number.MAX_SAFE_INTEGER,
       hasLocal: true,
     }))
 

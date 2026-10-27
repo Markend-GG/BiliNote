@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test'
 // 覆盖 V3.2/V3.3 的交互项。依赖真实数据的地方都先取 /api/library，没数据就 skip。
 let taskId = ''
 let title = ''
+let pillTaskId = ''
 
 test.beforeAll(async ({ request }) => {
   const res = await request.get('/api/library')
@@ -12,6 +13,16 @@ test.beforeAll(async ({ request }) => {
   if (usable) {
     taskId = usable.task_id
     title = usable.title || usable.video_title || ''
+  }
+  // 转写联动需要正文里真有「原片（mm:ss）」胶囊：速查卡这类风格整篇没有，
+  // 点转写行就没有滚动目标（真实踩过：第一篇 SUCCESS 恰好是速查卡）
+  for (const n of notes.filter((x: any) => x.status === 'SUCCESS').slice(0, 4)) {
+    const r = await request.get(`/api/task_status/${n.task_id}`)
+    const md = ((await r.json()).data || {}).result?.markdown || ''
+    if (md.includes('原片')) {
+      pillTaskId = n.task_id
+      break
+    }
   }
 })
 
@@ -75,8 +86,8 @@ test('导出 HTML 触发下载', async ({ page }) => {
 })
 
 test('点转写行会把正文滚到对应章节', async ({ page }) => {
-  test.skip(!taskId, '没有笔记数据')
-  await page.goto(`/note/${taskId}`)
+  test.skip(!pillTaskId, '没有带「原片」胶囊的笔记可测')
+  await page.goto(`/note/${pillTaskId}`)
   await page.getByRole('button', { name: '原文参照' }).click()
   await expect(page.getByRole('tablist')).toBeVisible()
   const vp = page.locator('[data-radix-scroll-area-viewport]').first()

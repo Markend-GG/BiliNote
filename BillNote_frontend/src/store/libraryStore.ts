@@ -10,9 +10,9 @@ import type {
   VersionUpload,
 } from '@/services/library'
 
-export type ShelfViewMode = 'card' | 'list'
+export type ShelfViewMode = 'tree' | 'card' | 'list'
 
-export type ShelfSortMode = 'created' | 'opened' | 'duration' | 'title'
+export type ShelfSortMode = 'created' | 'opened' | 'duration' | 'title' | 'manual'
 
 interface LibraryState {
   folders: LibraryFolder[]
@@ -37,6 +37,9 @@ interface LibraryState {
   moveNote: (taskId: string, folderId: string | null) => Promise<boolean>
   renameNote: (taskId: string, title: string) => Promise<boolean>
   touchNote: (taskId: string) => Promise<void>
+  /** 手动排序档：重写某个文件夹内部顺序（null = 未分类）。乐观更新 + 失败回滚 */
+  reorderNotes: (folderId: string | null, taskIds: string[]) => Promise<boolean>
+  reorderFolders: (folderIds: string[]) => Promise<boolean>
   folderName: (folderId: string | null | undefined) => string
 }
 
@@ -51,7 +54,8 @@ export const useLibraryStore = create<LibraryState>()(
       folders: [],
       notes: [],
       versionsByTask: {},
-      viewMode: 'card',
+      // 首次进来默认目录树（用户定的）；老用户持久化里的 'card'/'list' 仍合法，直接沿用
+      viewMode: 'tree',
       sortMode: 'created',
       setSortMode: sortMode => set({ sortMode }),
       loaded: false,
@@ -161,6 +165,44 @@ export const useLibraryStore = create<LibraryState>()(
           return true
         } catch {
           set({ notes: before })
+          return false
+        }
+      },
+
+      reorderNotes: async (folderId, taskIds) => {
+        const before = get().notes
+        const rank = new Map(taskIds.map((id, i) => [id, i]))
+        // 先本地改一遍：插入线落位要立刻看到新顺序，不等网络往返
+        set(state => ({
+          notes: state.notes.map(n =>
+            n.folder_id === folderId && rank.has(n.task_id)
+              ? { ...n, sort_order: rank.get(n.task_id)! }
+              : n,
+          ),
+        }))
+        try {
+          await api.reorderNotes(folderId, taskIds)
+          return true
+        } catch {
+          set({ notes: before })
+          return false
+        }
+      },
+
+      reorderFolders: async folderIds => {
+        const before = get().folders
+        const rank = new Map(folderIds.map((id, i) => [id, i]))
+        set(state => ({
+          // 文件夹的显示顺序就是数组顺序，乐观更新后必须重排数组才看得见
+          folders: state.folders
+            .map(f => (rank.has(f.id) ? { ...f, sort_order: rank.get(f.id)! } : f))
+            .sort((a, b) => a.sort_order - b.sort_order),
+        }))
+        try {
+          await api.reorderFolders(folderIds)
+          return true
+        } catch {
+          set({ folders: before })
           return false
         }
       },

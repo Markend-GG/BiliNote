@@ -2,12 +2,14 @@ import { test, expect } from '@playwright/test'
 
 test('书架页渲染卡片与新建入口', async ({ page }) => {
   await page.goto('/')
+  await page.locator('button[aria-label="卡片视图"]').click()
   await expect(page.getByRole('button', { name: '新建笔记' })).toBeVisible()
   await expect(page.getByRole('button', { name: /全部/ })).toBeVisible()
 })
 
 test('新建文件夹对话框可开可关', async ({ page }) => {
   await page.goto('/')
+  await page.locator('button[aria-label="卡片视图"]').click()
   await page.getByRole('button', { name: '新建文件夹' }).click()
   const dialog = page.locator('[data-slot="dialog-content"][data-state="open"]')
   await expect(dialog).toBeVisible()
@@ -33,6 +35,7 @@ test('卡片 ⋯ 菜单不被卡片裁掉，删除项看得到也点得到', asy
   const title = notes[0].title || notes[0].video_title
 
   await page.goto('/')
+  await page.locator('button[aria-label="卡片视图"]').click()
   const card = page.locator('main div.group', { hasText: title }).first()
   // 卡片菜单的 aria-label 是「{标题} 的操作」，用 aria-haspopup 定位更稳
   await card.locator('button[aria-haspopup="menu"]').click()
@@ -61,6 +64,60 @@ test('卡片 ⋯ 菜单不被卡片裁掉，删除项看得到也点得到', asy
   await expect(page.getByText('删除这篇笔记？')).toBeVisible()
   await page.getByRole('button', { name: '取消' }).click()
   await expect(page.getByText('删除这篇笔记？')).toBeHidden()
+})
+
+test('目录树视图：默认树、叶子可见、拖到节点归档、切换持久化', async ({ page }) => {
+  // 拦截 /api/library 造数据：2 文件夹 + 3 笔记（含 1 篇 FAILED 看状态点），不碰真实库
+  const now = Date.now()
+  await page.route('**/api/library', route =>
+    route.fulfill({
+      json: {
+        code: 0,
+        msg: 'success',
+        data: {
+          folders: [
+            { id: 'f1', name: '文件夹A', sort_order: 0, created_at: now, note_count: 2 },
+            { id: 'f2', name: '文件夹B', sort_order: 1, created_at: now, note_count: 1 },
+          ],
+          notes: [
+            { task_id: 'n1', title: '笔记一', video_title: null, folder_id: 'f1', status: 'SUCCESS', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now, updated_at: now, last_opened_at: null, sort_order: 0, form_data: null },
+            { task_id: 'n2', title: '笔记二', video_title: null, folder_id: 'f1', status: 'FAILED', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now - 1000, updated_at: now, last_opened_at: null, sort_order: 1, form_data: null },
+            { task_id: 'n3', title: '笔记三', video_title: null, folder_id: 'f2', status: 'SUCCESS', video_id: null, platform: 'bilibili', cover_url: '', duration: 60, created_at: now - 2000, updated_at: now, last_opened_at: null, sort_order: 0, form_data: null },
+          ],
+        },
+      },
+    }),
+  )
+  const moves: any[] = []
+  await page.route('**/api/library/move', async route => {
+    moves.push(route.request().postDataJSON())
+    await route.fulfill({ json: { code: 0, msg: 'success', data: { task_id: 'n1', folder_id: 'f2' } } })
+  })
+
+  await page.goto('/')
+  const tree = page.getByRole('navigation', { name: '笔记目录树' })
+  // 全新浏览器存储下首次默认是目录树
+  await expect(tree).toBeVisible()
+  // 树档隐藏筛选 chip 行（「新建文件夹」按钮只存在于 chip 行）
+  await expect(page.getByRole('button', { name: '新建文件夹' })).toBeHidden()
+
+  // 展开文件夹A → 笔记叶子出现（含 FAILED 的那篇）
+  await tree.getByRole('button', { name: '展开 文件夹A' }).click()
+  await expect(tree.getByRole('button', { name: '笔记一' })).toBeVisible()
+  await expect(tree.getByRole('button', { name: '笔记二' })).toBeVisible()
+
+  // 拖叶子到「文件夹B」节点 = 归档（HTML5 DnD，Playwright 原生支持）。
+  // 节点上有三个按钮（展开/选中/⋯），用选中按钮的稳定 aria-label 定位
+  await tree.getByRole('button', { name: '笔记一' }).dragTo(tree.getByRole('button', { name: '打开 文件夹B' }))
+  expect(moves.length, '拖到树节点应触发一次移动').toBe(1)
+  expect(moves[0]).toEqual({ task_id: 'n1', folder_id: 'f2' })
+
+  // 切到卡片视图 → 树消失；刷新后仍是卡片（偏好持久化）
+  await page.locator('button[aria-label="卡片视图"]').click()
+  await expect(tree).toBeHidden()
+  await page.reload()
+  await expect(page.getByRole('navigation', { name: '笔记目录树' })).toBeHidden()
+  await expect(page.locator('main .aspect-video').first()).toBeVisible()
 })
 
 test('新建笔记双击也只发一次提交请求', async ({ page }) => {

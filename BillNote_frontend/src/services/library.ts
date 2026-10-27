@@ -21,6 +21,8 @@ export interface LibraryNote {
   created_at: number | null
   updated_at: number | null
   last_opened_at: number | null
+  /** 手动排序档的位置（按文件夹内部各自独立） */
+  sort_order: number
   /** 生成时的表单参数，浏览器本地记录丢了以后靠它恢复「重新生成」 */
   form_data: Record<string, any> | null
 }
@@ -67,6 +69,19 @@ export const moveNote = (taskId: string, folderId: string | null) =>
     task_id: taskId,
     folder_id: folderId,
   })
+
+export interface ReorderResult {
+  applied: number
+  ignored: number
+}
+
+/** 手动排序：重写某个文件夹内部的笔记顺序（folderId=null 即未分类） */
+export const reorderNotes = (folderId: string | null, taskIds: string[]) =>
+  request.post<any, ReorderResult>('/library/reorder', { folder_id: folderId, task_ids: taskIds })
+
+/** 侧栏文件夹节点的插入线排序 */
+export const reorderFolders = (folderIds: string[]) =>
+  request.post<any, ReorderResult>('/library/folders/reorder', { folder_ids: folderIds })
 
 export const renameNote = (taskId: string, title: string) =>
   request.post<any, { task_id: string; title: string | null }>('/library/rename', {

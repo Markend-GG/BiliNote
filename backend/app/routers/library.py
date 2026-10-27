@@ -49,6 +49,16 @@ class VersionsSyncRequest(BaseModel):
     versions: list[VersionItem]
 
 
+class ReorderNotesRequest(BaseModel):
+    # null = 未分类。手动顺序按文件夹内部各自独立
+    folder_id: Optional[str] = None
+    task_ids: list[str]
+
+
+class ReorderFoldersRequest(BaseModel):
+    folder_ids: list[str]
+
+
 @router.get("/search")
 def search_notes(q: str = "", limit: int = 30):
     """正文全文搜索（FTS5 trigram，中文子串可命中）。返回命中块 + 所属笔记标题。"""
@@ -137,6 +147,26 @@ def move_note(data: MoveRequest):
     except Exception as e:
         logger.error(f"移动笔记失败: {e}", exc_info=True)
         return R.error(msg=f"移动失败: {e}")
+
+
+@router.post("/library/reorder")
+def reorder_notes(data: ReorderNotesRequest):
+    """手动排序档：重写某个文件夹内部的笔记顺序（拖拽插入线落位时调用）。"""
+    try:
+        return R.success(data=library_dao.reorder_notes(data.folder_id, data.task_ids))
+    except Exception as e:
+        logger.error(f"笔记排序失败: {e}", exc_info=True)
+        return R.error(msg=f"排序失败: {e}")
+
+
+@router.post("/library/folders/reorder")
+def reorder_folders(data: ReorderFoldersRequest):
+    """侧栏文件夹节点的插入线排序。"""
+    try:
+        return R.success(data=library_dao.reorder_folders(data.folder_ids))
+    except Exception as e:
+        logger.error(f"文件夹排序失败: {e}", exc_info=True)
+        return R.error(msg=f"排序失败: {e}")
 
 
 @router.post("/library/rename")

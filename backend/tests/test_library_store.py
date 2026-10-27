@@ -283,5 +283,76 @@ class TestNoteVersions(unittest.TestCase):
         self.assertEqual(library_dao.list_versions("t1"), [])
 
 
+class TestManualOrder(unittest.TestCase):
+    """手动排序档：notes.sort_order 迁移 + reorder 接口。"""
+
+    def setUp(self):
+        _truncate_all()
+
+    def test_migration_adds_column_to_legacy_table(self):
+        """老库的 notes 表没有 sort_order 列：create_all 对已存在的表不补列，
+        必须靠 init_db 里的幂等 ALTER + 按文件夹内创建顺序回填。"""
+        from app.db.engine import get_engine
+
+        with get_engine().begin() as conn:
+            conn.exec_driver_sql("DROP TABLE notes")
+            conn.exec_driver_sql(
+                "CREATE TABLE notes (task_id TEXT PRIMARY KEY, title TEXT, video_title TEXT,"
+                " folder_id TEXT, status TEXT, video_id TEXT, platform TEXT, cover_url TEXT,"
+                " duration FLOAT, created_at DATETIME, updated_at DATETIME,"
+                " last_opened_at DATETIME, form_data TEXT)"
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO notes (task_id, created_at) VALUES"
+                " ('old2', '2026-01-02 00:00:00'), ('old1', '2026-01-01 00:00:00')"
+            )
+        init_db()
+        init_db()  # 再跑一次必须无副作用（列已存在时 ALTER 要跳过）
+        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
+        self.assertEqual(orders, {"old1": 0, "old2": 1})
+
+    def test_new_note_appends_to_end_of_its_folder(self):
+        folder = library_dao.create_folder("行测")
+        library_dao.upsert_note("n1", status="SUCCESS", folder_id=folder["id"])
+        library_dao.upsert_note("n2", status="SUCCESS", folder_id=folder["id"])
+        library_dao.upsert_note("n3", status="SUCCESS")  # 未分类自成一组
+        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
+        self.assertEqual((orders["n1"], orders["n2"], orders["n3"]), (0, 1, 0))
+
+    def test_reorder_notes_stays_inside_scope(self):
+        fa = library_dao.create_folder("A")
+        fb = library_dao.create_folder("B")
+        library_dao.upsert_note("n0", status="SUCCESS", folder_id=fa["id"])
+        library_dao.upsert_note("n1", status="SUCCESS", folder_id=fa["id"])
+        library_dao.upsert_note("n2", status="SUCCESS", folder_id=fb["id"])
+
+        result = library_dao.reorder_notes(fa["id"], ["n1", "n0", "n2", "ghost"])
+
+        self.assertEqual(result, {"applied": 2, "ignored": 2})
+        notes = {n["task_id"]: n for n in library_dao.list_notes()}
+        self.assertEqual((notes["n1"]["sort_order"], notes["n0"]["sort_order"]), (0, 1))
+        # 别的文件夹的笔记、不存在的 id 都不能被这次 reorder 动到（也不能借它跨文件夹移动）
+        self.assertEqual(notes["n2"]["sort_order"], 0)
+        self.assertEqual(notes["n2"]["folder_id"], fb["id"])
+
+    def test_move_note_appends_to_target_end(self):
+        fa = library_dao.create_folder("A")
+        fb = library_dao.create_folder("B")
+        library_dao.upsert_note("n0", status="SUCCESS", folder_id=fa["id"])
+        library_dao.upsert_note("n1", status="SUCCESS", folder_id=fa["id"])
+        library_dao.upsert_note("n2", status="SUCCESS", folder_id=fb["id"])
+        library_dao.move_note("n2", fa["id"])
+        orders = {n["task_id"]: n["sort_order"] for n in library_dao.list_notes()}
+        self.assertEqual(orders["n2"], 2, "移进来的笔记要接在目标文件夹末尾，不能插队")
+
+    def test_reorder_folders(self):
+        a = library_dao.create_folder("A")
+        b = library_dao.create_folder("B")
+        c = library_dao.create_folder("C")
+        result = library_dao.reorder_folders([c["id"], a["id"], "ghost"])
+        self.assertEqual(result, {"applied": 2, "ignored": 1})
+        self.assertEqual([f["id"] for f in library_dao.list_folders()][:2], [c["id"], a["id"]])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -16,6 +16,7 @@ const note = (over: Partial<LibraryNote> = {}): LibraryNote => ({
   created_at: 1000,
   updated_at: 1000,
   last_opened_at: null,
+  sort_order: 4,
   form_data: null,
   ...over,
 })
@@ -60,5 +61,11 @@ describe('mergeShelfItems', () => {
     const items = mergeShelfItems([note()], [task({ id: 'local-only' })])
     expect(items.map(i => i.taskId)).toEqual(['n1', 'local-only'])
     expect(items[1].hasLocal).toBe(true)
+  })
+
+  it('手动排序位置透传；只在本地的任务排最后', () => {
+    const items = mergeShelfItems([note({ sort_order: 4 })], [task({ id: 'local-only' })])
+    expect(items[0].sortOrder).toBe(4)
+    expect(items[1].sortOrder).toBe(Number.MAX_SAFE_INTEGER)
   })
 })

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   ArrowUpDown,
@@ -7,6 +7,8 @@ import {
   FolderInput,
   FolderPlus,
   LayoutGrid,
+  ListTree,
+  PanelLeft,
   Pencil,
   List,
   Plus,
@@ -36,10 +38,12 @@ import { useShelfItems, type ShelfItem } from '@/hooks/useShelfItems'
 import { searchNotes, type SearchHit } from '@/services/library'
 import { NoteCard, NoteRow } from './components/NoteCard'
 import { FolderCard } from './components/FolderCard'
+import { FolderTree } from './components/FolderTree'
 import { PromptDialog } from '@/components/PromptDialog'
 import { Menu } from '@/components/ui/menu'
 import { NOTE_DRAG_MIME, SORTERS } from './utils'
 import type { ShelfSortMode } from '@/store/libraryStore'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 
 /** activeFolder: null = 全部，'none' = 未分类，其余是文件夹 id */
 type FolderFilter = string | 'none' | null
@@ -68,7 +72,7 @@ const LibraryPage = () => {
   const loaded = useLibraryStore(state => state.loaded)
   const loading = useLibraryStore(state => state.loading)
   const loadError = useLibraryStore(state => state.loadError)
-  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote } =
+  const { fetchLibrary, setViewMode, addFolder, renameFolder, removeFolder, moveNote, renameNote, reorderNotes, reorderFolders } =
     useLibraryStore()
   const removeTask = useTaskStore(state => state.removeTask)
   const dropTasksLocal = useTaskStore(state => state.dropTasksLocal)
@@ -85,6 +89,10 @@ const LibraryPage = () => {
   const [folderToDelete, setFolderToDelete] = useState<LibraryFolder | null>(null)
   const [noteToDelete, setNoteToDelete] = useState<ShelfItem | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // 目录树：窄屏收成抽屉；右区行的插入线位置（null = 没有拖拽悬停）
+  const [treeDrawerOpen, setTreeDrawerOpen] = useState(false)
+  const [noteDropIndex, setNoteDropIndex] = useState<number | null>(null)
+  const isNarrow = useMediaQuery('(max-width: 1100px)')
 
   useEffect(() => {
     fetchLibrary()
@@ -257,6 +265,115 @@ const LibraryPage = () => {
     },
   ]
 
+  /* ---- 目录树视图的派生数据与插入线排序 ---- */
+  const itemsOf = useCallback(
+    (folderId: string | null) => {
+      const list =
+        folderId === null ? items.filter(i => !i.folderId) : items.filter(i => i.folderId === folderId)
+      return [...list].sort(SORTERS[sortMode].cmp)
+    },
+    [items, sortMode],
+  )
+
+  // 搜索命中所在的文件夹：侧栏打小圆点（不自动展开）
+  const hitFolderIds = useMemo(() => {
+    const set = new Set<string>()
+    if (!searching) return set
+    for (const hit of bodyHits) if (hit.folder_id) set.add(hit.folder_id)
+    for (const item of visibleItems) if (item.folderId) set.add(item.folderId)
+    return set
+  }, [searching, bodyHits, visibleItems])
+
+  // 插入线排序只在一个具体范围内有意义：「全部」和搜索态混合了多个文件夹，
+  // 线的位置对不上任何一个 scope，干脆不出现线（拖拽仍可用于归档）
+  const reorderScope: string | null | 'disabled' = searching
+    ? 'disabled'
+    : activeFolder === null
+      ? 'disabled'
+      : activeFolder === 'none'
+        ? null
+        : activeFolder
+
+  const scopeItems = useMemo(
+    () => (searching ? visibleItems : itemsOf(activeFolder === 'none' ? null : activeFolder)),
+    [searching, visibleItems, itemsOf, activeFolder],
+  )
+
+  const scopeLabel = searching
+    ? `搜索「${keyword}」`
+    : activeFolder === null
+      ? '全部笔记'
+      : activeFolder === 'none'
+        ? '未分类'
+        : folderName(activeFolder)
+
+  const handleRowDragOver = (e: React.DragEvent, i: number) => {
+    if (reorderScope === 'disabled') return
+    if (!e.dataTransfer.types.includes(NOTE_DRAG_MIME)) return
+    e.preventDefault()
+    const r = e.currentTarget.getBoundingClientRect()
+    const idx = e.clientY < r.top + r.height / 2 ? i : i + 1
+    // 只在跨过中点时 setState，避免拖拽期间每帧重渲染
+    if (idx !== noteDropIndex) setNoteDropIndex(idx)
+  }
+
+  const handleRowDrop = (e: React.DragEvent) => {
+    const id = e.dataTransfer.getData(NOTE_DRAG_MIME)
+    const index = noteDropIndex
+    setNoteDropIndex(null)
+    if (!id || index === null || reorderScope === 'disabled') return
+    e.preventDefault()
+    const ids = itemsOf(reorderScope).map(i => i.taskId)
+    const from = ids.indexOf(id)
+    if (from < 0) return
+    ids.splice(from, 1)
+    ids.splice(from < index ? index - 1 : index, 0, id)
+    if (sortMode !== 'manual') {
+      setSortMode('manual')
+      toast('已切到手动排序：之后的顺序就是你拖出来的顺序')
+    }
+    reorderNotes(reorderScope, ids)
+  }
+
+  const bodyHitsBlock = searching && bodyHits.length > 0 && (
+    <div className="mb-4 overflow-hidden rounded-lg border bg-white">
+      <div className="text-muted-foreground border-b px-3 py-2 text-xs">
+        正文命中 {bodyHits.length} 条（点击跳到对应章节）
+      </div>
+      {bodyHits.map((hit, i) => (
+        <button
+          key={`${hit.task_id}-${i}`}
+          type="button"
+          onClick={() => navigate(`/note/${hit.task_id}`, { state: { heading: hit.heading } })}
+          className="hover:bg-neutral-50 block w-full cursor-pointer border-b px-3 py-2 text-left last:border-b-0"
+        >
+          <div className="truncate text-sm font-medium">
+            {hit.title || '未命名笔记'}
+            <span className="text-muted-foreground font-normal"> · {hit.heading}</span>
+          </div>
+          <div className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
+            {renderSnippet(hit.snippet)}
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+
+  const treeSidebar = (
+    <FolderTree
+      folders={folders}
+      itemsOf={itemsOf}
+      counts={{ byFolder: counts.byFolder, none: counts.none, total: items.length }}
+      selected={activeFolder}
+      onSelect={setActiveFolder}
+      onOpenNote={openNote}
+      hitFolderIds={hitFolderIds}
+      onDropNote={(taskId, folderId) => dropInto(taskId, folderId)}
+      onReorderFolders={ids => reorderFolders(ids)}
+      folderMenu={folderEntries}
+    />
+  )
+
   const showFolders = !searching && activeFolder === null
   const totalNotes = items.length
   const deletingCount = folderToDelete ? (counts.byFolder.get(folderToDelete.id) ?? 0) : 0
@@ -281,8 +398,34 @@ const LibraryPage = () => {
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
+          {viewMode === 'tree' && isNarrow && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9"
+              aria-label="打开目录树"
+              onClick={() => setTreeDrawerOpen(true)}
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+          )}
           <div className="mr-1 flex items-center rounded-md border p-0.5">
             <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="目录树视图"
+                    onClick={() => setViewMode('tree')}
+                    className={`cursor-pointer rounded p-1 ${
+                      viewMode === 'tree' ? 'bg-primary text-white' : 'text-muted-foreground hover:bg-neutral-100'
+                    }`}
+                  >
+                    <ListTree className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>目录树（按文件夹展开，可拖拽排序）</TooltipContent>
+              </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -355,7 +498,8 @@ const LibraryPage = () => {
         </div>
       </header>
 
-      {/* ── 文件夹筛选条 ─────────────────────────────────── */}
+      {/* ── 文件夹筛选条（目录树档隐藏：树自己就是导航）────── */}
+      {viewMode !== 'tree' && (
       <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b bg-white px-4 py-2">
         <FilterChip
           label="全部"
@@ -395,32 +539,66 @@ const LibraryPage = () => {
           </span>
         )}
       </div>
+      )}
 
-      {/* ── 内容区 ───────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto px-4 py-4">
-        {searching && bodyHits.length > 0 && (
-          <div className="mb-4 overflow-hidden rounded-lg border bg-white">
-            <div className="text-muted-foreground border-b px-3 py-2 text-xs">
-              正文命中 {bodyHits.length} 条（点击跳到对应章节）
+      {/* ── 目录树视图：左树 + 右行列表 ─────────────────────── */}
+      {viewMode === 'tree' && (
+        <div className="flex min-h-0 flex-1">
+          {isNarrow ? (
+            treeDrawerOpen && (
+              <div className="fixed inset-0 z-40">
+                <div className="absolute inset-0 bg-black/30" onClick={() => setTreeDrawerOpen(false)} />
+                <div className="relative z-10 h-full bg-white shadow-xl">{treeSidebar}</div>
+              </div>
+            )
+          ) : (
+            treeSidebar
+          )}
+          <div
+            className="min-w-0 flex-1 overflow-y-auto px-4 py-4"
+            onDragLeave={e => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) setNoteDropIndex(null)
+            }}
+          >
+            {bodyHitsBlock}
+            <div className="text-muted-foreground mb-3 flex items-center gap-2 text-sm">
+              <span className="font-medium text-neutral-700">{scopeLabel}</span>
+              <span>· {scopeItems.length} 篇</span>
+              {reorderScope === 'disabled' && !searching && (
+                <span className="text-xs">（在左侧选一个文件夹后，可拖行排序）</span>
+              )}
             </div>
-            {bodyHits.map((hit, i) => (
-              <button
-                key={`${hit.task_id}-${i}`}
-                type="button"
-                onClick={() => navigate(`/note/${hit.task_id}`, { state: { heading: hit.heading } })}
-                className="hover:bg-neutral-50 block w-full cursor-pointer border-b px-3 py-2 text-left last:border-b-0"
-              >
-                <div className="truncate text-sm font-medium">
-                  {hit.title || '未命名笔记'}
-                  <span className="text-muted-foreground font-normal"> · {hit.heading}</span>
-                </div>
-                <div className="text-muted-foreground mt-0.5 line-clamp-2 text-xs">
-                  {renderSnippet(hit.snippet)}
-                </div>
-              </button>
-            ))}
+            {scopeItems.length === 0 ? (
+              <p className="text-muted-foreground py-16 text-center text-sm">
+                {searching ? `没有匹配「${keyword}」的笔记` : '这里还没有笔记'}
+              </p>
+            ) : (
+              <div className="mx-auto flex max-w-5xl flex-col gap-2">
+                {scopeItems.map((item, i) => (
+                  <Fragment key={item.taskId}>
+                    {noteDropIndex === i && <div className="bg-primary h-0.5 rounded-full" />}
+                    <div onDragOver={e => handleRowDragOver(e, i)} onDrop={handleRowDrop}>
+                      <NoteRow
+                        item={item}
+                        folderName={folderName(item.folderId)}
+                        showFolder={activeFolder === null || searching}
+                        onOpen={() => openNote(item.taskId)}
+                        menuEntries={noteEntries(item)}
+                      />
+                    </div>
+                  </Fragment>
+                ))}
+                {noteDropIndex === scopeItems.length && <div className="bg-primary h-0.5 rounded-full" />}
+              </div>
+            )}
           </div>
-        )}
+        </div>
+      )}
+
+      {/* ── 内容区（卡片 / 列表两档）───────────────────────── */}
+      {viewMode !== 'tree' && (
+      <main className="flex-1 overflow-y-auto px-4 py-4">
+        {bodyHitsBlock}
         {showFolders && recent.length > 0 && (
           <div className="mb-4 flex items-center gap-2 text-sm">
             <Clock className="text-muted-foreground h-4 w-4 shrink-0" />
@@ -537,6 +715,7 @@ const LibraryPage = () => {
           </>
         )}
       </main>
+      )}
 
       {/* ── 弹层 ─────────────────────────────────────────── */}
       <NoteFormDialog

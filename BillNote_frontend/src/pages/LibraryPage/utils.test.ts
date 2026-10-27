@@ -24,7 +24,7 @@ describe('formatDate', () => {
 
 describe('coverSrc', () => {
   const item = (over: Partial<ShelfItem> = {}): ShelfItem =>
-    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: 'bilibili', coverUrl: 'http://x/1.jpg', duration: null, createdAt: null, lastOpenedAt: null, hasLocal: false, ...over })
+    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: 'bilibili', coverUrl: 'http://x/1.jpg', duration: null, createdAt: null, lastOpenedAt: null, sortOrder: 0, hasLocal: false, ...over })
   it('远程封面走后端代理且是绝对路径', () => {
     expect(coverSrc(item())).toBe('/api/image_proxy?url=' + encodeURIComponent('http://x/1.jpg'))
   })
@@ -38,9 +38,17 @@ describe('coverSrc', () => {
 
 describe('SORTERS', () => {
   const item = (over: Partial<ShelfItem>): ShelfItem =>
-    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: null, coverUrl: null, duration: null, createdAt: null, lastOpenedAt: null, hasLocal: false, ...over })
+    ({ taskId: 't', title: '', folderId: null, status: 'SUCCESS', platform: null, coverUrl: null, duration: null, createdAt: null, lastOpenedAt: null, sortOrder: 0, hasLocal: false, ...over })
   const list = [item({ taskId: 'a', createdAt: 1, duration: 9, title: '乙' }), item({ taskId: 'b', createdAt: 3, duration: 5, title: '甲' })]
   it('默认最新创建', () => expect(list.sort(SORTERS.created.cmp).map(i => i.taskId)).toEqual(['b', 'a']))
   it('时长最长', () => expect(list.sort(SORTERS.duration.cmp).map(i => i.taskId)).toEqual(['a', 'b']))
   it('标题按中文排', () => expect(list.sort(SORTERS.title.cmp).map(i => i.taskId)).toEqual(['b', 'a']))
+  it('手动排序按 sortOrder，只在本地的任务排最后', () => {
+    const manual = [
+      item({ taskId: 'local', sortOrder: Number.MAX_SAFE_INTEGER }),
+      item({ taskId: 'second', sortOrder: 7 }),
+      item({ taskId: 'first', sortOrder: 2 }),
+    ]
+    expect(manual.sort(SORTERS.manual.cmp).map(i => i.taskId)).toEqual(['first', 'second', 'local'])
+  })
 })
